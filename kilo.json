@@ -1,0 +1,42 @@
+{
+  "llm_provider": {
+    "provider": "mock",
+    "azure": {
+      "endpoint": "https://your-instance.openai.azure.com",
+      "api_key": "${AZURE_OPENAI_API_KEY}",
+      "api_version": "2024-02-01",
+      "deployment_name": "gpt-4o"
+    },
+    "openai": {
+      "api_key": "${OPENAI_API_KEY}",
+      "model": "gpt-4o-mini"
+    },
+    "ollama": {
+      "base_url": "http://localhost:11434",
+      "model": "llama3"
+    }
+  },
+  "storage": {
+    "database_url": "postgresql://localhost/test_automation",
+    "blob_storage_path": "./data/artifacts"
+  },
+  "privacy": {
+    "pii_scrub_enabled": true,
+    "custom_patterns": {}
+  },
+  "orchestrator": {
+    "max_retries": 2,
+    "retry_flaky_seconds": 10,
+    "appium_url": "http://localhost:4723"
+  },
+  "cloud_executor": {
+    "browserstack": {
+      "username": "${BROWSERSTACK_USERNAME}",
+      "access_key": "${BROWSERSTACK_ACCESS_KEY}"
+    },
+    "saucelabs": {
+      "username": "${SAUCELABS_USERNAME}",
+      "access_key": "${SAUCELABS_ACCESS_KEY}"
+    }
+  }
+}

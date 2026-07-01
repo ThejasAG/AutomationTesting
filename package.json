@@ -1,0 +1,30 @@
+{
+  "name": "ios-test-automation",
+  "version": "0.1.0",
+  "description": "AI-powered iOS test automation & RCA platform",
+  "private": true,
+  "scripts": {
+    "test": "pytest automation/tests -v",
+    "test:e2e": "pytest automation/tests/e2e -v",
+    "lint": "ruff check .",
+    "typecheck": "mypy .",
+    "dev": "uvicorn automation.api.main:app --reload"
+  },
+  "dependencies": {
+    "pydantic": ">=2.0",
+    "sqlalchemy": ">=2.0",
+    "psycopg2-binary": ">=2.9",
+    "fastapi": ">=0.100",
+    "uvicorn": ">=0.23",
+    "httpx": ">=0.24",
+    "python-dateutil": ">=2.8",
+    "jinja2": ">=3.0",
+    "markdown": ">=3.0"
+  },
+  "devDependencies": {
+    "pytest": ">=7.4",
+    "ruff": ">=0.0",
+    "mypy": ">=1.5",
+    "pytest-asyncio": ">=0.21"
+  }
+}

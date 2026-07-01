@@ -1,0 +1,8 @@
+
+sqlalchemy
+alembic
+psycopg2-binary
+redis
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart

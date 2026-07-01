@@ -1,0 +1,77 @@
+pipeline {
+    agent any
+    
+    environment {
+        AZURE_OPENAI_API_KEY = credentials('azure-openai-key')
+        SLACK_WEBHOOK = credentials('slack-webhook-url')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Setup Environment') {
+            steps {
+                sh 'python -m pip install --upgrade pip'
+                sh 'pip install -e .'
+                sh 'npm install -g appium'
+                sh 'appium driver install uiautomator2'
+            }
+        }
+        
+        stage('Run Test Suite & AI RCA') {
+            steps {
+                script {
+                    sh 'nohup uvicorn automation.api.main:app --host 0.0.0.0 --port 8000 & sleep 5'
+                    
+                    def response = sh(script: '''
+                        curl -s -X POST http://localhost:8000/automation/run \\
+                          -H "Content-Type: application/json" \\
+                          -d '{
+                            "test_path": "tests/login",
+                            "device_id": "emulator-5554",
+                            "triggered_by": "Jenkins",
+                            "build_number": "'${BUILD_NUMBER}'",
+                            "branch": "'${BRANCH_NAME}'",
+                            "commit_sha": "'${GIT_COMMIT}'"
+                          }'
+                    ''', returnStdout: true).trim()
+                    
+                    def run_id = sh(script: "echo '${response}' | jq -r .run_id", returnStdout: true).trim()
+                    echo "Started Run ID: ${run_id}"
+                    
+                    // Poll for completion
+                    sh """
+                        while true; do
+                            status=\$(curl -s http://localhost:8000/automation/status/${run_id} | jq -r .status)
+                            echo "Current Status: \$status"
+                            if [ "\$status" = "Passed" ] || [ "\$status" = "Failed" ] || [ "\$status" = "Stopped" ]; then
+                                if [ "\$status" = "Failed" ]; then
+                                    exit 1
+                                fi
+                                break
+                            fi
+                            sleep 5
+                        done
+                    """
+                }
+            }
+        }
+        
+        stage('Publish Reports') {
+            steps {
+                archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true
+            }
+        }
+    }
+    
+    post {
+        always {
+            archiveArtifacts artifacts: 'reports/*.md, reports/*.html', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'appium.log', allowEmptyArchive: true
+        }
+    }
+}

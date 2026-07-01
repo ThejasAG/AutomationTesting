@@ -1,0 +1,36 @@
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.10'
+  displayName: 'Use Python 3.10'
+
+- script: |
+    python -m pip install --upgrade pip
+    pip install -e .
+  displayName: 'Install dependencies'
+
+- script: |
+    npm install -g appium
+    appium driver install uiautomator2
+    appium &
+  displayName: 'Setup Appium'
+
+- script: |
+    python -m automation.test_runner.runner
+  displayName: 'Run Automation & AI RCA'
+  env:
+    AZURE_OPENAI_API_KEY: $(AZURE_OPENAI_API_KEY)
+    SLACK_WEBHOOK: $(SLACK_WEBHOOK)
+
+- task: PublishPipelineArtifact@1
+  inputs:
+    targetPath: '$(System.DefaultWorkingDirectory)/reports'
+    artifact: 'reports'
+    publishLocation: 'pipeline'
+  condition: always()
