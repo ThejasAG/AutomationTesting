@@ -1,5 +1,8 @@
 export const API_BASE = "http://localhost:8000/api/v1";
 
+/** Expose base URL for components that build URLs manually (e.g. EventSource). */
+export const getApiBase = () => API_BASE;
+
 export const getAuthToken = () => localStorage.getItem('access_token');
 export const setAuthToken = (token: string | null) => {
     if (token) {
@@ -10,7 +13,7 @@ export const setAuthToken = (token: string | null) => {
     }
 };
 
-const getHeaders = (isJson = true) => {
+export const getHeaders = (isJson = true) => {
     const token = getAuthToken();
     const headers: Record<string, string> = {};
     if (isJson) headers['Content-Type'] = 'application/json';
@@ -25,7 +28,14 @@ const handleResponse = async (res: Response) => {
         throw new Error('Unauthorized');
     }
     if (!res.ok) {
-        throw new Error(`API Error: ${res.status}`);
+        // Try to surface the server's detail message for better error UX
+        try {
+            const body = await res.json();
+            throw new Error(body.detail || `API Error: ${res.status}`);
+        } catch (jsonErr) {
+            if (jsonErr instanceof SyntaxError) throw new Error(`API Error: ${res.status}`);
+            throw jsonErr;
+        }
     }
     return await res.json();
 };
@@ -48,6 +58,8 @@ export interface TestRun {
     commit_sha?: string;
     build_number?: string;
     timeline?: string;
+    /** Distributed execution state (queued | downloading | preparing | running | collecting_evidence | completed | failed | cancelled) */
+    job_state?: string;
 }
 
 export interface RCAReport {
@@ -294,3 +306,130 @@ export async function getQuickHealth(): Promise<any> {
     return await handleResponse(res);
 }
 
+// ── Script Editor: Project File API ─────────────────────────────────────────
+
+export interface FileEntry {
+    path: string;
+    name: string;
+    type: 'file' | 'directory';
+}
+
+export async function getProjectFiles(projectId: string): Promise<FileEntry[]> {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/files`, {
+        headers: getHeaders(),
+    });
+    const data = await handleResponse(res);
+    return data.files as FileEntry[];
+}
+
+export async function getProjectFileContent(
+    projectId: string,
+    filePath: string,
+): Promise<string> {
+    // The backend returns PlainTextResponse, not JSON, so we use res.text().
+    const res = await fetch(
+        `${API_BASE}/projects/${projectId}/files/${encodeURIComponent(filePath)}`,
+        { headers: getHeaders(false) },
+    );
+    if (res.status === 401) {
+        setAuthToken(null);
+        window.location.href = '/login';
+        throw new Error('Unauthorized');
+    }
+    if (!res.ok) {
+        throw new Error(`Failed to load file: ${res.status}`);
+    }
+    return res.text();
+}
+
+export async function saveProjectFile(
+    projectId: string,
+    filePath: string,
+    content: string,
+): Promise<void> {
+    const res = await fetch(
+        `${API_BASE}/projects/${projectId}/files/${encodeURIComponent(filePath)}`,
+        {
+            method: 'PUT',
+            headers: getHeaders(),
+            body: JSON.stringify({ content }),
+        },
+    );
+    await handleResponse(res);
+}
+
+export async function runProjectFile(
+    projectId: string,
+    filePath: string,
+    deviceId: string,
+): Promise<{ run_id: string }> {
+    const res = await fetch(
+        `${API_BASE}/projects/${projectId}/files/${encodeURIComponent(filePath)}/run`,
+        {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({ device_id: deviceId }),
+        },
+    );
+    return handleResponse(res);
+}
+
+// ── AI Chat Session API ───────────────────────────────────────────────────
+
+export interface ChatSessionSummary {
+    session_id: string;
+    title: string;
+    created_at: string;
+    message_count: number;
+}
+
+export interface ChatSessionDetail {
+    session_id: string;
+    title: string;
+    messages: Array<{
+        role: 'user' | 'assistant';
+        content: string;
+        message_type: 'text' | 'structured';
+        timestamp: string;
+    }>;
+}
+
+/** Returns the list of recent chat sessions. */
+export async function getSessions(): Promise<ChatSessionSummary[]> {
+    const res = await fetch(`${API_BASE}/intelligence/chat/sessions`, {
+        headers: getHeaders(),
+    });
+    const data = await handleResponse(res);
+    return data.sessions as ChatSessionSummary[];
+}
+
+/** Returns full message history for a session. */
+export async function getSession(sessionId: string): Promise<ChatSessionDetail> {
+    const res = await fetch(`${API_BASE}/intelligence/chat/sessions/${sessionId}`, {
+        headers: getHeaders(),
+    });
+    return handleResponse(res);
+}
+
+/** Deletes a session and all its messages. */
+export async function deleteSession(sessionId: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/intelligence/chat/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: getHeaders(),
+    });
+    await handleResponse(res);
+}
+
+/**
+ * Fallback: synchronous (non-streaming) chat via POST.
+ * Used when EventSource streaming fails.
+ */
+export async function sendChat(query: string, context?: Record<string, unknown>): Promise<string> {
+    const res = await fetch(`${API_BASE}/intelligence/chat`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({ query, context: context ?? {} }),
+    });
+    const data = await handleResponse(res);
+    return data.reply as string;
+}

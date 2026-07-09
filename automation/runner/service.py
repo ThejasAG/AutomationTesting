@@ -73,19 +73,22 @@ class RunnerService:
         self._add_timeline_event(run_id, "Run Queued")
         
         # Create run record in the database
+        # NOTE: SQLAlchemy DateTime columns require actual datetime objects,
+        # not ISO-format strings — do NOT call .isoformat() here.
+        now = datetime.utcnow()
         run_record = {
             "id": run_id,
             "project_id": project_id,
             "test_suite": project_name,
             "test_name": "Execution",
             "status": "queued",
-            "started_at": datetime.utcnow().isoformat(),
+            "started_at": now,
             "completed_at": None,
             "duration_ms": None,
             "device_name": device_id,
             "os_version": device.platform_version,
             "platform": device.platform,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": now,
             "triggered_by": triggered_by
         }
         

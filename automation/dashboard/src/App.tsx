@@ -1,6 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import type { ReactElement } from 'react';
-import { Boxes, LayoutDashboard, Settings, PlayCircle, GitMerge, BarChart3, BrainCircuit, Activity, Shield, Server } from 'lucide-react';
+import { Boxes, LayoutDashboard, Settings, PlayCircle, GitMerge, BarChart3, BrainCircuit, Activity, Shield, Server, Wand2, Code2, MessageSquare } from 'lucide-react';
 import DashboardHome from './pages/DashboardHome';
 import RunDetails from './pages/RunDetails';
 import SettingsPage from './pages/SettingsPage';
@@ -13,6 +13,9 @@ import OperationsDashboard from './pages/OperationsDashboard';
 import DeviceOpsCenter from './pages/DeviceOpsCenter';
 import AdminCenter from './pages/AdminCenter';
 import { LoginPage } from './pages/LoginPage';
+import ScriptGeneratorPage from './pages/ScriptGeneratorPage';
+import ScriptEditorPage from './pages/ScriptEditorPage';
+import ChatPage from './pages/ChatPage';
 import { getAuthToken } from './api';
 
 const ProtectedRoute = ({ children }: { children: ReactElement }) => {
@@ -54,6 +57,18 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => (
         <NavLink to="/insights" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <BrainCircuit size={20} />
           AI Insights
+        </NavLink>
+        <NavLink to="/script-generator" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <Wand2 size={20} />
+          Script Generator
+        </NavLink>
+        <NavLink to="/script-editor" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <Code2 size={20} />
+          Script Editor
+        </NavLink>
+        <NavLink to="/chat" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <MessageSquare size={20} />
+          AI Chat
         </NavLink>
         <NavLink to="/command-center" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <BrainCircuit size={20} />
@@ -98,6 +113,9 @@ function App() {
         <Route path="/analytics" element={<ProtectedRoute><ProtectedLayout><AnalyticsPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/run/:id" element={<ProtectedRoute><ProtectedLayout><RunDetails /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><ProtectedLayout><SettingsPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/script-generator" element={<ProtectedRoute><ProtectedLayout><ScriptGeneratorPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/script-editor" element={<ProtectedRoute><ProtectedLayout><ScriptEditorPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/chat" element={<ProtectedRoute><ProtectedLayout><ChatPage /></ProtectedLayout></ProtectedRoute>} />
       </Routes>
     </Router>
   );

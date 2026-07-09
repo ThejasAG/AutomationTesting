@@ -1,10 +1,221 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getRun, getRCA, getEvidence } from '../api';
+import { getRun, getRCA, getEvidence, getAuthToken } from '../api';
 import type { TestRun, RCAReport, Evidence } from '../api';
 import { format } from 'date-fns';
-import { ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, Monitor, Wifi, WifiOff } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+
+// ── Live View Component ──────────────────────────────────────────────────────
+
+const ACTIVE_JOB_STATES = new Set([
+  'queued',
+  'running',
+  'collecting_evidence',
+  'downloading',
+  'preparing',
+]);
+
+type StreamState = 'waiting' | 'streaming' | 'ended';
+
+interface LiveViewProps {
+  runId: string;
+  jobState?: string | null;
+}
+
+function LiveView({ runId, jobState }: LiveViewProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const [streamState, setStreamState] = useState<StreamState>('waiting');
+
+  const isActive = jobState && ACTIVE_JOB_STATES.has(jobState);
+
+  useEffect(() => {
+    if (!isActive) return;
+
+    const token = getAuthToken();
+    if (!token) return;
+
+    const wsUrl = `ws://localhost:8000/ws/stream/${runId}?token=${encodeURIComponent(token)}`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+    ws.binaryType = 'blob';
+
+    ws.onmessage = async (event: MessageEvent) => {
+      // Binary frame → draw on canvas
+      if (event.data instanceof Blob) {
+        setStreamState('streaming');
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        try {
+          const blob = new Blob([event.data]);
+          const bitmap = await createImageBitmap(blob);
+          ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          bitmap.close();
+        } catch {
+          // Corrupt frame — skip silently
+        }
+        return;
+      }
+      // Text/JSON frame → check for end signal
+      if (typeof event.data === 'string') {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'ended') {
+            setStreamState('ended');
+            ws.close(1000, 'stream ended');
+          }
+        } catch {
+          // Ignore non-JSON text frames
+        }
+      }
+    };
+
+    ws.onerror = () => {
+      setStreamState(prev => (prev === 'waiting' ? 'ended' : prev));
+    };
+
+    ws.onclose = () => {
+      setStreamState(prev => (prev === 'streaming' || prev === 'waiting' ? 'ended' : prev));
+    };
+
+    return () => {
+      ws.close();
+      wsRef.current = null;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, isActive]);
+
+  if (!isActive) return null;
+
+  return (
+    <div className="card animate-fade-in" style={{ marginBottom: '24px' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+        <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+          <Monitor size={18} color="var(--accent-primary)" />
+          Live Device View
+        </h3>
+        <div
+          className="badge"
+          style={{
+            background: streamState === 'streaming'
+              ? 'rgba(52, 211, 153, 0.15)'
+              : streamState === 'ended'
+              ? 'rgba(255,255,255,0.06)'
+              : 'rgba(251, 191, 36, 0.15)',
+            color: streamState === 'streaming'
+              ? 'var(--success)'
+              : streamState === 'ended'
+              ? 'var(--text-muted)'
+              : 'var(--warning)',
+          }}
+        >
+          {streamState === 'streaming'
+            ? <><Wifi size={12} /> Live</>
+            : streamState === 'ended'
+            ? <><WifiOff size={12} /> Ended</>
+            : <><Wifi size={12} /> Connecting…</>}
+        </div>
+      </div>
+
+      {/* Canvas wrapper */}
+      <div
+        style={{
+          position: 'relative',
+          width: 360,
+          height: 640,
+          background: '#000',
+          borderRadius: 'var(--radius-md)',
+          overflow: 'hidden',
+          margin: '0 auto',
+          border: '1px solid var(--border-color)',
+          boxShadow: '0 0 40px rgba(0,0,0,0.6)',
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          width={360}
+          height={640}
+          style={{ display: 'block', width: '100%', height: '100%' }}
+        />
+
+        {/* Waiting overlay */}
+        {streamState === 'waiting' && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexDirection: 'column',
+              gap: '16px',
+              background: 'rgba(10,10,15,0.92)',
+            }}
+          >
+            <div style={{ position: 'relative', width: 56, height: 56 }}>
+              <div style={{
+                position: 'absolute', inset: 0,
+                borderRadius: '50%',
+                border: '3px solid rgba(129,140,248,0.2)',
+              }} />
+              <div style={{
+                position: 'absolute', inset: 0,
+                borderRadius: '50%',
+                border: '3px solid transparent',
+                borderTopColor: 'var(--accent-primary)',
+                animation: 'lv-spin 1s linear infinite',
+              }} />
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <p style={{ color: 'var(--text-primary)', fontWeight: 500, margin: 0 }}>
+                Waiting for stream…
+              </p>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '4px' }}>
+                Frames will appear once the test starts
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Stream ended overlay */}
+        {streamState === 'ended' && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexDirection: 'column',
+              gap: '8px',
+              background: 'rgba(0,0,0,0.55)',
+              backdropFilter: 'blur(4px)',
+            }}
+          >
+            <WifiOff size={32} color="var(--text-muted)" />
+            <p style={{ color: 'var(--text-secondary)', fontSize: '1rem', margin: 0 }}>
+              Stream ended
+            </p>
+          </div>
+        )}
+      </div>
+
+      <style>{`
+        @keyframes lv-spin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+
+// ── Main RunDetails Page ─────────────────────────────────────────────────────
 
 export default function RunDetails() {
   const { id } = useParams<{id: string}>();
@@ -63,6 +274,9 @@ export default function RunDetails() {
           </p>
         </div>
       </header>
+
+      {/* ── Live View — shown for in-progress runs ── */}
+      {id && <LiveView runId={id} jobState={run.job_state} />}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '24px', alignItems: 'start' }}>
         <div>

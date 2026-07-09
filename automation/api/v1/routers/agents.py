@@ -33,6 +33,12 @@ def register_agent(req: RegisterAgentRequest, db: Session = Depends(get_db)):
     db.add(agent)
     db.commit()
     db.refresh(agent)
+
+    # Sync devices into the in-memory cache immediately on registration so the
+    # device is available right away — not only after the first heartbeat (10s).
+    from automation.device_manager.service import device_service
+    device_service.sync_agent_devices(agent.id, req.connected_devices)
+
     return {"id": agent.id, "status": "registered"}
 
 @router.post("/{agent_id}/heartbeat")

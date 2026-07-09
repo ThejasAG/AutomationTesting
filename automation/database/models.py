@@ -192,3 +192,40 @@ class SystemAlert(Base):
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
+
+
+# ── Chat Session Storage ────────────────────────────────────────────────────
+
+class ChatSession(Base):
+    """Persistent chat session — one row per conversation thread."""
+    __tablename__ = "chat_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), nullable=True, index=True)
+    # Title is set to the first user message (truncated to 100 chars).
+    title = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    messages = relationship(
+        "ChatMessage",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.created_at",
+    )
+
+
+class ChatMessage(Base):
+    """Individual message within a chat session."""
+    __tablename__ = "chat_messages"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(
+        String(36), ForeignKey("chat_sessions.id"), nullable=False, index=True
+    )
+    role = Column(String(20), nullable=False)  # "user" | "assistant"
+    content = Column(Text, nullable=False)
+    # "text" for plain/markdown, "structured" for JSON analysis cards
+    message_type = Column(String(20), default="text")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("ChatSession", back_populates="messages")

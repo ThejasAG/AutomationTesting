@@ -14,7 +14,9 @@ dependencies = [
     "jinja2>=3.0",
     "markdown>=3.0",
     "Appium-Python-Client>=3.0",
-    "GitPython>=3.1"
+    "GitPython>=3.1",
+    "requests",
+    "pyyaml"
 ]
 
 [project.optional-dependencies]
@@ -24,6 +26,9 @@ dev = [
     "mypy>=1.5",
     "pytest-asyncio>=0.21",
 ]
+
+[tool.setuptools.packages.find]
+include = ["automation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["automation/tests"]
