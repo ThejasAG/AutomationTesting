@@ -31,6 +31,7 @@ from automation.api.v1.routers.intelligence import router as intelligence_router
 from automation.api.v1.routers.agents import router as agents_router
 from automation.api.v1.routers.jobs import router as jobs_router
 from automation.api.v1.routers.ops import router as ops_router
+from automation.api.v1.routers import webhooks
 from automation.utils.security import install_secret_filter
 from automation.streaming.ws_manager import stream_manager
 from fastapi import APIRouter
@@ -85,14 +86,20 @@ async def stream_run(websocket: WebSocket, run_id: str):
     """
     token = websocket.query_params.get("token", "")
 
+    # Debug/test streams (run_id prefixed "test-"/"debug-") bypass JWT so the
+    # standalone stream-test page and the /debug/stream-test endpoint can be
+    # viewed without a dashboard login. Real run streams still require a token.
+    is_debug_stream = run_id.startswith(("test-", "debug-"))
+
     # Validate JWT before accepting the WebSocket handshake.
-    try:
-        if not token:
-            raise JWTError("missing token")
-        jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
-        await websocket.close(code=4001)
-        return
+    if not is_debug_stream:
+        try:
+            if not token:
+                raise JWTError("missing token")
+            jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        except JWTError:
+            await websocket.close(code=4001)
+            return
 
     await websocket.accept()
 
@@ -140,6 +147,9 @@ v1_router.include_router(ops_router)
 # Mount external routers
 app.include_router(appium_router)
 
+# GitHub webhooks — mounted directly (NO JWT dependency; GitHub calls these).
+app.include_router(webhooks.router, prefix="/api/v1")
+
 
 # ── Agent Frame Upload ──────────────────────────────────────────────────────
 @v1_router.post("/jobs/{run_id}/stream/frame")
@@ -166,6 +176,46 @@ async def upload_stream_frame(run_id: str, request: Request):
         stream_manager.push_frame(run_id, body)
 
     return {"status": "ok"}
+
+
+# ── Debug: Standalone Stream Test ───────────────────────────────────────────
+@v1_router.post("/debug/stream-test/{run_id}")
+async def debug_stream_test(run_id: str):
+    """Stream the booted iOS simulator for 30 seconds without running a test job.
+
+    Captures the iPhone 16 Pro simulator screen via ``xcrun simctl`` and pushes
+    frames into the stream manager. View live at
+    ``ws://localhost:8000/ws/stream/{run_id}`` (use a "test-"/"debug-" prefixed
+    run_id to skip the JWT check).
+    """
+    import threading
+    from automation.streaming.screen_capture import IOSScreenCapture
+
+    def _run_capture() -> None:
+        stop_event = threading.Event()
+        capture = IOSScreenCapture(
+            device_id="booted",
+            stop_event=stop_event,
+            on_frame=lambda png: stream_manager.push_frame(run_id, png),
+            fps=4.0,
+        )
+        cap_thread = threading.Thread(
+            target=capture.start, daemon=True, name=f"debug-stream-{run_id[:8]}"
+        )
+        cap_thread.start()
+        # Stream for 30 seconds, then finalise the stream.
+        stop_event.wait(timeout=30)
+        stop_event.set()
+        cap_thread.join(timeout=6)
+        stream_manager.mark_ended(run_id)
+
+    threading.Thread(target=_run_capture, daemon=True).start()
+
+    return {
+        "status": "streaming",
+        "run_id": run_id,
+        "websocket": f"ws://localhost:8000/ws/stream/{run_id}",
+    }
 
 
 # ── Standard v1 Endpoints ───────────────────────────────────────────────────

@@ -8,9 +8,9 @@ import requests
 import logging
 from typing import List, Dict, Any
 
-# Ensure ADB and global npm (Appium) are in PATH for the agent's subprocesses
-os.environ["PATH"] += os.pathsep + r"C:\Users\Personal\AppData\Local\Android\Sdk\platform-tools"
-os.environ["PATH"] += os.pathsep + r"C:\Users\Personal\AppData\Roaming\npm"
+# Device tooling (adb for Android, xcrun/simctl for iOS) and Appium are expected
+# to be on the agent host's PATH. Configure PATH via the environment/shell rather
+# than hardcoding machine-specific SDK locations here.
 
 from automation.device_manager.discovery.android import AndroidDiscoveryProvider
 from automation.device_manager.discovery.ios import IOSDiscoveryProvider
@@ -30,10 +30,11 @@ def get_capabilities() -> Dict[str, Any]:
         "frameworks": ["appium"],
     }
 
-# Virtual device injected when no real ADB device is connected.
-# This allows the full job-dispatch and agent-execution pipeline to be
-# tested without physical hardware or an Android emulator.
-VIRTUAL_DEVICE = {
+# Virtual device injected when no real device is connected. This allows the full
+# job-dispatch and agent-execution pipeline to be tested without physical hardware
+# or an emulator/simulator. The fallback is chosen to match the host OS: a macOS
+# host implies an iOS toolchain, everything else defaults to Android.
+VIRTUAL_ANDROID_DEVICE = {
     "id": "virtual-android-emulator",
     "name": "Virtual Android Emulator",
     "manufacturer": "Google",
@@ -41,6 +42,22 @@ VIRTUAL_DEVICE = {
     "platform": "Android",
     "platform_version": "13.0"
 }
+
+VIRTUAL_IOS_DEVICE = {
+    "id": "virtual-ios-simulator",
+    "name": "Virtual iOS Simulator",
+    "manufacturer": "Apple",
+    "model": "iPhone 16 Pro (Virtual)",
+    "platform": "iOS",
+    "platform_version": "18.3"
+}
+
+
+def get_virtual_device() -> Dict[str, Any]:
+    """Return an OS-appropriate virtual device for pipeline testing."""
+    if platform.system() == "Darwin":
+        return VIRTUAL_IOS_DEVICE
+    return VIRTUAL_ANDROID_DEVICE
 
 def discover_devices() -> List[Dict[str, Any]]:
     providers = [AndroidDiscoveryProvider(), IOSDiscoveryProvider()]
@@ -62,8 +79,8 @@ def discover_devices() -> List[Dict[str, Any]]:
     # Fallback: inject a virtual device so the platform can dispatch jobs
     # even when no physical/emulator device is connected via ADB.
     if not devices:
-        logger.info("No real devices found — reporting virtual emulator for pipeline testing.")
-        devices.append(VIRTUAL_DEVICE)
+        logger.info("No real devices found — reporting virtual device for pipeline testing.")
+        devices.append(get_virtual_device())
 
     return devices
 

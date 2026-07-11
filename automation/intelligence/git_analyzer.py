@@ -41,6 +41,41 @@ class GitImpactAnalyzer:
             logger.error(f"Git diff extraction error: {e}")
             return []
 
+    def extract_files_from_webhook(self, payload: Dict[str, Any]) -> List[str]:
+        """Extracts changed file paths from a GitHub webhook payload.
+
+        - Push events: union of commits[].added + commits[].modified (+ removed),
+          plus head_commit if present.
+        - Pull request events: file paths from the pull_request payload when the
+          diff/files list is included (head/base comparison).
+        Returns a de-duplicated flat list of file paths.
+        """
+        files = set()
+
+        # ── Push events ──────────────────────────────────────────────
+        for commit in payload.get("commits", []) or []:
+            files.update(commit.get("added", []) or [])
+            files.update(commit.get("modified", []) or [])
+            files.update(commit.get("removed", []) or [])
+
+        head_commit = payload.get("head_commit") or {}
+        if head_commit:
+            files.update(head_commit.get("added", []) or [])
+            files.update(head_commit.get("modified", []) or [])
+            files.update(head_commit.get("removed", []) or [])
+
+        # ── Pull request events (head/base comparison) ───────────────
+        pr = payload.get("pull_request", {}) or {}
+        if pr:
+            for f in pr.get("files", []) or []:
+                # GitHub's files API entries are dicts with a "filename";
+                # tolerate plain-string lists too.
+                fname = f.get("filename") if isinstance(f, dict) else f
+                if fname:
+                    files.add(fname)
+
+        return [f for f in files if f]
+
     def identify_modules(self, changed_files: List[str], custom_map: Dict[str, List[str]] = None) -> List[str]:
         """Maps changed files to higher-level application modules."""
         mapping = custom_map or self.default_module_map

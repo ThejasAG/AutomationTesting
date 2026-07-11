@@ -3,6 +3,7 @@ import socket
 import logging
 import time
 import os
+import urllib.request
 from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,36 @@ def get_free_port():
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def wait_for_appium_ready(port: int, process: subprocess.Popen, timeout: int = 30) -> None:
+    """Poll GET http://127.0.0.1:{port}/status until Appium is ready.
+
+    Polls every 0.5s for up to *timeout* seconds. Returns once /status
+    answers HTTP 200. Raises RuntimeError if the process dies or the
+    timeout elapses without a 200.
+    """
+    status_url = f"http://127.0.0.1:{port}/status"
+    logger.info(f"Waiting for Appium on port {port}...")
+    start = time.time()
+    deadline = start + timeout
+    while time.time() < deadline:
+        # If the process exited, there's no point in polling further.
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            logger.error(f"Appium failed to start: {stderr}")
+            raise RuntimeError(f"Appium failed to start on port {port}")
+        try:
+            with urllib.request.urlopen(status_url, timeout=2) as resp:
+                if resp.status == 200:
+                    elapsed = time.time() - start
+                    logger.info(f"Appium ready on port {port} after {elapsed:.1f}s")
+                    return
+        except Exception:
+            pass
+        time.sleep(0.5)
+    raise RuntimeError(f"Appium failed to start on port {port}")
+
 
 class AppiumSession:
     def __init__(self, session_id: str, device_id: str, port: int, process: subprocess.Popen):
@@ -32,27 +63,23 @@ class AppiumProcessManager:
         """Spawns a real Appium process on a dynamic port"""
         port = get_free_port()
         logger.info(f"Starting real Appium server for run {run_id} on port {port}")
-        
+
         # Use npx to launch appium to ensure it runs even if not globally installed
         npx_cmd = "npx.cmd" if os.name == "nt" else "npx"
         cmd = [npx_cmd, "appium", "-p", str(port), "--log-level", "error"]
-        
+
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
         )
-        
-        # Wait a moment for appium to start
-        time.sleep(3)
-        
-        # Check if it crashed immediately
-        if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            logger.error(f"Appium failed to start: {stderr}")
-            raise Exception("Appium process crashed on startup.")
-            
+
+        # Block until Appium answers /status with 200 (or fail after 30s).
+        # Only after this do we hand the port back to the caller, so tests
+        # never connect before the server is listening.
+        wait_for_appium_ready(port, process, timeout=30)
+
         session = AppiumSession(
             session_id=run_id,
             device_id=device_id,
@@ -73,11 +100,11 @@ class AppiumProcessManager:
             except Exception as e:
                 logger.warning(f"Failed to cleanly terminate Appium: {e}")
                 session.process.kill()
-                
+
             del self.active_sessions[session_id]
             return True
         return False
-        
+
     def get_session(self, session_id: str) -> AppiumSession:
         return self.active_sessions.get(session_id)
 

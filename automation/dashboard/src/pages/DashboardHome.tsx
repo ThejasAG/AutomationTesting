@@ -83,7 +83,7 @@ export default function DashboardHome() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
               <Activity size={18} /> Total Failure Rate
             </div>
-            <div className="stat-value">{trends.failure_rate}%</div>
+            <div className="stat-value">{Number(trends.failure_rate).toFixed(1)}%</div>
             <div style={{ marginTop: '8px', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
               Out of {trends.total_executions} total executions
             </div>

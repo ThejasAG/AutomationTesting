@@ -1,9 +1,11 @@
 import { useEffect, useState, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { getDevices, getProjects, addProject, startRun, stopRun, getLiveStatus } from '../api';
 import type { Device, Project } from '../api';
 import { Play, Square, Smartphone, FolderTree, Plus, GitBranch, Activity, CheckCircle2, XCircle } from 'lucide-react';
 
 export default function AutomationPage() {
+    const navigate = useNavigate();
     const [devices, setDevices] = useState<Device[]>([]);
     const [projects, setProjects] = useState<Project[]>([]);
     const [selectedDevice, setSelectedDevice] = useState('');
@@ -91,6 +93,9 @@ export default function AutomationPage() {
             setActiveRunId(runId);
             setRunStatus({ status: 'Started', logs: [], duration_ms: 0 });
             setPolling(true);
+            // Jump straight to the Run Details page so the Live View panel opens
+            // immediately (it renders "Waiting for stream…" until frames arrive).
+            navigate(`/run/${runId}`);
         } catch (e: any) {
             alert(`Failed to start run: ${e.message}`);
         }

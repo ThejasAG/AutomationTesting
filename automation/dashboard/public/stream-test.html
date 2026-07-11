@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Simulator Stream Test</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0a0a0f;
+      color: #e6e6ee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+      padding: 32px 16px;
+    }
+    h1 { font-size: 1.25rem; margin: 0; }
+    #status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    #status .dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
+    }
+    .connecting { background: rgba(251,191,36,0.15); color: #fbbf24; }
+    .streaming  { background: rgba(52,211,153,0.15); color: #34d399; }
+    .ended      { background: rgba(255,255,255,0.08); color: #9ca3af; }
+    .error      { background: rgba(248,113,113,0.15); color: #f87171; }
+    #frame-wrap {
+      position: relative;
+      width: 300px;
+      height: 650px;
+      background: #000;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 0 50px rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #screen { max-width: 100%; max-height: 100%; display: none; }
+    #placeholder { color: #6b7280; font-size: 0.9rem; text-align: center; padding: 0 24px; }
+    #meta { font-family: monospace; font-size: 0.8rem; color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <h1>iOS Simulator — Live Stream Test</h1>
+  <div id="status" class="connecting"><span class="dot"></span><span id="status-text">connecting…</span></div>
+
+  <div id="frame-wrap">
+    <div id="placeholder">Waiting for stream…</div>
+    <img id="screen" alt="Simulator screen" />
+  </div>
+
+  <div id="meta">run: <span id="run-id"></span> · frames: <span id="frame-count">0</span></div>
+
+  <script>
+    // Plain HTML/JS — connects to the debug stream for run_id "test-123".
+    // The backend bypasses JWT for run_ids prefixed "test-"/"debug-".
+    var RUN_ID = "test-123";
+    var WS_URL = "ws://localhost:8000/ws/stream/" + RUN_ID;
+
+    var statusEl = document.getElementById("status");
+    var statusText = document.getElementById("status-text");
+    var img = document.getElementById("screen");
+    var placeholder = document.getElementById("placeholder");
+    var frameCountEl = document.getElementById("frame-count");
+    document.getElementById("run-id").textContent = RUN_ID;
+
+    var frames = 0;
+    var currentUrl = null;
+
+    function setStatus(cls, text) {
+      statusEl.className = cls;
+      statusText.textContent = text;
+    }
+
+    var ws = new WebSocket(WS_URL);
+    ws.binaryType = "blob";
+
+    ws.onopen = function () {
+      setStatus("connecting", "connected — waiting for frames…");
+    };
+
+    ws.onmessage = function (event) {
+      // Binary frame → render as PNG in the <img> tag.
+      if (event.data instanceof Blob) {
+        setStatus("streaming", "streaming");
+        var url = URL.createObjectURL(event.data);
+        img.onload = function () {
+          // Revoke the previous object URL to avoid leaking memory.
+          if (currentUrl) URL.revokeObjectURL(currentUrl);
+          currentUrl = url;
+        };
+        img.src = url;
+        img.style.display = "block";
+        placeholder.style.display = "none";
+        frames += 1;
+        frameCountEl.textContent = String(frames);
+        return;
+      }
+      // Text/JSON frame → check for the end-of-stream signal.
+      if (typeof event.data === "string") {
+        try {
+          var msg = JSON.parse(event.data);
+          if (msg.type === "ended") {
+            setStatus("ended", "stream ended");
+            ws.close(1000, "stream ended");
+          }
+        } catch (e) { /* ignore non-JSON text */ }
+      }
+    };
+
+    ws.onerror = function () {
+      setStatus("error", "connection error");
+    };
+
+    ws.onclose = function () {
+      if (statusEl.className !== "ended") {
+        setStatus("ended", "disconnected");
+      }
+    };
+  </script>
+</body>
+</html>

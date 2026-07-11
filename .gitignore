@@ -1,1 +1,15 @@
-.aider*
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Node
+node_modules/
+
+# Reports
+reports/
+
+# Database
+*.db

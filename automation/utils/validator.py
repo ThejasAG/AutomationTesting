@@ -66,6 +66,16 @@ def _run(cmd: List[str], cwd: Optional[str] = None, timeout: int = 10) -> Option
         return None
 
 
+def _looks_like_ios_udid(device_id: Optional[str]) -> bool:
+    """iOS simulator UDIDs are 36-char hex strings with dashes (8-4-4-4-12)."""
+    if not device_id or len(device_id) != 36:
+        return False
+    parts = device_id.split("-")
+    if len(parts) != 5 or [len(p) for p in parts] != [8, 4, 4, 4, 12]:
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in device_id.replace("-", ""))
+
+
 class EnvironmentValidator:
     """
     Validates the complete pre-execution environment for a given project.
@@ -151,7 +161,10 @@ class EnvironmentValidator:
             )
         return None
 
-    def check_adb_available(self) -> Optional[ValidationIssue]:
+    def check_adb_available(self, platform: str = "android") -> Optional[ValidationIssue]:
+        if platform == "ios":
+            # iOS uses xcrun/simctl, not ADB — this check is not applicable.
+            return None
         if not shutil.which("adb"):
             return ValidationIssue(
                 check="ADB Available",
@@ -163,7 +176,28 @@ class EnvironmentValidator:
             )
         return None
 
-    def check_device_connected(self, device_id: str) -> Optional[ValidationIssue]:
+    def check_device_connected(self, device_id: str, platform: str = "android") -> Optional[ValidationIssue]:
+        if platform == "ios":
+            out = _run(["xcrun", "simctl", "list", "devices", "booted"])
+            if out is None:
+                return ValidationIssue(
+                    check="Simulator Booted",
+                    problem="Could not query simctl for booted simulators.",
+                    cause="xcrun/simctl unavailable — Xcode command line tools not installed.",
+                    impact="Cannot run automation on an iOS simulator.",
+                    resolution="Install Xcode and command line tools: xcode-select --install",
+                    is_fatal=False
+                )
+            if device_id not in out:
+                return ValidationIssue(
+                    check=f"Simulator Booted ({device_id})",
+                    problem=f"Simulator '{device_id}' is not booted.",
+                    cause="The iOS simulator is shut down, or the UDID is incorrect.",
+                    impact="Automation cannot be executed without a booted simulator.",
+                    resolution=f"Boot it: xcrun simctl boot {device_id} (or launch it from Simulator.app).",
+                    is_fatal=False
+                )
+            return None
         if not shutil.which("adb"):
             return None  # Already caught
         out = _run(["adb", "devices"])
@@ -185,17 +219,18 @@ class EnvironmentValidator:
             )
         return None
 
-    def check_appium_available(self) -> Optional[ValidationIssue]:
+    def check_appium_available(self, platform: str = "android") -> Optional[ValidationIssue]:
         out = _run(["npx", "appium", "--version"], timeout=15)
         if not out:
             out = _run(["appium", "--version"], timeout=15)
         if not out:
+            driver = "xcuitest" if platform == "ios" else "uiautomator2"
             return ValidationIssue(
                 check="Appium Available",
                 problem="Appium is not installed or not accessible.",
                 cause="Appium was not installed globally or via npx.",
                 impact="Cannot start Appium server for device automation.",
-                resolution="Install Appium: npm install -g appium && appium driver install uiautomator2",
+                resolution=f"Install Appium: npm install -g appium && appium driver install {driver}",
                 is_fatal=False
             )
         return None
@@ -240,11 +275,20 @@ class EnvironmentValidator:
 
     # ── Full Validation Run ──────────────────────────────────────────────────
 
-    def validate_pre_execution(self, device_id: Optional[str] = None) -> ValidationResult:
+    def validate_pre_execution(
+        self, device_id: Optional[str] = None, platform: Optional[str] = None
+    ) -> ValidationResult:
         """
         Run all pre-execution checks. Returns a ValidationResult.
         Fatal issues block execution; warnings allow continuation with a logged notice.
+
+        *platform* ("ios"/"android") selects the device-tooling checks. When not
+        supplied it is inferred from the device-id format (iOS simulator UDID vs
+        ADB serial), defaulting to "android".
         """
+        if platform is None:
+            platform = "ios" if _looks_like_ios_udid(device_id) else "android"
+
         fatal_issues: List[ValidationIssue] = []
         warnings: List[ValidationIssue] = []
 
@@ -254,14 +298,14 @@ class EnvironmentValidator:
             self.check_venv_healthy(),
             self.check_dependencies_installed(),
             self.check_git_available(),
-            self.check_adb_available(),
-            self.check_appium_available(),
+            self.check_adb_available(platform),
+            self.check_appium_available(platform),
             self.check_python_version_compat(),
             self.check_node_version_compat(),
         ]
 
         if device_id:
-            checks.append(self.check_device_connected(device_id))
+            checks.append(self.check_device_connected(device_id, platform))
 
         for issue in checks:
             if issue is None:

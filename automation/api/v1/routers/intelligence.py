@@ -250,7 +250,7 @@ def _call_claude(api_key: str, system: str, user: str) -> str:
     resp = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        json={"model": "claude-3-haiku-20240307", "max_tokens": 4096, "system": system, "messages": [{"role": "user", "content": user}]},
+        json={"model": "claude-haiku-4-5-20251001", "max_tokens": 4096, "system": system, "messages": [{"role": "user", "content": user}]},
         timeout=60,
     )
     resp.raise_for_status()

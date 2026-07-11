@@ -69,7 +69,7 @@ class AzureOpenAIProvider(LLMProvider):
         self._api_version = api_version
         self._deployment_name = deployment_name
         self._max_retries = max_retries
-        self._client = httpx.AsyncClient(
+        self._client = httpx.Client(
             timeout=120.0,
             headers={
                 "api-key": api_key,
@@ -130,7 +130,7 @@ class OpenAIProvider(LLMProvider):
     def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
         self._api_key = api_key
         self._model = model
-        self._client = httpx.AsyncClient(
+        self._client = httpx.Client(
             timeout=120.0,
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -189,7 +189,7 @@ class OllamaProvider(LLMProvider):
     def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3"):
         self._base_url = base_url.rstrip("/")
         self._model = model
-        self._client = httpx.AsyncClient(timeout=120.0)
+        self._client = httpx.Client(timeout=120.0)
 
     @property
     def name(self) -> str:
