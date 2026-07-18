@@ -17,12 +17,16 @@ rather than pretending. Fix those app-side blockers and the same run completes.
 
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
 import threading
 import time
 import uuid
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
+import httpx
 from appium import webdriver
 from appium.options.ios import XCUITestOptions
 
@@ -30,6 +34,9 @@ from automation.database.config import SessionLocal
 from automation.database.models import ScenarioResult, TestRun
 from automation.projects.repository import repository_manager as rm
 from automation.intelligence.scenario_runner import ScenarioRunner
+from automation.projects.builder import app_builder
+
+logger = logging.getLogger("cross_app")
 
 CONSUMER_PROJECT_ID = "bd34a47c-c099-4d36-ac61-810edfff31ca"
 BUSINESS_PROJECT_ID = "1519bec5-d14c-45d9-9616-891b98c6e2d8"
@@ -39,6 +46,63 @@ BUSINESS_BUNDLE = "org.vyapy.sarls.vyabusinessipad"
 DEFAULT_CONSUMER_UDID = "DA24A392-FF1B-4283-A5CE-CDDE0D000D21"   # iPhone 16 Pro
 DEFAULT_BUSINESS_UDID = "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"   # iPad Pro 11"
 APPIUM_URL = "http://127.0.0.1:4723"
+
+# The Business app is a SEPARATE React Native app — it cannot share Metro on
+# 8081 (which serves the Consumer bundle), so it runs its own packager on 8082
+# and is pointed at it via RCTBundleURLProvider's RCT_jsLocation user-default.
+BUSINESS_METRO_PORT = 8082
+# Business login labels — captured live once the app loads from :8082.
+BIZ_EMAIL_FIELD = "emailValue"
+BIZ_PASSWORD_FIELD = "passwordValue"
+BIZ_SIGNIN_BTN = "signInBtn"
+
+
+def ensure_business_metro(udid: str) -> bool:
+    """Start the Business app's own Metro on 8082 and point the app at it.
+
+    Returns True when :8082 answers. Without this the iPad app stalls on its
+    splash because 8081 is serving the Consumer bundle.
+    """
+    # Already up?
+    try:
+        if httpx.get(f"http://localhost:{BUSINESS_METRO_PORT}/status", timeout=3).status_code == 200:
+            pass
+        else:
+            raise RuntimeError("not running")
+    except Exception:
+        repo = rm.get_repo_path(BUSINESS_PROJECT_ID)
+        env = dict(os.environ, NODE_OPTIONS="--max-old-space-size=8192",
+                   RCT_METRO_PORT=str(BUSINESS_METRO_PORT))
+        try:
+            subprocess.Popen(
+                ["npx", "react-native", "start", "--port", str(BUSINESS_METRO_PORT)],
+                cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        except Exception as e:
+            logger.warning("Could not start Business Metro: %s", e)
+            return False
+        for _ in range(60):
+            try:
+                if httpx.get(f"http://localhost:{BUSINESS_METRO_PORT}/status", timeout=3).status_code == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+
+    # Point the Business app at its own packager (RCTBundleURLProvider reads this).
+    try:
+        subprocess.run(
+            ["xcrun", "simctl", "spawn", udid, "defaults", "write", BUSINESS_BUNDLE,
+             "RCT_jsLocation", f"localhost:{BUSINESS_METRO_PORT}"],
+            check=False, timeout=15,
+        )
+    except Exception as e:
+        logger.warning("Could not set RCT_jsLocation for Business app: %s", e)
+    try:
+        return httpx.get(f"http://localhost:{BUSINESS_METRO_PORT}/status", timeout=3).status_code == 200
+    except Exception:
+        return False
 
 
 def _options(udid: str, bundle_id: str, wda_port: int) -> XCUITestOptions:
@@ -178,40 +242,94 @@ class CrossAppOrchestrator:
             try: d.quit()
             except Exception: pass
 
+    def _business_login(self, r: ScenarioRunner) -> bool:
+        """Log the waiter/kitchen user in, if the login screen is showing.
+
+        Credentials come from the environment (VYA_BUSINESS_USER /
+        VYA_BUSINESS_PASSWORD) — never hardcoded. Returns True when past login.
+        """
+        if not r._resolve([BIZ_SIGNIN_BTN]):
+            return True                          # already logged in
+        user = os.getenv("VYA_BUSINESS_USER", "")
+        pw = os.getenv("VYA_BUSINESS_PASSWORD", "")
+        if not user or not pw:
+            self._record("0", "Business login", "business", "FAIL",
+                         "no VYA_BUSINESS_USER / VYA_BUSINESS_PASSWORD set — "
+                         "cannot reach the waiter/kitchen screens")
+            self._persist_phase("0")
+            return False
+        try:
+            e = r._resolve([BIZ_EMAIL_FIELD]);  e.el.send_keys(user)
+            p = r._resolve([BIZ_PASSWORD_FIELD]); p.el.send_keys(pw)
+            try: r.d.hide_keyboard()
+            except Exception: pass
+            r._resolve([BIZ_SIGNIN_BTN]).el.click()
+            time.sleep(6)
+            ok = not r._resolve([BIZ_SIGNIN_BTN])
+            self._record("0", "Business login", "business",
+                         "PASS" if ok else "FAIL",
+                         "signed in" if ok else "sign-in did not advance")
+            self._persist_phase("0")
+            return ok
+        except Exception as ex:
+            self._record("0", "Business login", "business", "FAIL", f"login error: {ex}")
+            self._persist_phase("0")
+            return False
+
     def _run_business(self):
+        # Bring up the Business app's OWN Metro (8082) and point the app at it,
+        # or it stalls on its splash forever.
+        metro_ok = ensure_business_metro(self.business_udid)
+
         try:
             d = webdriver.Remote(APPIUM_URL, options=_options(self.business_udid, BUSINESS_BUNDLE, 8101))
         except Exception as e:
             self._record("1", "Book slot", "business", "FAIL", f"could not start session: {e}")
             self._persist_phase("1")
+            self.ev["table_accepted"].set()
+            self.ev["payment_requested"].set()
             return
         r = ScenarioRunner(d, BUSINESS_BUNDLE, screenshot_dir=None)
         try:
-            d.activate_app(BUSINESS_BUNDLE); time.sleep(8)
+            d.terminate_app(BUSINESS_BUNDLE)
+            d.activate_app(BUSINESS_BUNDLE)
+            time.sleep(12)                       # allow the 8082 bundle to load
 
-            # The Business app currently stalls on its splash (no dedicated Metro).
-            # Report that honestly rather than driving TBD labels blind.
-            if not r._resolve(["reservations"]) and not r._resolve(["orders"]):
-                note = ("Business app not interactive — likely stuck on splash "
-                        "(needs its own Metro on a separate port; 8081 serves the "
-                        "Consumer bundle). Capture labels once it loads.")
-                self.ev["order_placed"].wait(timeout=90)
-                self._record("1", "Book slot", "business", "FAIL", note)
-                self.ev["table_accepted"].set()      # unblock consumer so it proceeds
-                self._persist_phase("1")
-                self.ev["order_placed"].wait(timeout=90)
-                self._record("2", "Kitchen accept", "business", "FAIL", note)
-                self._persist_phase("2")
-                self.ev["payment_requested"].set()   # unblock consumer's pay phase
-                self._record("3", "Bill settle", "business", "FAIL", note)
-                self._persist_phase("3")
+            if not metro_ok:
+                note = "Business Metro (:8082) did not come up — app cannot load."
+                for ph, nm in (("1", "Book slot"), ("2", "Kitchen accept"), ("3", "Bill settle")):
+                    self._record(ph, nm, "business", "FAIL", note)
+                    self._persist_phase(ph)
+                self.ev["table_accepted"].set(); self.ev["payment_requested"].set()
                 return
 
-            # (Reached once Business labels exist — real accept/kitchen/bill steps go here.)
-            self.ev["order_placed"].wait(timeout=90)
+            # Log in (waiter/kitchen user). Without creds we stop here honestly.
+            if not self._business_login(r):
+                for ph, nm in (("1", "Book slot"), ("2", "Kitchen accept"), ("3", "Bill settle")):
+                    self._record(ph, nm, "business", "FAIL", "not logged in")
+                    self._persist_phase(ph)
+                self.ev["table_accepted"].set(); self.ev["payment_requested"].set()
+                return
+
+            # ── Phase 1: waiter accepts the reservation ──────────────────────
+            self.ev["order_placed"].wait(timeout=120)
             self._step(r, "accept the reservation", "1", "Book slot", "business")
             self.ev["table_accepted"].set()
             self._persist_phase("1")
+
+            # ── Phase 2: kitchen accepts + serves the order ──────────────────
+            self.ev["order_placed"].wait(timeout=120)
+            self._step(r, "accept the order in the kitchen", "2", "Kitchen accept", "business")
+            self._step(r, "mark items served", "2", "Kitchen accept", "business")
+            self.ev["kitchen_accepted"].set()
+            self._persist_phase("2")
+
+            # ── Phase 3: request payment / verify the bill settled ───────────
+            self._step(r, "request payment", "3", "Bill settle", "business")
+            self.ev["payment_requested"].set()
+            self.ev["payment_completed"].wait(timeout=120)
+            self._step(r, "verify the bill is settled", "3", "Bill settle", "business")
+            self._persist_phase("3")
         finally:
             try: d.quit()
             except Exception: pass

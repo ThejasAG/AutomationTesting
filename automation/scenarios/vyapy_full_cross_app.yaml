@@ -38,7 +38,14 @@ apps:
   business:
     bundle_id: org.vyapy.sarls.vyabusinessipad
     platform: ios            # iPad simulator
-    labels_status: TBD       # capture before running the Business steps
+    metro_port: 8082         # OWN Metro (Consumer uses 8081); set via RCT_jsLocation
+    labels_status: LOGIN_CAPTURED   # login screen labels below are real; waiter/kitchen still TBD
+    login_labels:            # verified live once the app loads from :8082
+      email: emailValue
+      password: passwordValue
+      remember_me: clickCheckBox
+      sign_in: signInBtn
+    credentials: env         # VYA_BUSINESS_USER / VYA_BUSINESS_PASSWORD — never inline
 
 # Cross-app sync points, mirroring the Android bot's threading.Event model.
 # In Option A these are automatic; in Option B they are manual pauses.
