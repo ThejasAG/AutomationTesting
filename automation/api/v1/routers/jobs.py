@@ -30,6 +30,10 @@ class ScenarioResultIn(BaseModel):
     scenario_num: str
     scenario_name: str
     status: str                      # PASS | FAIL — recomputed from the two sides
+    # The Vya bot reports ONE role per call (role=Consumer/Business). When role is
+    # given, that side's status is set and the row is merged. When it is absent,
+    # consumer_status/business_status are taken directly (Android-bridge form).
+    role: Optional[str] = None
     consumer_status: str = "N/A"
     business_status: str = "N/A"
     error: Optional[str] = None
@@ -129,25 +133,52 @@ def post_scenario_result(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    status = _both_pass_status(body.consumer_status, body.business_status, body.status)
+    # Upsert ONE row per (run_id, scenario_num) so the Consumer post and the
+    # Business post for the same scenario merge into a single Scenarios-tab row.
+    row = (
+        db.query(ScenarioResult)
+        .filter_by(run_id=run_id, scenario_num=str(body.scenario_num))
+        .first()
+    )
+    if row is None:
+        row = ScenarioResult(
+            run_id=run_id, scenario_num=str(body.scenario_num),
+            consumer_status="N/A", business_status="N/A", reasons=[],
+        )
+        db.add(row)
+    row.scenario_name = body.scenario_name or row.scenario_name
 
-    db.add(ScenarioResult(
-        run_id=run_id,
-        scenario_num=str(body.scenario_num),
-        scenario_name=body.scenario_name,
-        status=status,
-        consumer_status=body.consumer_status,
-        business_status=body.business_status,
-        error=body.error,
-        reasons=body.reasons or [],
-        launch_time=body.launch_time,
-    ))
-    db.commit()
+    role = (body.role or "").strip().lower()
+    if role == "consumer":
+        row.consumer_status = body.status
+    elif role == "business":
+        row.business_status = body.status
+    else:
+        # Android-bridge form: both sides supplied directly.
+        if body.consumer_status != "N/A":
+            row.consumer_status = body.consumer_status
+        if body.business_status != "N/A":
+            row.business_status = body.business_status
+
+    # Merge reasons/errors from each side (role-tagged when we know the role).
+    merged = list(row.reasons or [])
+    for r in (body.reasons or ([body.error] if body.error else [])):
+        tagged = f"[{body.role}] {r}" if body.role else r
+        if r and tagged not in merged:
+            merged.append(tagged)
+    row.reasons = merged
+    fails = [m for m in merged if "FAIL" in m or "fail" in m]
+    row.error = "; ".join(fails) or (body.error if body.status == "FAIL" else row.error)
+    if body.launch_time is not None:
+        row.launch_time = body.launch_time
+
+    row.status = _both_pass_status(row.consumer_status, row.business_status, body.status)
+    db.flush()
 
     overall = _recompute_run_status(db, run)
     db.commit()
 
-    return {"saved": True, "overall_status": status, "run_status": overall}
+    return {"saved": True, "overall_status": row.status, "run_status": overall}
 
 
 @runs_router.post("/{run_id}/trigger-android-bot")
