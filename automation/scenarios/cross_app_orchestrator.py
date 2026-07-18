@@ -116,7 +116,31 @@ def _options(udid: str, bundle_id: str, wda_port: int) -> XCUITestOptions:
     o.set_capability("usePrebuiltWDA", True)
     # Distinct WDA port per session so the two simulators can run concurrently.
     o.set_capability("wdaLocalPort", wda_port)
+    # The Business app fires a native "Send You Notifications" permission alert on
+    # launch that sits ON TOP of the login form and swallows every tap/keystroke.
+    o.set_capability("autoAcceptAlerts", True)
     return o
+
+
+def _fill_field(d, name: str, text: str) -> bool:
+    """Type into a React-Native TextInput by its accessibility name.
+
+    The name resolves to a wrapper View (type=Other); the real input is the
+    XCUIElementTypeTextField/SecureTextField underneath. Typing into the wrapper
+    is a no-op, so target the field type explicitly.
+    """
+    from appium.webdriver.common.appiumby import AppiumBy
+    els = d.find_elements(
+        AppiumBy.IOS_PREDICATE,
+        f'name == "{name}" AND (type == "XCUIElementTypeTextField" '
+        f'OR type == "XCUIElementTypeSecureTextField")',
+    )
+    if not els:
+        return False
+    els[0].click()
+    time.sleep(0.5)
+    els[0].send_keys(text)
+    return True
 
 
 class CrossAppOrchestrator:
@@ -259,12 +283,17 @@ class CrossAppOrchestrator:
             self._persist_phase("0")
             return False
         try:
-            e = r._resolve([BIZ_EMAIL_FIELD]);  e.el.send_keys(user)
-            p = r._resolve([BIZ_PASSWORD_FIELD]); p.el.send_keys(pw)
+            from appium.webdriver.common.appiumby import AppiumBy
+            _fill_field(r.d, BIZ_EMAIL_FIELD, user)
+            _fill_field(r.d, BIZ_PASSWORD_FIELD, pw)
             try: r.d.hide_keyboard()
             except Exception: pass
-            r._resolve([BIZ_SIGNIN_BTN]).el.click()
-            time.sleep(6)
+            # Accept the Terms & Conditions checkbox — Sign In needs it.
+            cb = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "clickCheckBox")
+            if cb:
+                cb[0].click(); time.sleep(0.4)
+            r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, BIZ_SIGNIN_BTN)[0].click()
+            time.sleep(8)
             ok = not r._resolve([BIZ_SIGNIN_BTN])
             self._record("0", "Business login", "business",
                          "PASS" if ok else "FAIL",
