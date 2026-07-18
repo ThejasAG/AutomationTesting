@@ -1,0 +1,771 @@
+"""Project preparation pipeline.
+
+Implements the corrected execution flow in ONE place so the agent, the API and
+the framework plugins all share it:
+
+    repository exists?  no -> clone
+                        yes -> pull latest
+        -> checkout configured branch
+        -> detect project type
+        -> run type-aware validation
+        -> install missing dependencies
+        -> (caller executes tests)
+
+Validation now runs *after* the repository is on disk and prepared, which is
+what fixes the "automation.yaml not found" / ".venv not found" failures that
+came from validating before the repo was ready.
+"""
+
+import logging
+import os
+import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
+
+from automation.database import database
+from automation.database.config import SessionLocal
+from automation.database.models import TestProject
+from automation.projects.detector import (
+    ProjectType,
+    detect_project_type,
+    write_automation_yaml,
+)
+from automation.projects.builder import app_builder
+from automation.projects.repository import repository_manager
+from automation.utils.validator import EnvironmentValidator, ValidationResult
+
+logger = logging.getLogger(__name__)
+
+# Repository lifecycle states (mirrors TestProject.clone_status).
+NOT_CLONED = "not_cloned"
+SYNCING = "syncing"
+CLONED = "cloned"
+READY = "ready"
+OUTDATED = "outdated"
+CLONE_FAILED = "clone_failed"
+
+
+@dataclass
+class PreparationResult:
+    ok: bool
+    project_type: str = ProjectType.UNKNOWN
+    branch: Optional[str] = None
+    clone_status: str = NOT_CLONED
+    steps: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+    validation: Optional[ValidationResult] = None
+    # True when automation.yaml is missing — the dashboard offers to generate it.
+    needs_automation_yaml: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "project_type": self.project_type,
+            "branch": self.branch,
+            "clone_status": self.clone_status,
+            "steps": self.steps,
+            "error": self.error,
+            "needs_automation_yaml": self.needs_automation_yaml,
+            "validation": self.validation.to_dict() if self.validation else None,
+        }
+
+
+class ProjectPreparationService:
+    """Prepares a project's working copy and environment for execution."""
+
+    # ── DB helpers ───────────────────────────────────────────────────────────
+
+    def _load_project(self, project_id: str) -> Optional[TestProject]:
+        try:
+            with SessionLocal() as db:
+                p = database.get_test_project(db, project_id)
+                if not p:
+                    return None
+                # Detach a plain snapshot so callers don't hold a live session.
+                db.expunge(p)
+                return p
+        except Exception as e:
+            logger.warning(f"[{project_id}] Could not load project from DB: {e}")
+            return None
+
+    def _update_project(self, project_id: str, **fields) -> None:
+        """Persist project fields. Never fatal — the agent may run without DB access."""
+        try:
+            with SessionLocal() as db:
+                p = db.query(TestProject).filter(TestProject.id == project_id).first()
+                if not p:
+                    return
+                for k, v in fields.items():
+                    if hasattr(p, k):
+                        setattr(p, k, v)
+                db.commit()
+        except Exception as e:
+            logger.warning(f"[{project_id}] Could not persist project state: {e}")
+
+    # ── Repository sync ──────────────────────────────────────────────────────
+
+    def sync_repository(
+        self,
+        project_id: str,
+        git_url: str,
+        branch: str,
+        force_reclone: bool = False,
+        on_step: Optional[Callable[[str], None]] = None,
+    ) -> PreparationResult:
+        """Clone (if missing) or pull, then check out *branch*.
+
+        Never validates — this only guarantees the working copy exists and is
+        up to date. Persists clone_status/current_branch/last_pull_at.
+        """
+        steps: List[str] = []
+
+        def step(msg: str) -> None:
+            steps.append(msg)
+            logger.info(f"[{project_id}] {msg}")
+            if on_step:
+                on_step(msg)
+
+        self._update_project(project_id, clone_status=SYNCING, clone_error=None)
+
+        try:
+            # The configured branch may not exist on the remote ('main' vs
+            # 'master'). Resolve it once, up front, so the clone, the checkout
+            # and the pull below all agree on the same branch.
+            resolved = repository_manager.resolve_branch(git_url, branch)
+            if resolved != branch:
+                step(
+                    f"Branch '{branch}' not found on the remote — using the "
+                    f"repository's default branch '{resolved}' instead."
+                )
+                branch = resolved
+
+            if force_reclone:
+                step("Re-cloning repository from scratch...")
+                repository_manager.re_clone(project_id, git_url, branch)
+                step("Re-clone complete.")
+            elif not repository_manager.is_cloned(project_id):
+                step(f"Repository not cloned — cloning {git_url} (branch {branch})...")
+                repository_manager.clone(project_id, git_url, branch)
+                step("Clone complete.")
+            else:
+                step("Repository already cloned.")
+
+            # Always land on the configured branch before pulling.
+            step(f"Checking out branch '{branch}'...")
+            repository_manager.checkout_branch(project_id, branch)
+
+            step("Pulling latest changes...")
+            repository_manager.pull(project_id, branch)
+            step("Pull complete.")
+
+            current = repository_manager.get_current_branch(project_id) or branch
+            self._update_project(
+                project_id,
+                clone_status=CLONED,
+                current_branch=current,
+                last_pull_at=datetime.utcnow(),
+                clone_error=None,
+            )
+            return PreparationResult(
+                ok=True, branch=current, clone_status=CLONED, steps=steps
+            )
+
+        except Exception as e:
+            msg = str(e)
+            step(f"Repository sync FAILED: {msg}")
+            self._update_project(
+                project_id, clone_status=CLONE_FAILED, clone_error=msg
+            )
+            return PreparationResult(
+                ok=False, clone_status=CLONE_FAILED, steps=steps, error=msg
+            )
+
+    # ── Type detection ───────────────────────────────────────────────────────
+
+    def detect_and_store_type(self, project_id: str) -> str:
+        """Detect the project type from the cloned tree and persist it."""
+        repo_path = repository_manager.get_repo_path(project_id)
+        result = detect_project_type(repo_path)
+        self._update_project(project_id, project_type=result.project_type)
+        logger.info(
+            f"[{project_id}] Detected project type: {result.label} "
+            f"(markers: {', '.join(result.markers) or 'none'})"
+        )
+        return result.project_type
+
+    # ── Dependency install ───────────────────────────────────────────────────
+
+    def install_dependencies(
+        self, project_id: str, project_type: str
+    ) -> "tuple[bool, Optional[str]]":
+        """Install dependencies appropriate to the detected project type.
+
+        Returns ``(ok, error_output)`` — the error text is surfaced to the
+        dashboard so a failure is diagnosable without digging through logs.
+
+        Only Python projects get a .venv — React Native / native mobile projects
+        use their own toolchains and must never be forced through pip.
+        """
+        import os
+
+        repo_path = repository_manager.get_repo_path(project_id)
+
+        if project_type == ProjectType.PYTHON:
+            if not repository_manager.ensure_venv_exists(project_id):
+                return False, "Could not create the Python virtual environment."
+            config = repository_manager.validate_yaml(project_id)
+            req_file = config.requirements.file if config else "requirements.txt"
+            ok = repository_manager.install_dependencies(project_id, req_file)
+            return ok, None if ok else f"pip install -r {req_file} failed. See server logs."
+
+        if project_type == ProjectType.REACT_NATIVE:
+            return self._install_node_deps(project_id, repo_path)
+
+        if project_type == ProjectType.FLUTTER:
+            return self._run_in_repo(project_id, ["flutter", "pub", "get"])
+
+        if project_type == ProjectType.IOS:
+            # CocoaPods lives in ios/ for RN and at the root for a native app —
+            # the builder resolves whichever applies.
+            ok, out = app_builder._pod_install(repo_path)
+            return ok, None if ok else out
+
+        if project_type == ProjectType.JAVA:
+            return self._run_in_repo(project_id, ["mvn", "-q", "dependency:resolve"])
+
+        if project_type == ProjectType.ANDROID:
+            # Gradle resolves dependencies as part of the build itself.
+            return True, None
+
+        # Unknown type — nothing safe to install; let validation report it.
+        return True, None
+
+    def _ensure_node_modules_linker(self, project_id: str, repo_path: str) -> None:
+        """Force Yarn Berry to produce a real node_modules tree.
+
+        Berry defaults to Plug'n'Play, which React Native and Metro do not
+        support — the install "succeeds" and leaves node_modules empty, so every
+        module resolves as missing. Only written when the project has not already
+        chosen a linker.
+        """
+        rc = os.path.join(repo_path, ".yarnrc.yml")
+        try:
+            if os.path.exists(rc):
+                with open(rc) as f:
+                    if "nodeLinker" in f.read():
+                        return  # the project made its own choice — respect it
+                with open(rc, "a") as f:
+                    f.write("\nnodeLinker: node-modules\n")
+            else:
+                with open(rc, "w") as f:
+                    f.write("nodeLinker: node-modules\n")
+            logger.info(f"[{project_id}] Set nodeLinker: node-modules (RN cannot use Yarn PnP)")
+        except OSError as e:
+            logger.warning(f"[{project_id}] Could not write .yarnrc.yml: {e}")
+
+    def _install_node_deps(
+        self, project_id: str, repo_path: str
+    ) -> "tuple[bool, Optional[str]]":
+        """Install JS dependencies, tolerating the peer-dependency conflicts that
+        are endemic to real React Native apps.
+
+        npm 7+ hard-fails on any unmet peer range (ERESOLVE). Mature RN projects
+        routinely carry such conflicts and are installed in practice with yarn or
+        --legacy-peer-deps, so a bare `npm install` is not a usable gate. We
+        honour the project's own lockfile first, then fall back.
+        """
+        import os
+
+        # 1. Respect the project's lockfile — and the package manager that wrote
+        #    it. This is not a preference, it is correctness: a Yarn Berry (v2+)
+        #    lockfile is a different FORMAT, and npm/Yarn-Classic cannot read it.
+        #    They do not fail — they DISCARD it and re-resolve every caret range
+        #    to the newest release. That silently turned a project pinned to
+        #    axios 1.7.7 / apisauce 3.1.0 into axios 1.18.1 / apisauce 3.2.2,
+        #    which then could not bundle at all. Always install with the manager
+        #    that owns the lockfile.
+        if os.path.exists(os.path.join(repo_path, "yarn.lock")):
+            pm = app_builder.detect_package_manager(repo_path)
+
+            # React Native cannot use Yarn Berry's default Plug'n'Play linker —
+            # Metro needs a real node_modules tree. Berry projects that omit a
+            # .yarnrc.yml would otherwise install to .pnp.cjs and leave
+            # node_modules empty.
+            if pm == ["corepack", "yarn"]:
+                self._ensure_node_modules_linker(project_id, repo_path)
+
+            ok, err = self._run_in_repo(project_id, pm + ["install"])
+            if ok:
+                return True, None
+            logger.warning(f"[{project_id}] {' '.join(pm)} install failed, trying npm: {err}")
+
+        # 2. Plain npm install.
+        ok, err = self._run_in_repo(project_id, ["npm", "install"])
+        if ok:
+            return True, None
+
+        # 3. Peer-dependency conflict → retry the way the RN ecosystem actually
+        #    installs. Anything else is a genuine failure and is reported as-is.
+        if err and "ERESOLVE" in err:
+            logger.warning(
+                f"[{project_id}] npm ERESOLVE peer conflict — retrying with --legacy-peer-deps"
+            )
+            ok, err2 = self._run_in_repo(
+                project_id, ["npm", "install", "--legacy-peer-deps"]
+            )
+            if ok:
+                # This is NOT a clean success. --legacy-peer-deps accepts a
+                # dependency graph npm considers invalid, so native modules may
+                # be built against an incompatible React Native version. That
+                # surfaces much later as an obscure compile error, so say so now
+                # rather than letting the build fail mysteriously.
+                return True, (
+                    "WARNING: npm reported peer-dependency conflicts (ERESOLVE) and they "
+                    "were bypassed with --legacy-peer-deps. The installed native module "
+                    "versions may not match this project's React Native version and can "
+                    "fail to compile. Fix the version constraints in package.json for a "
+                    "reliable build."
+                )
+            return False, err2
+
+        return False, err
+
+    def _run_in_repo(
+        self, project_id: str, cmd: List[str]
+    ) -> "tuple[bool, Optional[str]]":
+        """Run *cmd* in the repo. Returns (ok, error_output)."""
+        import subprocess
+
+        repo_path = repository_manager.get_repo_path(project_id)
+        try:
+            res = subprocess.run(
+                cmd, cwd=repo_path, capture_output=True, text=True, timeout=1800
+            )
+            if res.returncode != 0:
+                # npm writes its errors to stdout as often as stderr.
+                output = (res.stderr or "") + (res.stdout or "")
+                logger.error(f"[{project_id}] {' '.join(cmd)} failed: {output[:1000]}")
+                return False, output.strip()[-1500:]
+            return True, None
+        except FileNotFoundError:
+            msg = (
+                f"Command not found: {cmd[0]}. Install it and make sure it is on the "
+                f"PATH of the process running the platform."
+            )
+            logger.error(f"[{project_id}] {msg}")
+            return False, msg
+        except subprocess.TimeoutExpired:
+            msg = f"{' '.join(cmd)} timed out after 30 minutes."
+            logger.error(f"[{project_id}] {msg}")
+            return False, msg
+        except Exception as e:
+            logger.error(f"[{project_id}] {' '.join(cmd)} error: {e}")
+            return False, str(e)
+
+    # ── Full pipeline ────────────────────────────────────────────────────────
+
+    def prepare_for_execution(
+        self,
+        project_id: str,
+        device_id: Optional[str] = None,
+        auto_generate_yaml: bool = False,
+        on_step: Optional[Callable[[str], None]] = None,
+        git_url: Optional[str] = None,
+        branch: Optional[str] = None,
+        platform: Optional[str] = None,
+        project_name: Optional[str] = None,
+    ) -> PreparationResult:
+        """Run the full pre-execution pipeline for a project.
+
+        clone/pull -> checkout -> detect -> validate -> install deps.
+        Returns a PreparationResult; ``ok=False`` means execution must not start.
+
+        The git_url/branch/platform/project_name overrides let the execution
+        agent drive this straight from its job payload, without needing database
+        access of its own.
+        """
+        project = self._load_project(project_id)
+
+        git_url = git_url or (project.git_url if project else None)
+        branch = branch or (project.default_branch if project else None) or "main"
+        platform = platform or (project.platform if project else None) or "ios"
+        project_name = project_name or (project.name if project else project_id)
+
+        if not git_url:
+            return PreparationResult(
+                ok=False,
+                error=f"Project {project_id} not found and no git_url supplied.",
+            )
+
+        # 1-3. Clone / pull / checkout.
+        sync = self.sync_repository(project_id, git_url, branch, on_step=on_step)
+        if not sync.ok:
+            return sync
+
+        steps = list(sync.steps)
+
+        def step(msg: str) -> None:
+            steps.append(msg)
+            logger.info(f"[{project_id}] {msg}")
+            if on_step:
+                on_step(msg)
+
+        # 4. Detect project type.
+        project_type = self.detect_and_store_type(project_id)
+        step(f"Detected project type: {project_type}")
+
+        # 5. automation.yaml — offer to generate rather than failing outright.
+        import os
+
+        repo_path = repository_manager.get_repo_path(project_id)
+        yaml_path = os.path.join(repo_path, "automation.yaml")
+        if not os.path.exists(yaml_path):
+            if auto_generate_yaml:
+                write_automation_yaml(
+                    repo_path,
+                    project_name=project_name,
+                    project_type=project_type,
+                    platform=platform,
+                    branch=branch,
+                )
+                step("automation.yaml was missing — generated a template.")
+            else:
+                step("automation.yaml not found.")
+                return PreparationResult(
+                    ok=False,
+                    project_type=project_type,
+                    branch=sync.branch,
+                    clone_status=CLONED,
+                    steps=steps,
+                    error="automation.yaml not found.",
+                    needs_automation_yaml=True,
+                )
+
+        # 6. Type-aware validation.
+        step("Running validation...")
+        validator = EnvironmentValidator(project_id)
+        validation = validator.validate_pre_execution(
+            device_id=device_id,
+            platform=platform,
+            project_type=project_type,
+        )
+
+        if not validation.passed:
+            reasons = "; ".join(i.check for i in validation.issues)
+            step(f"Validation FAILED: {reasons}")
+            self._update_project(project_id, clone_status=CLONED)
+            return PreparationResult(
+                ok=False,
+                project_type=project_type,
+                branch=sync.branch,
+                clone_status=CLONED,
+                steps=steps,
+                error=f"Validation failed: {reasons}",
+                validation=validation,
+            )
+
+        for w in validation.warnings:
+            step(f"WARNING: {w.check} — {w.problem}")
+
+        # 7. Install dependencies.
+        step("Installing dependencies...")
+        deps_ok, deps_err = self.install_dependencies(project_id, project_type)
+
+        # A "successful" install can still carry a warning worth seeing (e.g. peer
+        # conflicts bypassed) — surface it instead of hiding it behind success.
+        if deps_ok and deps_err:
+            for line in deps_err.splitlines():
+                if line.strip():
+                    step(line.rstrip())
+
+        if not deps_ok:
+            step("Dependency installation FAILED.")
+            # Surface the tool's own output — a swallowed error is undebuggable.
+            for line in (deps_err or "").splitlines()[-25:]:
+                if line.strip():
+                    step(line.rstrip())
+            return PreparationResult(
+                ok=False,
+                project_type=project_type,
+                branch=sync.branch,
+                clone_status=CLONED,
+                steps=steps,
+                error=f"Dependency installation failed: {(deps_err or '').strip()[:300]}",
+                validation=validation,
+            )
+
+        # 8. Build the app and install it on the target device.
+        #    Without this there is nothing on the simulator to automate.
+        if device_id:
+            build_ok, build_err = self._build_and_install(
+                project_id, repo_path, platform, device_id, project_name, step
+            )
+            if not build_ok:
+                return PreparationResult(
+                    ok=False,
+                    project_type=project_type,
+                    branch=sync.branch,
+                    clone_status=CLONED,
+                    steps=steps,
+                    error=f"App build/install failed: {(build_err or '')[:300]}",
+                    validation=validation,
+                )
+        else:
+            step("No device selected — skipping app build/install.")
+
+        step("Project ready for execution.")
+        self._update_project(project_id, clone_status=READY)
+
+        return PreparationResult(
+            ok=True,
+            project_type=project_type,
+            branch=sync.branch,
+            clone_status=READY,
+            steps=steps,
+            validation=validation,
+        )
+
+    def _build_and_install(
+        self,
+        project_id: str,
+        repo_path: str,
+        platform: str,
+        device_id: str,
+        project_name: str,
+        step: Callable[[str], None],
+    ) -> "tuple[bool, Optional[str]]":
+        """Build the app, install it on the device, launch it, and record the
+        artifact path in automation.yaml as ``environment.app``."""
+        step(f"Building the {platform} app (this can take several minutes)...")
+        self._update_project(project_id, build_status="building", build_error=None)
+
+        # Pass the target device so iOS builds only the arch we will install onto.
+        result = app_builder.build(repo_path, platform, device_id=device_id)
+
+        if result.skipped:
+            step("No native app to build for this platform — skipping.")
+            return True, None
+
+        if not result.ok:
+            step("App build FAILED.")
+            for line in (result.error or "").splitlines()[-20:]:
+                if line.strip():
+                    step(line.rstrip())
+            self._update_project(
+                project_id, build_status="build_failed", build_error=result.error
+            )
+            return False, result.error
+
+        step(f"Build succeeded: {os.path.basename(result.artifact_path)}")
+        self._update_project(
+            project_id,
+            build_status="built",
+            app_path=result.artifact_path,
+            app_bundle_id=result.bundle_id,
+            build_error=None,
+            last_build_at=datetime.utcnow(),
+        )
+
+        # Point automation.yaml at the artifact so Appium installs/launches it too.
+        self._set_yaml_app_path(repo_path, result.artifact_path, step)
+
+        step(f"Installing the app on {device_id}...")
+        ok, out = app_builder.install(device_id, result.artifact_path, platform)
+        if not ok:
+            step("App install FAILED.")
+            for line in (out or "").splitlines()[-15:]:
+                if line.strip():
+                    step(line.rstrip())
+            return False, out
+        step("App installed.")
+
+        # A Debug React Native build loads its JS from Metro at launch. Start it
+        # BEFORE launching, or the app comes up on a red error screen and Appium
+        # would attach to a dead app.
+        metro_ok, metro_msg = app_builder.ensure_metro(repo_path)
+        step(f"Metro: {metro_msg}")
+        if not metro_ok:
+            # Not fatal — a native (non-JS) app does not need Metro at all, and a
+            # red screen is still diagnosable. Surface it loudly rather than
+            # failing the whole run.
+            step("WARNING: the app may show a red screen without the JS bundler.")
+
+        # Launching makes the app visible in the live stream immediately.
+        if result.bundle_id or platform == "android":
+            launched, lout = app_builder.launch(device_id, result.bundle_id, platform)
+            step("App launched." if launched else f"App installed but could not be launched: {lout[:200]}")
+
+        return True, None
+
+    def _set_yaml_app_path(
+        self, repo_path: str, artifact_path: str, step: Callable[[str], None]
+    ) -> None:
+        """Write the built artifact path into automation.yaml -> environment.app."""
+        import yaml as _yaml
+
+        yaml_path = os.path.join(repo_path, "automation.yaml")
+        try:
+            with open(yaml_path) as f:
+                data = _yaml.safe_load(f) or {}
+            env = data.setdefault("environment", {})
+            if env.get("app") == artifact_path:
+                return
+            env["app"] = artifact_path
+            with open(yaml_path, "w") as f:
+                _yaml.safe_dump(data, f, sort_keys=False)
+            step("automation.yaml updated: environment.app -> built artifact.")
+        except Exception as e:
+            logger.warning(f"Could not write environment.app into automation.yaml: {e}")
+
+    # ── Status (read-only, for the dashboard) ────────────────────────────────
+
+    def get_status(self, project_id: str, check_remote: bool = False) -> Dict[str, Any]:
+        """Return the current repository/health status for a project."""
+        project = self._load_project(project_id)
+        if not project:
+            return {"error": "Project not found"}
+
+        branch = project.default_branch or "main"
+        cloned = repository_manager.is_cloned(project_id)
+
+        if not cloned:
+            clone_status = NOT_CLONED
+        elif project.clone_status in (SYNCING, CLONE_FAILED):
+            clone_status = project.clone_status
+        elif check_remote and repository_manager.has_remote_updates(project_id, branch):
+            clone_status = OUTDATED
+        else:
+            clone_status = project.clone_status or CLONED
+
+        repo_path = repository_manager.get_repo_path(project_id)
+        detection = detect_project_type(repo_path) if cloned else None
+
+        import os
+
+        return {
+            "project_id": project_id,
+            "clone_status": clone_status,
+            "clone_error": project.clone_error,
+            "cloned": cloned,
+            "local_path": repo_path,
+            "current_branch": repository_manager.get_current_branch(project_id),
+            "default_branch": branch,
+            "project_type": detection.project_type if detection else (project.project_type or ProjectType.UNKNOWN),
+            "project_type_label": detection.label if detection else None,
+            "platform": project.platform,
+            "repo_type": project.repo_type,
+            "has_automation_yaml": (
+                os.path.exists(os.path.join(repo_path, "automation.yaml")) if cloned else False
+            ),
+            "last_pull_at": project.last_pull_at.isoformat() if project.last_pull_at else None,
+            "last_execution_at": (
+                project.last_execution_at.isoformat() if project.last_execution_at else None
+            ),
+            "health": repository_manager.get_health(project_id),
+        }
+
+
+preparation_service = ProjectPreparationService()
+
+
+# ── Background preparation ───────────────────────────────────────────────────
+
+class PreparationTracker:
+    """Runs prepare_for_execution() off the request thread.
+
+    A cold xcodebuild takes minutes. Doing that inside an HTTP handler holds a
+    worker thread for the whole build and starves other requests — which is what
+    made the execution agent's heartbeat/poll time out. The dashboard now starts
+    a task and polls its status instead.
+    """
+
+    def __init__(self):
+        self._tasks: Dict[str, Dict[str, Any]] = {}  # project_id -> state
+        self._lock = threading.Lock()
+
+    def is_running(self, project_id: str) -> bool:
+        with self._lock:
+            t = self._tasks.get(project_id)
+            return bool(t and t["status"] == "running")
+
+    def start(
+        self,
+        project_id: str,
+        device_id: Optional[str] = None,
+        generate_yaml: bool = False,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            existing = self._tasks.get(project_id)
+            if existing and existing["status"] == "running":
+                return dict(existing)  # already preparing — reuse it
+
+            task_id = str(uuid.uuid4())
+            state: Dict[str, Any] = {
+                "task_id": task_id,
+                "project_id": project_id,
+                "status": "running",
+                "steps": [],
+                "result": None,
+            }
+            self._tasks[project_id] = state
+
+        def on_step(msg: str) -> None:
+            with self._lock:
+                self._tasks[project_id]["steps"].append(msg)
+
+        def worker() -> None:
+            try:
+                result = preparation_service.prepare_for_execution(
+                    project_id,
+                    device_id=device_id,
+                    auto_generate_yaml=generate_yaml,
+                    on_step=on_step,
+                )
+                payload = result.to_dict()
+                with self._lock:
+                    self._tasks[project_id].update(
+                        status="completed" if result.ok else "failed",
+                        result=payload,
+                        steps=payload["steps"] or self._tasks[project_id]["steps"],
+                    )
+            except Exception as e:
+                logger.exception(f"[{project_id}] Preparation task crashed")
+                with self._lock:
+                    self._tasks[project_id].update(
+                        status="failed",
+                        result={
+                            "ok": False,
+                            "error": str(e),
+                            "steps": self._tasks[project_id]["steps"],
+                            "needs_automation_yaml": False,
+                            "validation": None,
+                            "project_type": "unknown",
+                            "branch": None,
+                            "clone_status": "cloned",
+                        },
+                    )
+
+        threading.Thread(
+            target=worker, daemon=True, name=f"prepare-{project_id[:8]}"
+        ).start()
+
+        with self._lock:
+            return dict(self._tasks[project_id])
+
+    def status(self, project_id: str) -> Dict[str, Any]:
+        with self._lock:
+            t = self._tasks.get(project_id)
+            if not t:
+                return {"status": "idle", "steps": [], "result": None}
+            return {
+                "task_id": t["task_id"],
+                "project_id": project_id,
+                "status": t["status"],
+                "steps": list(t["steps"]),
+                "result": t["result"],
+            }
+
+
+preparation_tracker = PreparationTracker()

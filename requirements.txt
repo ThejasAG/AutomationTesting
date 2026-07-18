@@ -6,3 +6,4 @@ redis
 python-jose[cryptography]
 passlib[bcrypt]
 python-multipart
+python-dotenv

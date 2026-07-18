@@ -1,6 +1,6 @@
 import os
 import subprocess
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -15,31 +15,72 @@ class GitImpactAnalyzer:
             "Profile": ["User", "Settings", "Account"]
         }
         
-    def extract_changed_files(self, repo_path: str, commit_sha: str = "HEAD") -> List[str]:
-        """Extracts a list of files changed in the specified commit/branch."""
+    def _run_git(self, args: List[str], repo_path: str):
+        process = subprocess.Popen(
+            ["git"] + args, cwd=repo_path,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout, stderr
+
+    def extract_changed_files(
+        self,
+        repo_path: str,
+        commit_sha: str = "HEAD",
+        base_branch: Optional[str] = None,
+    ) -> List[str]:
+        """Files changed. For a PR, EVERY file the PR touches vs its base.
+
+        `HEAD~1..HEAD` only ever showed the LAST COMMIT, so a 12-commit PR was
+        judged on its final commit alone: touch payment in commit 1 and README in
+        commit 12, and the payment tests were never selected.
+
+        With *base_branch* this uses the three-dot form:
+
+            git diff origin/<base>...<head> --name-only
+
+        which diffs from the MERGE BASE — the whole PR against where it forked,
+        without dragging in changes made on base since. That is the set a merge
+        will actually apply, so "green alone, broken together" becomes visible.
+        """
         try:
-            # For this MVP, we look at the last commit if HEAD is passed
-            cmd = ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", commit_sha]
+            if base_branch:
+                base_ref = (base_branch if base_branch.startswith("origin/")
+                            else f"origin/{base_branch}")
+                head = commit_sha or "HEAD"
+
+                # The merge base must exist locally or the diff is meaningless.
+                self._run_git(["fetch", "origin", base_branch.replace("origin/", "")],
+                              repo_path)
+
+                code, out, err = self._run_git(
+                    ["diff", "--name-only", f"{base_ref}...{head}"], repo_path)
+                if code == 0:
+                    return [f.strip() for f in out.split("\n") if f.strip()]
+
+                logger.warning(
+                    "PR diff %s...%s failed (%s) — falling back to the single "
+                    "commit, which UNDER-REPORTS the PR.", base_ref, head, err.strip())
+
             if commit_sha == "HEAD":
-                cmd = ["git", "diff", "--name-only", "HEAD~1", "HEAD"]
-                
-            process = subprocess.Popen(
-                cmd,
-                cwd=repo_path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            stdout, stderr = process.communicate()
-            if process.returncode != 0:
-                logger.error(f"Failed to extract git diff: {stderr}")
+                cmd = ["diff", "--name-only", "HEAD~1", "HEAD"]
+            else:
+                cmd = ["diff-tree", "--no-commit-id", "--name-only", "-r", commit_sha]
+
+            code, out, err = self._run_git(cmd, repo_path)
+            if code != 0:
+                logger.error(f"Failed to extract git diff: {err}")
                 return []
-                
-            files = [f.strip() for f in stdout.split('\n') if f.strip()]
-            return files
+            return [f.strip() for f in out.split("\n") if f.strip()]
         except Exception as e:
             logger.error(f"Git diff extraction error: {e}")
             return []
+
+    def extract_pr_changed_files(
+        self, repo_path: str, head_sha: str, base_branch: str
+    ) -> List[str]:
+        """Every file a PR changes relative to its merge base with *base_branch*."""
+        return self.extract_changed_files(repo_path, head_sha, base_branch=base_branch)
 
     def extract_files_from_webhook(self, payload: Dict[str, Any]) -> List[str]:
         """Extracts changed file paths from a GitHub webhook payload.

@@ -11,19 +11,21 @@ from automation.appium_service.manager import appium_manager
 class AppiumFramework(TestFramework):
     
     def prepare(self, project_id: str, device_id: str) -> bool:
-        """Ensures python venv is ready and dependencies are installed."""
-        if not repository_manager.ensure_venv_exists(project_id):
-            return False
-            
-        config = repository_manager.validate_yaml(project_id)
-        req_file = config.requirements.file if config else "requirements.txt"
-        
-        if not repository_manager.install_dependencies(project_id, req_file):
-            return False
-            
-        # Also ensure appium-fake-driver is installed for verification if needed
-        # Or let the project requirements handle it.
-        return True
+        """Install dependencies for the project's detected type.
+
+        Delegates to the shared preparation service so a React Native / Flutter /
+        native mobile project is never forced through Python venv + pip. The
+        repository is assumed to already be cloned and on the right branch —
+        ProjectPreparationService.prepare_for_execution() guarantees that.
+        """
+        from automation.projects.detector import detect_project_type
+        from automation.projects.preparation import preparation_service
+
+        repo_path = repository_manager.get_repo_path(project_id)
+        project_type = detect_project_type(repo_path).project_type
+
+        ok, _err = preparation_service.install_dependencies(project_id, project_type)
+        return ok
         
     def execute(self, project_id: str, device_id: str, config: Dict[str, Any], run_id: str) -> Dict[str, Any]:
         """Runs the pytest command connected to the real Appium server."""

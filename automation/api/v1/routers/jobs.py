@@ -1,17 +1,226 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from datetime import datetime
 import json
+import logging
+import os
+import re
+import httpx
 from automation.ai.services.execution import AISelfHealingEngine
 from automation.reporting.engine import reporting_engine
-from automation.database.database import create_ai_recommendation
+from automation.database.database import create_ai_recommendation, utc_iso
 from automation.database.config import get_db
-from automation.database.models import TestRun, TestProject
+from automation.database.models import TestRun, TestProject, ScenarioResult
 from automation.auth.security import get_current_user
 
+logger = logging.getLogger("jobs")
+
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
+
+# `/runs/...` cannot live on the /jobs-prefixed router. This sibling router is
+# mounted at /api/v1 in main.py so the bot hits /api/v1/runs/{id}/scenario-result.
+runs_router = APIRouter(prefix="/runs", tags=["Runs"])
+
+
+# ── Android bot bridge ───────────────────────────────────────────────────────
+
+class ScenarioResultIn(BaseModel):
+    scenario_num: str
+    scenario_name: str
+    status: str                      # PASS | FAIL — recomputed from the two sides
+    consumer_status: str = "N/A"
+    business_status: str = "N/A"
+    error: Optional[str] = None
+    reasons: Optional[List[str]] = None
+    launch_time: Optional[float] = None
+
+
+class TriggerAndroidBotIn(BaseModel):
+    scenarios: List[Any] = []
+    consumer_device: Optional[str] = None
+    business_device: Optional[str] = None
+    bot_url: str = "http://localhost:9000"
+
+
+def _both_pass_status(consumer: str, business: str, incoming: str) -> str:
+    """The cross-app gate: FAIL if either side failed; else the incoming status."""
+    if consumer == "FAIL" or business == "FAIL":
+        return "FAIL"
+    return incoming
+
+
+def _recompute_run_status(db: Session, run: TestRun) -> str:
+    """A run passes only when every scenario passed; any FAIL fails the run."""
+    rows = db.query(ScenarioResult).filter(ScenarioResult.run_id == run.id).all()
+    if not rows:
+        return run.status
+    any_fail = any(r.status == "FAIL" for r in rows)
+    run.status = "failed" if any_fail else "passed"
+    run.job_state = run.status
+    return run.status
+
+
+def trigger_android_bot(
+    db: Session,
+    run: TestRun,
+    scenarios: List[Any],
+    consumer_device: Optional[str],
+    business_device: Optional[str],
+    bot_url: str,
+) -> Dict[str, Any]:
+    """Mark a run as an Android bot run and hand it to the bot adapter.
+
+    Shared by the JWT endpoint and the GitHub webhook so both trigger the bot the
+    same way. The callback_url is where the bot POSTs each scenario result back.
+    """
+    run.job_state = "running"
+    run.bot_type = "android"
+    db.commit()
+
+    platform_base = os.getenv("PLATFORM_BASE_URL", "http://localhost:8000")
+    callback_url = f"{platform_base}/api/v1/runs/{run.id}/scenario-result"
+
+    payload = {
+        "run_id": run.id,
+        "scenarios": scenarios,
+        "callback_url": callback_url,
+        "consumer_device": consumer_device,
+        "business_device": business_device,
+    }
+
+    delivered = False
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            client.post(f"{bot_url.rstrip('/')}/run", json=payload)
+        delivered = True
+    except Exception as exc:
+        # Not fatal: the run stays "running" and the bot can still pick the job
+        # up by polling the adapter. Surface it rather than pretending it sent.
+        logger.warning("Could not reach Android bot adapter at %s: %s", bot_url, exc)
+
+    return {
+        "triggered": True,
+        "run_id": run.id,
+        "callback_url": callback_url,
+        "delivered_to_bot": delivered,
+        "message": "Android bot triggered",
+    }
+
+
+@runs_router.post("/{run_id}/scenario-result")
+def post_scenario_result(
+    run_id: str,
+    body: ScenarioResultIn,
+    db: Session = Depends(get_db),
+    x_bot_secret: Optional[str] = Header(default=None),
+):
+    """Android bot posts ONE scenario result. No JWT — the bot is not a browser.
+
+    Authenticated with the X-Bot-Secret header when BOT_SECRET is set; open in
+    dev when it is not.
+    """
+    expected = os.getenv("BOT_SECRET", "")
+    if expected and x_bot_secret != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Bot-Secret")
+
+    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    status = _both_pass_status(body.consumer_status, body.business_status, body.status)
+
+    db.add(ScenarioResult(
+        run_id=run_id,
+        scenario_num=str(body.scenario_num),
+        scenario_name=body.scenario_name,
+        status=status,
+        consumer_status=body.consumer_status,
+        business_status=body.business_status,
+        error=body.error,
+        reasons=body.reasons or [],
+        launch_time=body.launch_time,
+    ))
+    db.commit()
+
+    overall = _recompute_run_status(db, run)
+    db.commit()
+
+    return {"saved": True, "overall_status": status, "run_status": overall}
+
+
+@runs_router.post("/{run_id}/trigger-android-bot")
+def trigger_android_bot_endpoint(
+    run_id: str,
+    body: TriggerAndroidBotIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Kick off the Android cross-app bot for an existing run."""
+    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return trigger_android_bot(
+        db, run, body.scenarios, body.consumer_device, body.business_device, body.bot_url
+    )
+
+
+@runs_router.get("/{run_id}/scenarios")
+def get_run_scenarios(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Every scenario result for a run + a Consumer/Business breakdown."""
+    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    rows = (
+        db.query(ScenarioResult)
+        .filter(ScenarioResult.run_id == run_id)
+        .all()
+    )
+    # Sort numerically when scenario_num is numeric, else lexically.
+    def _key(r):
+        n = re.sub(r"\D", "", r.scenario_num or "")
+        return (int(n) if n else 1_000_000, r.scenario_num or "")
+    rows.sort(key=_key)
+
+    scenarios = [{
+        "id": r.id,
+        "scenario_num": r.scenario_num,
+        "scenario_name": r.scenario_name,
+        "status": r.status,
+        "consumer_status": r.consumer_status,
+        "business_status": r.business_status,
+        "error": r.error,
+        "reasons": r.reasons or [],
+        "launch_time": r.launch_time,
+        "created_at": utc_iso(r.created_at),
+    } for r in rows]
+
+    return {
+        "run_id": run_id,
+        "bot_type": run.bot_type,
+        "total": len(rows),
+        "passed": sum(1 for r in rows if r.status == "PASS"),
+        "failed": sum(1 for r in rows if r.status == "FAIL"),
+        "consumer_passed": sum(1 for r in rows if r.consumer_status == "PASS"),
+        "consumer_failed": sum(1 for r in rows if r.consumer_status == "FAIL"),
+        "business_passed": sum(1 for r in rows if r.business_status == "PASS"),
+        "business_failed": sum(1 for r in rows if r.business_status == "FAIL"),
+        "rule": "Both Consumer AND Business must pass",
+        "scenarios": scenarios,
+    }
+
+# A job in any of these states has already been attempted or is in flight —
+# it must NEVER be handed back out to an agent.
+UNAVAILABLE_JOB_STATES = {
+    "assigned", "downloading", "preparing", "running",
+    "collecting_evidence", "completed", "failed", "cancelled", "stopped", "passed",
+}
 
 class PollJobRequest(BaseModel):
     agent_id: str
@@ -32,33 +241,65 @@ class StreamRequest(BaseModel):
 
 @router.post("/poll")
 def poll_job(req: PollJobRequest, db: Session = Depends(get_db)):
-    """Agent asks for the next queued job it can run."""
-    # Find a job that is 'queued' and where the requested device matches one of the agent's connected devices
-    # (For simplicity, our job has a `device_name` string which currently holds the requested device ID)
-    
-    # We query queued jobs, ordered by created_at ascending (FIFO)
-    queued_jobs = db.query(TestRun).filter(TestRun.job_state == "queued").order_by(TestRun.created_at.asc()).all()
-    
+    """Agent asks for the next queued job it can run.
+
+    A job is only ever handed out once: it must be strictly ``job_state ==
+    "queued"``, and it is flipped to ``"assigned"`` and committed BEFORE the
+    response is returned, so a second agent polling concurrently can no longer
+    see it. Anything already assigned/running/completed/failed/cancelled is
+    never returned.
+    """
+    # Strictly queued jobs only, FIFO by created_at.
+    queued_jobs = (
+        db.query(TestRun)
+        .filter(TestRun.job_state == "queued")
+        .order_by(TestRun.created_at.asc())
+        .all()
+    )
+
     for job in queued_jobs:
+        # Defensive re-check: never hand out a job that has already been attempted.
+        if job.job_state in UNAVAILABLE_JOB_STATES:
+            continue
+
         # If this job asks for a device that this agent has
         if job.device_name in req.connected_devices:
-            # Assign this job to the agent
-            job.job_state = "assigned"
-            job.agent_id = req.agent_id
-            job.started_at = datetime.utcnow()
-            
-            project = db.query(TestProject).filter(TestProject.id == job.project_id).first()
-            
+            # Claim the job atomically: mark assigned and COMMIT before returning
+            # so no other agent can pick up the same job id.
+            claimed = (
+                db.query(TestRun)
+                .filter(TestRun.id == job.id, TestRun.job_state == "queued")
+                .update(
+                    {
+                        "job_state": "assigned",
+                        "agent_id": req.agent_id,
+                        "started_at": datetime.utcnow(),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if not claimed:
+                # Another agent won the race for this job — try the next one.
+                continue
             db.commit()
-            
+
+            project = db.query(TestProject).filter(TestProject.id == job.project_id).first()
+
             return {
                 "job_id": job.id,
                 "project_id": job.project_id,
                 "git_url": project.git_url if project else "",
                 "branch": project.default_branch if project else "main",
-                "device_id": job.device_name
+                "device_id": job.device_name,
+                # The agent needs these to build the right artifact — without a
+                # platform it cannot know whether to run xcodebuild or gradlew.
+                "platform": (project.platform if project else None) or "ios",
+                "project_name": project.name if project else job.test_suite,
+                # Freshly claimed by this agent. Sent so the agent can assert it
+                # was never previously attempted before it starts executing.
+                "job_state": "assigned",
             }
-            
+
     # No jobs found for this agent
     return {"job_id": None}
 

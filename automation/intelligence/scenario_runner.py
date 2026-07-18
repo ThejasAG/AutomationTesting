@@ -1,0 +1,860 @@
+"""Interpret plain-language scenario steps and DRIVE the app, one step at a time.
+
+A non-technical user writes directions like:
+
+    open the app
+    open Nylai Kitchen2
+    select a time slot
+    book a table
+    verify the app did not crash
+
+Each step is resolved against the LIVE accessibility tree — so we tap what is
+actually on screen, not a guessed selector — the action is performed, and a real
+Appium/pytest line is recorded. The result is a runnable script that used real
+locators the whole way, plus a per-step report (and, for any step we could not
+resolve, the exact element that needs a testID).
+
+This is deliberately rule-based: the intents below cover the vocabulary a person
+naturally uses to describe an app flow. An LLM is only a last-resort tie-breaker
+(pick_element), because "which of these on-screen ids matches this phrase" is a
+classification a small local model can do, unlike writing a whole script.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+from appium.webdriver.common.appiumby import AppiumBy
+
+from automation.intelligence.element_catalog import (
+    AutoIdCatalog, METHOD_CONTAINER, METHOD_EXACT_ID, METHOD_HIERARCHY,
+    METHOD_PARTIAL_ID, METHOD_TEXT,
+)
+
+# Containers worth scanning when a keyword matches nothing that carries an id.
+# `products-list` is the FlatList: its ROWS have no testID and no
+# accessibilityLabel, and are told apart only by the text they render
+# ("TagliatellealMonti 5.1 ★ 17.51 €"). Scanning it is the only way a product can
+# ever be added — and therefore the only way cart/checkout/payment are reachable.
+_SCANNABLE_CONTAINERS = ("products-list", "category-list", "card-container-outer-layer")
+
+# Spinners/loaders to wait out before deciding an element is simply absent.
+_LOADING_HINTS = ("loading", "spinner", "activityindicator", "please wait", "loader")
+
+# The "book a date" popup that intercepts add-to-cart when no slot exists yet.
+# Both buttons are labelled, so this is handled by real ids.
+_BOOK_POPUP_ACCEPT = "preOrderBooking"   # -> the booking flow
+_BOOK_POPUP_DISMISS = "orderLater"       # DISCARDS the pending item — never auto-tap
+_BOOK_POPUP_TEXT = "book a date in order to"
+
+# ── Intent detection (checked in order) ──────────────────────────────────────
+_OPEN_APP = re.compile(r"\b(open|launch|start|go\s*to)\b.*\bapp\b", re.I)
+_ASSERT = re.compile(r"^\s*(assert|verify|check|confirm|ensure|expect|should\s+see|see\b)", re.I)
+_TYPE = re.compile(r"^\s*(type|enter|input|fill|search(?:\s+for)?)\b", re.I)
+_BACK = re.compile(r"^\s*(go\s*back|back\b|return\b|previous\b)", re.I)
+_WAIT = re.compile(r"^\s*(wait|pause|hold)\b", re.I)
+# Gestures. Without these every step was a tap, so anything reached by swiping —
+# the split/void/comp section of the payment UI — could not be expressed at all.
+_SWIPE = re.compile(r"^\s*(swipe|scroll|drag|flick)\b", re.I)
+_DIRECTION = re.compile(r"\b(left|right|up|down)\b", re.I)
+_TAP = re.compile(r"^\s*(tap|click|press|touch|open|select|choose|pick|go\s*to|goto|book|place|add|reserve|confirm|submit|proceed|continue)\b", re.I)
+
+# A sentence that DESCRIBES what the app does is an observation, not a command.
+# "it gives a popup of book a slot" names no target: it used to fall through to
+# the best-effort tap below, match the word "book", and really tap the Book
+# button — driving the app somewhere the user never asked for and reporting it
+# as a success. Check it and move on instead.
+_OBSERVATION = re.compile(
+    r"^\s*(?:it|there|a|an|the)\b.*?\b(?:gives?|shows?|will\s+show|appears?|displays?|pops?\s*up|opens?\s+up|should)\b",
+    re.I,
+)
+
+# Verbs that say HOW to touch, never WHAT to touch. Passing them to the locator
+# made `name CONTAINS "click"` a real query that could match any element.
+_UI_VERBS = {"tap", "click", "press", "touch", "go", "goto", "open",
+             "select", "choose", "pick"}
+
+# Verbs that CAN name their own target ("book a table" -> bookAppoitment), so
+# they stay searchable. They are not nouns, though, so they never count toward
+# how specifically a step identified what it wanted.
+_DOMAIN_VERBS = {"book", "place", "add", "reserve", "confirm",
+                 "submit", "proceed", "continue", "order"}
+
+# Controls that destroy state. A FUZZY match must never land on one of these by
+# accident: "click Menu" resolved to "menuLogout" on a screen with no "Menu",
+# which would have signed the session out and invalidated the whole run — while
+# reporting a green tap. An EXACT id, or a step that says the word itself, is
+# still honoured: the user asked for it by name.
+_DESTRUCTIVE = ("logout", "log out", "signout", "sign out", "delete", "remove",
+                "deactivate", "unsubscribe", "clear", "reset", "refund")
+
+# Words carrying no locator meaning — stripped when extracting the target phrase.
+_STOP = {
+    "the", "a", "an", "on", "to", "in", "into", "at", "of", "for", "with",
+    "please", "app", "screen", "page", "button", "icon", "option", "tab",
+    "and", "then", "is", "shown", "present", "visible", "displayed", "my",
+    "first", "any", "some", "it", "that", "this",
+}
+
+
+@dataclass
+class StepResult:
+    step: str
+    ok: bool
+    action: str = ""            # human-readable summary of what happened
+    detail: str = ""            # error / note
+    code: str = ""              # the recorded pytest line(s), if any
+    screenshot: Optional[str] = None
+
+
+@dataclass
+class ScenarioResult:
+    results: List[StepResult] = field(default_factory=list)
+    script: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return all(r.ok for r in self.results) and bool(self.results)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.ok)
+
+
+def _keywords(phrase: str) -> List[str]:
+    return [w for w in re.findall(r"[A-Za-z0-9]+", phrase) if w.lower() not in _STOP]
+
+
+def _locator_words(phrase: str) -> List[str]:
+    """Keywords worth searching for — the interaction verb is not one of them."""
+    return [w for w in _keywords(phrase) if w.lower() not in _UI_VERBS]
+
+
+def _nouns(words: List[str]) -> List[str]:
+    """The words that actually name a target, de-duplicated, order preserved."""
+    return list(dict.fromkeys(
+        w for w in words if w.lower() not in _UI_VERBS and w.lower() not in _DOMAIN_VERBS
+    ))
+
+
+@dataclass
+class Match:
+    """A resolved element, plus how confidently it was resolved.
+
+    ``text`` is the element's OWN name/label — the only honest basis for saying
+    what was tapped, and for judging whether the step really identified it.
+    ``method``/``confidence``/``auto_id`` carry how it was found, so a guess is
+    never reported as a certainty.
+    """
+    el: object = None
+    by: str = ""
+    value: object = None
+    text: str = ""
+    exact: bool = False     # resolved by exact accessibility id — always trusted
+    method: str = ""
+    confidence: float = 0.0
+    auto_id: str = ""       # temporary id minted when the app named nothing
+
+    def __bool__(self) -> bool:
+        return self.el is not None
+
+
+def _target_phrase(step: str, verb_re: re.Pattern) -> str:
+    """Everything after the leading verb is the target description."""
+    m = verb_re.match(step)
+    rest = step[m.end():] if m else step
+    return rest.strip(" .:-\t")
+
+
+class ScenarioRunner:
+    def __init__(self, driver, bundle_id: str, screenshot_dir: Optional[str] = None,
+                 catalog: Optional[AutoIdCatalog] = None):
+        self.d = driver
+        self.bid = bundle_id
+        self.shot_dir = screenshot_dir
+        self._used_ids: set[str] = set()   # for building the script
+        # Names elements the app never named, and records how sure we were.
+        self.catalog = catalog or AutoIdCatalog()
+        self._screen = "unknown"
+
+    # ── element resolution against the live screen ───────────────────────────
+
+    # Touchable list/row/chip wrappers — tapping the WRAPPER navigates, whereas
+    # tapping the text label inside it often does nothing.
+    _CONTAINERS = ("card-container-outer-layer", "button-container-outer-layer",
+                   "chip-container-outer-layer", "button-container")
+
+    def _element_text(self, el, attrs: Tuple[str, ...] = ("name", "label", "value")) -> str:
+        """The element's own name/label/value — what it really is.
+
+        Every attribute is a separate Appium round trip, and these are read for
+        each candidate, so callers screening a list pass only the attributes
+        their predicate actually matched on.
+        """
+        parts = []
+        for attr in attrs:
+            try:
+                v = el.get_attribute(attr)
+            except Exception:
+                v = None
+            if v:
+                parts.append(str(v))
+        return " ".join(dict.fromkeys(parts))
+
+    def _describe(self, m: "Match") -> str:
+        """What was ACTUALLY resolved — never the user's own phrase.
+
+        Echoing the phrase back ('tapped "menu and open menu section"') made a tap
+        on the WRONG element indistinguishable from a correct one: the report just
+        repeated the request.
+        """
+        if m.by == "accessibility_id":
+            return str(m.value)
+        text = (m.text or "").strip()
+        if text:
+            # Say it was an INVENTED name, never pass a guess off as an id.
+            if m.auto_id:
+                return f"{text[:44]} [{m.auto_id} ~{m.confidence:.2f}]"
+            return text[:60]
+        if m.by == "container":
+            cid, kw = m.value
+            return f"{cid} containing '{kw}'" if kw else str(cid)
+        return "(unnamed element)"
+
+    def _vague(self, m: "Match", words: List[str]) -> Optional[Tuple[List[str], List[str]]]:
+        """(nouns, matched) when the step named 2+ targets but the element only
+        answers to one of them — otherwise None.
+
+        'menu section' matching an element whose text is merely 'menu' is a guess,
+        and a wrong tap silently invalidates every step after it. An exact
+        accessibility id is never a guess, so it is always trusted.
+        """
+        if m.exact:
+            return None
+        nouns = _nouns(words)
+        if len(nouns) < 2:
+            return None
+        low = (m.text or "").lower()
+        matched = [w for w in nouns if w.lower() in low]
+        return (nouns, matched) if len(matched) <= 1 else None
+
+    def _destructive_guess(self, m: "Match", step: str) -> Optional[str]:
+        """The destructive word a FUZZY match landed on that the step never said.
+
+        None when the match is exact (named by id), when the step asked for it,
+        or when nothing destructive is involved.
+        """
+        if m.exact:
+            return None
+        low_step = step.lower()
+        low_el = (m.text or "").lower()
+        for word in _DESTRUCTIVE:
+            if word in low_el and word not in low_step:
+                return word
+        return None
+
+    # ── screen identity (for the technical-debt report) ──────────────────────
+
+    def current_screen(self) -> str:
+        """A best-effort name for the screen, so the report can tell developers
+        WHERE to add identifiers. Derived from ids the app does expose."""
+        markers = [
+            ("products-list", "StoreView/Products"),
+            ("bookAppoitment", "StoreView/Reservation"),
+            ("cartCheckout", "Cart"),
+            ("ePayment", "Payment/Stripe"),
+            ("menuLogout", "Menu/Drawer"),
+            ("signIn", "Login"),
+            ("card-container-outer-layer", "Home"),
+        ]
+        for marker, name in markers:
+            try:
+                if self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, marker):
+                    self._screen = name
+                    return name
+            except Exception:
+                continue
+        return self._screen
+
+    # ── resilience ───────────────────────────────────────────────────────────
+
+    def wait_for_idle(self, timeout: float = 12.0) -> bool:
+        """Block while a spinner is on screen. Returns False on timeout.
+
+        An element is not 'missing' just because the screen has not finished
+        loading — treating those two as the same thing is what makes a suite
+        flaky.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                src = (self.d.page_source or "").lower()
+            except Exception:
+                return True
+            if not any(h in src for h in _LOADING_HINTS):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _resolve(self, words: List[str], prefer_container: bool = False,
+                 step: str = "") -> "Match":
+        """Best match for *words*, or a falsy Match.
+
+        Order, strongest first:
+          1. exact accessibility id          (real id      — confidence 1.00)
+          2. tappable container + keyword    (container    — 0.85)
+          3. id CONTAINS keyword             (partial id   — 0.70)
+          4. visible label CONTAINS keyword  (partial id   — 0.70)
+          5. text/hierarchy scan of a known list  (text/hierarchy — 0.60/0.50)
+
+        Step 5 is what makes an unlabelled app automatable: it walks a known
+        container's subtree and matches the text a row RENDERS. Nothing is ever
+        refused merely for lacking an identifier.
+        """
+        # The words rejoined are the label as a person would write it ("1 hr"),
+        # which is often the exact accessibility id — tried before any squashing.
+        phrase = " ".join(words)
+        m = self._resolve_raw(words, prefer_container, phrase=phrase)
+
+        # Nothing with an id matched — the element may simply have none.
+        if not m:
+            m = self._scan_containers(words, step)
+
+        if m:
+            if not m.text:
+                m.text = self._element_text(m.el)
+            # Mint a temporary id for anything the app did not name itself.
+            if m.method != METHOD_EXACT_ID and not m.auto_id:
+                entry = self.catalog.mint(
+                    text=m.text, method=m.method, screen=self.current_screen(),
+                    step=step, prefix="auto",
+                )
+                m.auto_id = entry.auto_id
+                m.confidence = entry.confidence
+            elif m.method == METHOD_EXACT_ID:
+                self.catalog.record_resolution(
+                    step, METHOD_EXACT_ID, str(m.value), self._screen, 1.0)
+                m.confidence = 1.0
+        return m
+
+    def _scan_containers(self, words: List[str], step: str) -> "Match":
+        """Find an element by the TEXT it renders, inside a known list.
+
+        The product rows under `products-list` are XCUIElementTypeOther with no
+        testID and no accessibilityLabel — only their text ("TagliatellealMonti
+        5.1 ★ 17.51 €") tells them apart. Without this, no product can be added
+        and the whole payment path is untestable.
+        """
+        targets = [w for w in words if len(w) >= 3 and w.lower() not in _DOMAIN_VERBS]
+        if not targets:
+            return Match()
+
+        for cid in _SCANNABLE_CONTAINERS:
+            try:
+                containers = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cid)
+            except Exception:
+                continue
+            if not containers:
+                continue
+
+            # Rank rows by how many of the step's words their text carries, so
+            # "monti" picks TagliatellealMonti rather than the first row.
+            best, best_score, best_text = None, 0, ""
+            for container in containers[:4]:
+                try:
+                    kids = container.find_elements(AppiumBy.XPATH, ".//*")
+                except Exception:
+                    continue
+                for el in kids[: self._MAX_CANDIDATES * 3]:
+                    text = self._element_text(el, ("name",))
+                    if not text or len(text) > self._AGGREGATE_CHARS:
+                        continue
+                    low = text.lower()
+                    score = sum(1 for w in targets if w.lower() in low)
+                    if score > best_score:
+                        best, best_score, best_text = el, score, text
+
+            if best is not None and best_score:
+                # Matched real rendered text -> text-match; otherwise structural.
+                method = METHOD_TEXT if best_score else METHOD_HIERARCHY
+                return Match(best, "scanned", (cid, best_text), text=best_text,
+                             method=method)
+        return Match()
+
+    def _resolve_raw(self, words: List[str], prefer_container: bool = False,
+                     phrase: str = "") -> "Match":
+        # The label as WRITTEN. Real ids contain spaces ("1 hr", "Reserve a
+        # table", "Not Sure"); squashing them to "1hr"/"1-hr" never matched, so a
+        # step naming a control exactly still fell through to fuzzy matching.
+        if phrase:
+            for cand in (phrase.strip(), phrase.strip().title()):
+                if not cand:
+                    continue
+                els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
+                if els:
+                    return Match(els[0], "accessibility_id", cand, exact=True,
+                                 method=METHOD_EXACT_ID)
+
+        joined = "".join(words)
+        camel = (words[0].lower() + "".join(w.capitalize() for w in words[1:])) if words else ""
+        kebab = "-".join(w.lower() for w in words)
+        long_words = [w for w in words if len(w) >= 3]
+
+        # 1. exact accessibility id
+        for cand in filter(None, {joined, camel, kebab, *words}):
+            els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
+            if els:
+                return Match(els[0], "accessibility_id", cand, exact=True,
+                             method=METHOD_EXACT_ID)
+
+        # 2. a tappable container whose subtree contains a keyword (cards, chips)
+        if prefer_container:
+            for cid in self._CONTAINERS:
+                containers = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cid)
+                for w in sorted(long_words, key=len, reverse=True):
+                    for c in containers:
+                        if c.find_elements(AppiumBy.IOS_PREDICATE,
+                                           f'name CONTAINS[c] "{w}" OR label CONTAINS[c] "{w}"'):
+                            return Match(c, "container", (cid, w), method=METHOD_CONTAINER)
+
+        # 3. id CONTAINS a keyword (e.g. "book" -> bookAppoitment)
+        for w in sorted(long_words, key=len, reverse=True):
+            pred = f'name CONTAINS[c] "{w}" AND name.length < {self._AGGREGATE_CHARS}'
+            el = self._most_specific(
+                self.d.find_elements(AppiumBy.IOS_PREDICATE, pred), w, ("name",))
+            if el is not None:
+                return Match(el, "ios_predicate", pred, method=METHOD_PARTIAL_ID)
+
+        # 4. visible label CONTAINS a keyword
+        for w in sorted(long_words, key=len, reverse=True):
+            pred = (f'(name CONTAINS[c] "{w}" AND name.length < {self._AGGREGATE_CHARS})'
+                    f' OR (label CONTAINS[c] "{w}" AND label.length < {self._AGGREGATE_CHARS})')
+            el = self._most_specific(
+                self.d.find_elements(AppiumBy.IOS_PREDICATE, pred), w, ("name", "label"))
+            if el is not None:
+                return Match(el, "ios_predicate", pred, method=METHOD_PARTIAL_ID)
+
+        return Match()
+
+    # How many of the (already length-filtered) candidates to rank. Each costs an
+    # Appium round trip.
+    _MAX_CANDIDATES = 12
+
+    # A screen wrapper's name is the concatenation of EVERY descendant id — on the
+    # home screen that is 2400+ characters, and it "contains" almost any keyword.
+    # A real target ("bookAppoitment", "menuLogout") is short. Tapping a wrapper
+    # does nothing yet still reported a successful tap, so they are excluded IN
+    # THE PREDICATE: filtering them server-side cut `name CONTAINS "menu"` from
+    # 51 elements/64s to 11 elements/10s, and what comes back is real leaves.
+    _AGGREGATE_CHARS = 120
+
+    def _most_specific(self, els: List, w: str, attrs: Tuple[str, ...]):
+        """The tightest real element matching *w*, or None if all are wrappers.
+
+        find_elements returns DOCUMENT ORDER — ancestors first — so els[0] is the
+        OUTERMOST match: for "product" that is the whole screen. The shortest own
+        text is the leaf actually carrying the word.
+        """
+        best, best_len = None, None
+        for el in els[: self._MAX_CANDIDATES]:
+            text = self._element_text(el, attrs)
+            if w.lower() not in text.lower():
+                continue
+            if len(text) > self._AGGREGATE_CHARS:
+                continue
+            if best is None or len(text) < best_len:
+                best, best_len = el, len(text)
+        return best
+
+    def _tap_resolved(self, m: "Match") -> str:
+        """Tap the resolved element and return the pytest line(s) that reproduce it."""
+        el, by, value = m.el, m.by, m.value
+        el.click()
+
+        # Found by scanning a list for its text — there is no id to record, so
+        # the generated script has to reproduce the same scan. It is pinned to
+        # rendered text, which is exactly the fragility the report flags.
+        if by == "scanned":
+            cid, text = value
+            snippet = text.split()[0][:30] if text else ""
+            return (
+                f'    # no testID on this row — matched by rendered text ({m.auto_id})\n'
+                f'    _list = driver.find_element(AppiumBy.ACCESSIBILITY_ID, "{cid}")\n'
+                f'    for _row in _list.find_elements(AppiumBy.XPATH, ".//*"):\n'
+                f'        if "{snippet}".lower() in (_row.get_attribute("name") or "").lower():\n'
+                f'            _row.click(); break'
+            )
+        if by == "accessibility_id":
+            self._used_ids.add(value)
+            return f'    by_id(driver, "{value}").click()'
+        if by == "container":
+            cid, kw = value
+            if kw:
+                return (
+                    f'    for _c in driver.find_elements(AppiumBy.ACCESSIBILITY_ID, "{cid}"):\n'
+                    f'        if _c.find_elements(AppiumBy.IOS_PREDICATE, \'name CONTAINS[c] "{kw}" OR label CONTAINS[c] "{kw}"\'):\n'
+                    f'            _c.click(); break'
+                )
+            return f'    driver.find_elements(AppiumBy.ACCESSIBILITY_ID, "{cid}")[0].click()'
+        return f'    driver.find_element(AppiumBy.IOS_PREDICATE, {value!r}).click()'
+
+    # ── per-step execution ───────────────────────────────────────────────────
+
+    def _do_step(self, step: str) -> StepResult:
+        s = step.strip()
+        if not s or s.startswith("#"):
+            return StepResult(step=s, ok=True, action="skipped (comment/blank)")
+
+        # OPEN APP
+        if _OPEN_APP.search(s):
+            self.d.activate_app(self.bid)
+            self._wait_settle()
+            return StepResult(step=s, ok=True, action="activated the app",
+                              code=f'    driver.activate_app("{self.bid}")\n    time.sleep(3)')
+
+        # WAIT
+        if _WAIT.match(s):
+            secs = int((re.search(r"(\d+)", s) or [0, "2"])[1] if re.search(r"\d+", s) else 2)
+            time.sleep(secs)
+            return StepResult(step=s, ok=True, action=f"waited {secs}s",
+                              code=f"    time.sleep({secs})")
+
+        # SWIPE / SCROLL — checked before TAP so "scroll down" is never a tap.
+        if _SWIPE.match(s):
+            return self._swipe_step(s)
+
+        # BACK
+        if _BACK.match(s):
+            back = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "screenBackBtn")
+            if back:
+                back[0].click(); self._wait_settle()
+                self._used_ids.add("screenBackBtn")
+                return StepResult(step=s, ok=True, action="went back",
+                                  code='    by_id(driver, "screenBackBtn").click()')
+            return StepResult(step=s, ok=False, action="could not go back",
+                              detail="No back control (screenBackBtn) on this screen.")
+
+        # ASSERT
+        if _ASSERT.match(s):
+            phrase = _target_phrase(s, _ASSERT)
+            low = phrase.lower()
+
+            # app-state assertion ("the app is running / did not crash")
+            if (("app" in low and any(k in low for k in ("run", "crash", "foreground", "alive", "load", "open")))
+                    or any(k in low for k in ("no crash", "not crash", "no redbox", "no error"))):
+                state = self.d.query_app_state(self.bid)
+                ok = state == 4
+                return StepResult(
+                    step=s, ok=ok,
+                    action="app is in the foreground" if ok else "app is NOT in the foreground",
+                    detail="" if ok else f"query_app_state returned {state} (4 == foreground).",
+                    code='    assert driver.query_app_state(BUNDLE_ID) == 4, "app not in foreground"')
+
+            words = _locator_words(phrase)
+            m = self._resolve(words, step=s)
+            # chip/slot assertion — chips carry times, not the words "time/slot".
+            if not m and any(w.lower() in ("slot", "time", "option", "chip") for w in words):
+                chips = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "chip-container-outer-layer")
+                if chips:
+                    m = Match(chips[0], "chip", "chip-container-outer-layer", exact=True)
+
+            if not m:
+                return StepResult(step=s, ok=False, action=f'"{phrase}" NOT found',
+                                  detail=f"No element matches '{phrase}'.")
+
+            vague = self._vague(m, words)
+            if vague:
+                nouns, matched = vague
+                return StepResult(
+                    step=s, ok=False,
+                    action=f'could not confirm "{phrase}"',
+                    detail=f"Closest element was \"{self._describe(m)}\", which only matches "
+                           f"{matched or 'none'} of {nouns} — too weak to call this verified.")
+
+            if m.by in ("accessibility_id", "chip"):
+                self._used_ids.add(m.value)
+                code = f'    assert exists(driver, "{m.value}"), "{phrase} not found"'
+            else:
+                code = f'    assert driver.find_elements(AppiumBy.IOS_PREDICATE, {m.value!r}), "{phrase} not found"'
+            return StepResult(step=s, ok=True,
+                              action=f'found "{self._describe(m)}"',
+                              code=code)
+
+        # TYPE
+        if _TYPE.match(s):
+            phrase = _target_phrase(s, _TYPE)
+            # "type <text> in <field>" — split on ' in '
+            m = re.split(r"\s+in\s+", phrase, maxsplit=1)
+            text = m[0].strip('"\' ')
+            target = m[1] if len(m) > 1 else "search"
+            m = self._resolve(_locator_words(target), step=s)
+            if not m:
+                return StepResult(step=s, ok=False, action=f'no field for "{target}"',
+                                  detail=f"No input matches '{target}'.")
+            m.el.send_keys(text)
+            code = (f'    by_id(driver, "{m.value}").send_keys({text!r})'
+                    if m.by == "accessibility_id"
+                    else f'    driver.find_element(AppiumBy.IOS_PREDICATE, {m.value!r}).send_keys({text!r})')
+            if m.by == "accessibility_id":
+                self._used_ids.add(m.value)
+            return StepResult(step=s, ok=True,
+                              action=f'typed "{text}" into "{self._describe(m)}"', code=code)
+
+        # TAP / open / select / book / …
+        if _TAP.match(s):
+            phrase = _target_phrase(s, _TAP)
+            # The whole step, minus the interaction verb: "book" still reaches
+            # bookAppoitment, but "click" is no longer a thing to search for.
+            words = _locator_words(s)
+            return self._tap_step(s, phrase, words)
+
+        # An observation ("it gives a popup…") asks nothing to be tapped. Verify
+        # what it claims instead of guessing at a target.
+        if _OBSERVATION.match(s):
+            return self._verify_step(s)
+
+        # Unrecognised — best effort tap on the whole phrase ("nylai kitchen 2").
+        return self._tap_step(s, s, _locator_words(s), inferred=True)
+
+    def _tap_step(self, s: str, phrase: str, words: List[str], inferred: bool = False) -> StepResult:
+        m = self._resolve(words, prefer_container=True, step=s)
+
+        # "select a time slot" language -> the first slot chip.
+        if not m and any(w.lower() in ("slot", "time", "option", "chip") for w in words):
+            chips = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "chip-container-outer-layer")
+            if chips:
+                m = Match(chips[0], "container", ("chip-container-outer-layer", None), exact=True)
+
+        if not m:
+            return StepResult(
+                step=s, ok=False,
+                action="did not understand this step" if inferred else f'could not find "{phrase}"',
+                detail=(f"Could not map '{s}' to an action or element." if inferred else
+                        f"No element matches '{phrase}' — it may need a testID "
+                        f"(accessible={{true}})."))
+
+        # Never let a GUESS destroy the session. Tapping a wrong button is
+        # recoverable; logging out or deleting the account ends the run and
+        # everything after it is meaningless.
+        destructive = self._destructive_guess(m, s)
+        if destructive:
+            return StepResult(
+                step=s, ok=False,
+                action=f'refused to tap "{self._describe(m)}" — did not tap',
+                detail=f"That is a destructive control ({destructive}) and this step "
+                       f"never asked for it. Name it exactly if you mean it.")
+
+        # Tap the best relevant element rather than holding out for a perfect
+        # name: "menu section" should still open "Menu". A partial match is only
+        # dangerous when it is SILENT, so the report always names the element
+        # actually tapped, and says so when it answered to only part of the step.
+        # (Asserting stays strict — claiming something is true is not best-effort.)
+        code = self._tap_resolved(m)
+        self._wait_settle()
+
+        vague = self._vague(m, words)
+        if vague:
+            nouns, matched = vague
+            return StepResult(
+                step=s, ok=True,
+                action=f'tapped "{self._describe(m)}" — matched only {matched} of {nouns}',
+                detail=f"Give the intended target a testID (accessible={{true}}) if this is "
+                       f"not the element you meant.",
+                code=code)
+
+        return StepResult(step=s, ok=True, action=f'tapped "{self._describe(m)}"', code=code)
+
+    def _swipe_step(self, s: str) -> StepResult:
+        """Swipe the screen, or one element: 'swipe left on splitCard' / 'scroll down'.
+
+        *direction* is the way the finger travels, which is how XCUITest's
+        `mobile: swipe` reads it — 'swipe left' reveals what is off to the right.
+        """
+        d = _DIRECTION.search(s)
+        if not d:
+            return StepResult(
+                step=s, ok=False, action="no direction in this step",
+                detail="Say which way: 'swipe left', 'scroll down'.")
+        direction = d.group(1).lower()
+
+        # "swipe left on <target>" — anything after 'on' names the element to
+        # swipe. Without it the gesture goes to the whole screen.
+        args: dict = {"direction": direction}
+        on = re.search(r"\bon\s+(.+)$", s, re.I)
+        target = on.group(1).strip() if on else ""
+
+        if target:
+            m = self._resolve(_locator_words(target), prefer_container=True, step=s)
+            if not m:
+                return StepResult(
+                    step=s, ok=False, action=f'could not find "{target}"',
+                    detail=f"No element matches '{target}' to swipe on.")
+            args["element"] = m.el.id
+            where = f' on "{self._describe(m)}"'
+            code = (f'    _el = driver.find_element(AppiumBy.ACCESSIBILITY_ID, "{m.value}")\n'
+                    f'    driver.execute_script("mobile: swipe", '
+                    f'{{"direction": "{direction}", "element": _el.id}})'
+                    if m.by == "accessibility_id" else
+                    f'    driver.execute_script("mobile: swipe", {{"direction": "{direction}"}})')
+        else:
+            where = ""
+            code = f'    driver.execute_script("mobile: swipe", {{"direction": "{direction}"}})'
+
+        try:
+            self.d.execute_script("mobile: swipe", args)
+        except Exception as e:
+            return StepResult(step=s, ok=False, action=f"swipe {direction} failed",
+                              detail=str(e)[:200])
+
+        self._wait_settle()
+        return StepResult(step=s, ok=True, action=f"swiped {direction}{where}", code=code)
+
+    def _verify_step(self, s: str) -> StepResult:
+        """Check that an observed thing is on screen. Never taps."""
+        words = _locator_words(s)
+        m = self._resolve(words, step=s)
+        if not m:
+            return StepResult(step=s, ok=False, action="could not verify this",
+                              detail=f"Nothing on screen matches '{s}'.")
+        vague = self._vague(m, words)
+        if vague:
+            nouns, matched = vague
+            return StepResult(
+                step=s, ok=False, action="could not verify this",
+                detail=f"Closest element was \"{self._describe(m)}\", which only matches "
+                       f"{matched or 'none'} of {nouns} — too weak to call this verified.")
+        code = (f'    assert exists(driver, "{m.value}"), "{s} not found"'
+                if m.by == "accessibility_id"
+                else f'    assert driver.find_elements(AppiumBy.IOS_PREDICATE, {m.value!r}), "{s} not found"')
+        if m.by == "accessibility_id":
+            self._used_ids.add(m.value)
+        return StepResult(step=s, ok=True, action=f'saw "{self._describe(m)}"', code=code)
+
+    def _wait_settle(self, secs: float = 2.0):
+        time.sleep(secs)
+
+    # ── public ────────────────────────────────────────────────────────────────
+
+    # ── crash + popup awareness ──────────────────────────────────────────────
+
+    def app_crash(self) -> Optional[str]:
+        """The JS error on screen, if the app has red-boxed. None when healthy.
+
+        A crash must never be reported as a passing step: once the red box is up
+        the app is gone, and every step after it is measuring the error screen.
+        """
+        try:
+            src = self.d.page_source or ""
+        except Exception:
+            return None
+        if "Render Error" in src:
+            m = re.findall(r'name="([^"]*(?:not an object|undefined is not|TypeError)[^"]*)"', src)
+            return (m[0][:160] if m else "Render Error (see screenshot)")
+        if "RCTFatal" in src or "No bundle URL present" in src:
+            return "RCTFatal — the JS bundle failed to load (is Metro running?)"
+        return None
+
+    def book_popup_open(self) -> bool:
+        """True when the 'You need to book a date' popup is intercepting."""
+        try:
+            if self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, _BOOK_POPUP_ACCEPT):
+                return True
+            return _BOOK_POPUP_TEXT in (self.d.page_source or "").lower()
+        except Exception:
+            return False
+
+    def handle_book_popup(self) -> Optional[StepResult]:
+        """Take the booking offer when the popup blocks an add-to-cart.
+
+        NEVER taps `orderLater`: that dismisses the popup AND silently discards
+        the item the user was adding, leaving an empty cart and a run that looks
+        like it worked.
+        """
+        if not self.book_popup_open():
+            return None
+
+        els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, _BOOK_POPUP_ACCEPT)
+        if not els:
+            return None
+        els[0].click()
+        self._wait_settle(3.0)
+
+        crash = self.app_crash()
+        if crash:
+            return StepResult(
+                step=f"auto: book a date ({_BOOK_POPUP_ACCEPT})", ok=False,
+                action="the app crashed while opening the booking flow",
+                detail=f"APP BUG (not automation): {crash}",
+                code="")
+        return StepResult(
+            step=f"auto: book a date ({_BOOK_POPUP_ACCEPT})", ok=True,
+            action="took the booking offer from the popup",
+            code=f'    by_id(driver, "{_BOOK_POPUP_ACCEPT}").click()')
+
+    def run_one(self, step: str, index: int) -> StepResult:
+        """Run a single step and return its result. Never raises.
+
+        Kept public and self-contained so a caller that reports progress live can
+        drive the scenario one step at a time and still get behaviour identical
+        to ``run()`` — the two must never drift apart.
+
+        *index* only names the failure screenshot.
+        """
+        # A step cannot succeed against a half-loaded screen, and an element is
+        # not "missing" merely because the spinner has not cleared yet.
+        self.wait_for_idle()
+
+        try:
+            res = self._do_step(step)
+        except Exception as e:  # never let one step abort the whole scenario
+            res = StepResult(step=step, ok=False, action="error", detail=str(e)[:200])
+
+        # Did this step kill the app? Once the red box is up every later step is
+        # measuring the error screen, so a crash is never a pass.
+        crash = self.app_crash()
+        if crash and res.ok:
+            res = StepResult(
+                step=step, ok=False,
+                action=f"{res.action} — then the app CRASHED",
+                detail=f"APP BUG (not automation): {crash}",
+                code=res.code)
+
+        if not res.ok and self.shot_dir:
+            try:
+                path = os.path.join(self.shot_dir, f"step_{index}.png")
+                self.d.get_screenshot_as_file(path)
+                res.screenshot = path
+            except Exception:
+                pass
+        return res
+
+    def run(self, steps: List[str]) -> ScenarioResult:
+        out = ScenarioResult()
+        for step in steps:
+            out.results.append(self.run_one(step, len(out.results)))
+        out.script = self.build_script(out)
+        return out
+
+    def build_script(self, result: ScenarioResult, test_name: str = "scenario") -> str:
+        body = []
+        for r in result.results:
+            body.append(f"    # {r.step}")
+            if r.code:
+                body.append(r.code)
+            elif not r.ok:
+                body.append(f"    # UNRESOLVED: {r.detail}")
+            body.append("")
+        indented = "\n".join(body) or "    pass"
+        return (
+            '"""Generated from a plain-language scenario by the Scenario Runner.\n'
+            "Every locator below was resolved against the live app, so it ran as written.\n"
+            '"""\n\n'
+            "import time\n"
+            "from appium.webdriver.common.appiumby import AppiumBy\n"
+            "from conftest import BUNDLE_ID, by_id, exists\n\n\n"
+            f"def test_{test_name}(driver):\n{indented}\n"
+        )

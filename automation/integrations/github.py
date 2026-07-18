@@ -13,6 +13,32 @@ class GitHubIntegration:
         }
         self.base_url = "https://api.github.com"
 
+    def list_open_prs(self, owner: str, repo: str) -> List[Dict[str, Any]]:
+        """Open pull requests for a repo, newest first. Raises on API error so the
+        caller can distinguish 'no PRs' from 'bad token / rate limited'."""
+        url = f"{self.base_url}/repos/{owner}/{repo}/pulls"
+        res = requests.get(
+            url,
+            headers=self.headers,
+            params={"state": "open", "sort": "updated", "direction": "desc", "per_page": 50},
+            timeout=15,
+        )
+        res.raise_for_status()
+        return [
+            {
+                "number": pr["number"],
+                "title": pr["title"],
+                "author": pr.get("user", {}).get("login"),
+                "branch": pr.get("head", {}).get("ref"),
+                "base": pr.get("base", {}).get("ref"),
+                "commit_sha": pr.get("head", {}).get("sha"),
+                "draft": pr.get("draft", False),
+                "updated_at": pr.get("updated_at"),
+                "url": pr.get("html_url"),
+            }
+            for pr in res.json()
+        ]
+
     def fetch_pr_metadata(self, owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
         """Fetch PR details"""
         url = f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_number}"

@@ -1,5 +1,13 @@
 """FastAPI REST API for querying test runs and RCA reports"""
 
+# Load .env BEFORE any automation.* import. Several modules (e.g. ai/provider.py)
+# read os.getenv at import time, so loading later would leave them holding the
+# defaults and the .env values would be silently ignored.
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -26,10 +34,14 @@ from automation.api.v1.routers.automation import router as automation_router
 from automation.api.v1.routers.analytics import router as analytics_router
 from automation.api.v1.routers.auth import router as auth_router
 from automation.api.v1.routers.projects import router as projects_router
+from automation.api.v1.routers.groups import router as groups_router
+from automation.api.v1.routers.dependency import router as dependency_router
+from automation.api.v1.routers.pull_requests import router as pull_requests_router
+from automation.api.v1.routers.scenario import router as scenario_router
 from automation.appium_service.router import router as appium_router
 from automation.api.v1.routers.intelligence import router as intelligence_router
 from automation.api.v1.routers.agents import router as agents_router
-from automation.api.v1.routers.jobs import router as jobs_router
+from automation.api.v1.routers.jobs import router as jobs_router, runs_router
 from automation.api.v1.routers.ops import router as ops_router
 from automation.api.v1.routers import webhooks
 from automation.utils.security import install_secret_filter
@@ -139,9 +151,16 @@ v1_router.include_router(auth_router)
 v1_router.include_router(automation_router, dependencies=[Depends(get_current_user)])
 v1_router.include_router(analytics_router, dependencies=[Depends(get_current_user)])
 v1_router.include_router(projects_router, dependencies=[Depends(get_current_user)])
+v1_router.include_router(groups_router, dependencies=[Depends(get_current_user)])
+v1_router.include_router(dependency_router, dependencies=[Depends(get_current_user)])
+v1_router.include_router(pull_requests_router)
+v1_router.include_router(scenario_router)
 v1_router.include_router(intelligence_router)
 v1_router.include_router(agents_router)
 v1_router.include_router(jobs_router)
+# Mounted WITHOUT a blanket JWT dep: /runs/{id}/scenario-result is called by the
+# Android bot (X-Bot-Secret), while the other two routes enforce JWT per-route.
+v1_router.include_router(runs_router)
 v1_router.include_router(ops_router)
 
 # Mount external routers
@@ -242,20 +261,14 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
 
 @v1_router.get("/runs/{run_id}/rca", dependencies=[Depends(get_current_user)])
 def get_rca(run_id: str, db: Session = Depends(get_db)):
-    """Get RCA report for a run"""
-    rca = database.get_rca_report(db, run_id)
-    if not rca:
-        raise HTTPException(status_code=404, detail="RCA report not found")
-    return {"rca": rca}
+    """Get RCA report for a run. Absent RCA is normal (a passing run has none)."""
+    return {"rca": database.get_rca_report(db, run_id)}
 
 
 @v1_router.get("/runs/{run_id}/evidence", dependencies=[Depends(get_current_user)])
 def get_evidence(run_id: str, db: Session = Depends(get_db)):
-    """Get Evidence bundle for a run"""
-    evidence = database.get_evidence(db, run_id)
-    if not evidence:
-        raise HTTPException(status_code=404, detail="Evidence not found")
-    return {"evidence": evidence}
+    """Get Evidence bundle for a run. Absent evidence is normal (nothing collected yet)."""
+    return {"evidence": database.get_evidence(db, run_id)}
 
 
 @v1_router.get("/trends", dependencies=[Depends(get_current_user)])

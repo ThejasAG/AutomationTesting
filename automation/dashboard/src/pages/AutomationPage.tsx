@@ -1,8 +1,9 @@
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getDevices, getProjects, addProject, startRun, stopRun, getLiveStatus } from '../api';
+import { getDevices, getProjects, startRun, stopRun, getLiveStatus } from '../api';
 import type { Device, Project } from '../api';
-import { Play, Square, Smartphone, FolderTree, Plus, GitBranch, Activity, CheckCircle2, XCircle } from 'lucide-react';
+import { Play, Square, Smartphone, FolderTree, GitBranch, Activity, CheckCircle2, XCircle, FolderGit2 } from 'lucide-react';
+import ScenarioPanel from '../components/ScenarioPanel';
 
 export default function AutomationPage() {
     const navigate = useNavigate();
@@ -14,9 +15,6 @@ export default function AutomationPage() {
     const [activeRunId, setActiveRunId] = useState<string | null>(null);
     const [runStatus, setRunStatus] = useState<any>(null);
     const [polling, setPolling] = useState(false);
-    
-    const [showAddProject, setShowAddProject] = useState(false);
-    const [newProject, setNewProject] = useState({ name: '', description: '', git_url: '', default_branch: 'main' });
     
     const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -110,56 +108,22 @@ export default function AutomationPage() {
         }
     };
     
-    const handleAddProject = async (e: React.FormEvent) => {
-        e.preventDefault();
-        try {
-            await addProject(newProject);
-            setShowAddProject(false);
-            const p = await getProjects();
-            setProjects(p);
-            setNewProject({ name: '', description: '', git_url: '', default_branch: 'main' });
-        } catch (e) {
-            alert("Failed to add project");
-        }
-    };
-
     return (
         <div className="animate-fade-in">
             <header className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                     <h1 className="page-title">Test Orchestration</h1>
-                    <p className="page-subtitle">Manage Git repositories and orchestrate mobile automation workflows.</p>
+                    <p className="page-subtitle">Select a registered project and device, then execute.</p>
                 </div>
-                <button 
-                    onClick={() => setShowAddProject(!showAddProject)}
-                    style={{ padding: '10px 16px', borderRadius: '8px', backgroundColor: 'var(--primary)', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
+                {/* Project registration/editing lives solely on the Projects page. */}
+                <button
+                    onClick={() => navigate('/projects')}
+                    style={{ padding: '10px 16px', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.08)', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}
                 >
-                    <Plus size={18}/> Register Project
+                    <FolderGit2 size={18}/> Manage Projects
                 </button>
             </header>
-            
-            {showAddProject && (
-                <div className="card" style={{ marginBottom: '24px', backgroundColor: 'rgba(59, 130, 246, 0.05)', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
-                    <h2 style={{ fontSize: '1.25rem', marginBottom: '16px' }}>Register Git Repository</h2>
-                    <form onSubmit={handleAddProject} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                        <div style={{ display: 'flex', gap: '16px' }}>
-                            <div style={{ flex: 1 }}>
-                                <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-secondary)' }}>Project Name</label>
-                                <input required type="text" value={newProject.name} onChange={e => setNewProject({...newProject, name: e.target.value})} style={{ width: '100%', padding: '10px', borderRadius: '6px', backgroundColor: '#0d1117', border: '1px solid rgba(255,255,255,0.1)', color: '#fff' }} placeholder="e.g. Banking App Tests" />
-                            </div>
-                            <div style={{ flex: 2 }}>
-                                <label style={{ display: 'block', marginBottom: '8px', color: 'var(--text-secondary)' }}>Git Repository URL</label>
-                                <input required type="text" value={newProject.git_url} onChange={e => setNewProject({...newProject, git_url: e.target.value})} style={{ width: '100%', padding: '10px', borderRadius: '6px', backgroundColor: '#0d1117', border: '1px solid rgba(255,255,255,0.1)', color: '#fff' }} placeholder="https://github.com/org/repo.git" />
-                            </div>
-                        </div>
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
-                            <button type="button" onClick={() => setShowAddProject(false)} style={{ padding: '10px 16px', borderRadius: '6px', backgroundColor: 'transparent', color: 'var(--text-secondary)', border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer' }}>Cancel</button>
-                            <button type="submit" style={{ padding: '10px 16px', borderRadius: '6px', backgroundColor: 'var(--primary)', color: '#fff', border: 'none', cursor: 'pointer' }}>Save & Sync</button>
-                        </div>
-                    </form>
-                </div>
-            )}
-            
+
             <div className="grid-2">
                 <div className="card">
                     <h2 style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', fontSize: '1.25rem' }}><Smartphone size={20}/> Target Device</h2>
@@ -178,7 +142,7 @@ export default function AutomationPage() {
                     <div style={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px', padding: '12px', backgroundColor: 'rgba(0,0,0,0.2)' }}>
                         {projects.length === 0 ? (
                             <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '40px' }}>
-                                No automation projects registered. <br/>Click 'Register Project' to add one.
+                                No automation projects registered. <br/>Register one on the <a href="/projects" style={{ color: 'var(--primary)' }}>Projects</a> page.
                             </div>
                         ) : (
                             projects.map(project => (
@@ -201,23 +165,34 @@ export default function AutomationPage() {
                                         <span className={`badge ${project.status === 'active' ? 'passed' : 'failed'}`}>{project.status}</span>
                                     </div>
                                     
-                                    <div style={{ display: 'flex', gap: '16px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                    {/* Health chips must reflect the project's OWN toolchain. A React
+                                        Native / native app has no Python venv, so showing a red "Venv"
+                                        chip for it reports a failure that does not exist. */}
+                                    <div style={{ display: 'flex', gap: '16px', fontSize: '0.8rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
                                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                                             {project.health.repository_exists ? <CheckCircle2 size={12} color="var(--success)"/> : <XCircle size={12} color="var(--danger)"/>}
                                             Repo
                                         </span>
                                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                            {project.health.yaml_valid ? <CheckCircle2 size={12} color="var(--success)"/> : <XCircle size={12} color="var(--danger)"/>}
+                                            {project.health.automation_yaml ? <CheckCircle2 size={12} color="var(--success)"/> : <XCircle size={12} color="var(--warning)"/>}
                                             YAML
                                         </span>
+                                        {/* Venv is only meaningful for a Python project. */}
+                                        {project.project_type === 'python' && (
+                                            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                {project.health.venv_exists ? <CheckCircle2 size={12} color="var(--success)"/> : <XCircle size={12} color="var(--danger)"/>}
+                                                Venv
+                                            </span>
+                                        )}
                                         <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                            {project.health.venv_exists ? <CheckCircle2 size={12} color="var(--success)"/> : <XCircle size={12} color="var(--danger)"/>}
-                                            Venv
-                                        </span>
-                                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                            {project.health.dependencies_installed ? <CheckCircle2 size={12} color="var(--success)"/> : <XCircle size={12} color="var(--warning)"/>}
+                                            {project.health.dependencies_ok ? <CheckCircle2 size={12} color="var(--success)"/> : <XCircle size={12} color="var(--warning)"/>}
                                             Deps
                                         </span>
+                                        {project.project_type_label && project.project_type !== 'unknown' && (
+                                            <span style={{ color: 'var(--text-muted)' }}>
+                                                {project.project_type_label}
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
                             ))
@@ -271,6 +246,12 @@ export default function AutomationPage() {
                     </div>
                 </div>
             </div>
+
+            {selectedProject && (
+                <div style={{ marginTop: 24 }}>
+                    <ScenarioPanel projectId={selectedProject} />
+                </div>
+            )}
         </div>
     );
 }

@@ -7,6 +7,20 @@ import json
 from automation.database.models import TestRun, RCAReport, EvidenceBundle, TestProject, ModuleStability, UserFeedback, AIRecommendation, ProjectSettings
 from datetime import datetime
 
+
+def utc_iso(dt: Optional[datetime]) -> Optional[str]:
+    """Serialize a timestamp as UTC ISO 8601 with a 'Z' suffix.
+
+    All timestamps are stored as naive UTC (datetime.utcnow()). A plain
+    .isoformat() drops the zone, so the browser's `new Date()` reads it as LOCAL
+    time — which made every run look ~5.5h old at UTC+5:30. The 'Z' marks it UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.isoformat()
+    return dt.isoformat() + "Z"
+
 def insert_test_project(db: Session, project_data: dict) -> TestProject:
     project = TestProject(**project_data)
     db.add(project)
@@ -43,8 +57,8 @@ def get_test_runs(db: Session, limit: int = 50, suite: Optional[str] = None, sta
     return [
         {
             **{c.name: getattr(r, c.name) for c in r.__table__.columns},
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "completed_at": r.completed_at.isoformat() if r.completed_at else None
+            "created_at": utc_iso(r.created_at),
+            "completed_at": utc_iso(r.completed_at)
         } for r in runs
     ]
 
@@ -59,7 +73,7 @@ def get_historical_failures(db: Session, test_name: str, limit: int = 5) -> List
             "id": f.id,
             "test_suite": f.test_suite,
             "error_message": f.error_message,
-            "created_at": f.created_at.isoformat() if f.created_at else None
+            "created_at": utc_iso(f.created_at)
         } for f in failures
     ]
 
@@ -68,8 +82,8 @@ def get_test_run(db: Session, run_id: str):
     if not run: return None
     return {
         **{c.name: getattr(run, c.name) for c in run.__table__.columns},
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-        "completed_at": run.completed_at.isoformat() if run.completed_at else None
+        "created_at": utc_iso(run.created_at),
+        "completed_at": utc_iso(run.completed_at)
     }
 
 def get_rca_report(db: Session, run_id: str):
@@ -77,7 +91,7 @@ def get_rca_report(db: Session, run_id: str):
     if not report: return None
     return {
         **{c.name: getattr(report, c.name) for c in report.__table__.columns},
-        "generated_at": report.generated_at.isoformat() if report.generated_at else None
+        "generated_at": utc_iso(report.generated_at)
     }
 
 def get_evidence(db: Session, run_id: str):
@@ -85,7 +99,7 @@ def get_evidence(db: Session, run_id: str):
     if not evidence: return None
     
     data = {c.name: getattr(evidence, c.name) for c in evidence.__table__.columns}
-    data["created_at"] = evidence.created_at.isoformat() if evidence.created_at else None
+    data["created_at"] = utc_iso(evidence.created_at)
     if isinstance(data.get("changed_files"), str):
         try:
             data["changed_files"] = json.loads(data["changed_files"])
@@ -97,7 +111,12 @@ def insert_test_run(db: Session, run: Dict[str, Any]):
     # Upsert logic - check if exists
     db_run = db.query(TestRun).filter(TestRun.id == run['id']).first()
     if db_run:
+        # created_at is set once at insert time and must NEVER be updated.
+        # Callers often round-trip a dict from get_test_run() where created_at
+        # is an ISO string, which the DateTime column would reject.
         for key, value in run.items():
+            if key == "created_at":
+                continue
             if hasattr(db_run, key):
                 setattr(db_run, key, value)
     else:

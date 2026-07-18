@@ -24,7 +24,7 @@ from typing import Dict, Any, Generator, Optional
 
 import requests as _requests  # sync requests for streaming; avoids async complexity
 
-from automation.ai.provider import llm_provider
+from automation.ai.provider import LLMProvider, create_provider
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,38 @@ _MAX_CONTEXT_CHARS = 2000
 # Ollama base URL (can be overridden via environment).
 _OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 _OLLAMA_MODEL = os.getenv("LLM_MODEL_NAME", "llama3.2")
+
+# Chat runs on local Ollama unless the environment says otherwise — matching
+# automation.ai.service.default_rca_config(). The module-level provider in
+# automation.ai.provider defaults to the RCA-shaped mock, which is useless for
+# chat, so the assistant builds its own provider here.
+_PROVIDER_TYPE = os.getenv("LLM_PROVIDER_TYPE", "ollama").lower()
+
+_provider_cache: Optional[LLMProvider] = None
+
+
+def _chat_provider() -> LLMProvider:
+    """The chat LLM provider, built once and reused."""
+    global _provider_cache
+    if _provider_cache is None:
+        _provider_cache = create_provider({
+            "provider": _PROVIDER_TYPE,
+            "type": _PROVIDER_TYPE,
+            "model": _OLLAMA_MODEL,
+            "model_name": _OLLAMA_MODEL,
+            "base_url": _OLLAMA_BASE,
+            "api_key": os.getenv("OPENAI_API_KEY", "dummy"),
+        })
+    return _provider_cache
+
+
+def _generate_text(system: str, prompt: str) -> str:
+    """Single-shot completion as plain text.
+
+    ``LLMProvider.generate()`` takes the system and user prompts separately and
+    returns an ``LLMResponse`` — not a string.
+    """
+    return _chat_provider().generate(system_prompt=system, user_prompt=prompt).content
 
 SYSTEM_PROMPT = """You are an AI Test Intelligence Assistant for a Mobile Test \
 Automation Platform. You help QA engineers understand test failures, flaky tests, \
@@ -167,21 +199,21 @@ def _ollama_stream(system: str, prompt: str) -> Generator[str, None, None]:
             except json.JSONDecodeError:
                 continue
     except Exception as exc:
-        logger.warning("Ollama streaming failed, falling back to sync: %s", exc)
-        # Fallback: call the non-streaming provider
-        try:
-            result = llm_provider.generate(f"{system}\n\n{prompt}")
-            yield result
-        except Exception as fallback_exc:
-            logger.error("LLM fallback also failed: %s", fallback_exc)
-            yield "I'm temporarily unable to process your request. Please try again."
+        logger.warning("Ollama streaming failed at %s: %s", _OLLAMA_BASE, exc)
+        # Retrying the same unreachable server through the sync provider would
+        # only land on its mock fallback, which answers chat with RCA-shaped
+        # JSON. Say what is actually wrong instead.
+        yield (
+            f"⚠️ I can't reach the Ollama server at `{_OLLAMA_BASE}`. "
+            f"Start it with `ollama serve` and make sure the `{_OLLAMA_MODEL}` "
+            f"model is pulled (`ollama pull {_OLLAMA_MODEL}`)."
+        )
 
 
 def _generic_provider_stream(system: str, prompt: str) -> Generator[str, None, None]:
     """For non-Ollama providers: call generate() synchronously and yield at once."""
     try:
-        result = llm_provider.generate(f"{system}\n\n{prompt}")
-        yield result
+        yield _generate_text(system, prompt)
     except Exception as exc:
         logger.error("LLM generate failed: %s", exc)
         yield "I'm temporarily unable to process your request. Please try again."
@@ -189,8 +221,7 @@ def _generic_provider_stream(system: str, prompt: str) -> Generator[str, None, N
 
 def _get_token_stream(system: str, prompt: str) -> Generator[str, None, None]:
     """Route streaming to the appropriate provider."""
-    provider_type = os.getenv("LLM_PROVIDER_TYPE", "mock").lower()
-    if provider_type == "ollama":
+    if _PROVIDER_TYPE == "ollama":
         yield from _ollama_stream(system, prompt)
     else:
         yield from _generic_provider_stream(system, prompt)
@@ -260,7 +291,7 @@ class AIChatAssistant:
         prompt = f"{full_context}\n\nUser: {query}" if full_context else f"User: {query}"
 
         try:
-            return llm_provider.generate(f"{self.system_prompt}\n\n{prompt}")
+            return _generate_text(self.system_prompt, prompt)
         except Exception as exc:
             logger.error("ChatAssistant.ask failed: %s", exc)
             return "I'm currently unable to process your request due to a backend error."
@@ -344,7 +375,7 @@ class AIChatAssistant:
 
         try:
             # For structured output we call synchronously and parse the JSON.
-            raw = llm_provider.generate(f"{ANALYSIS_SYSTEM_PROMPT}\n\n{prompt}")
+            raw = _generate_text(ANALYSIS_SYSTEM_PROMPT, prompt)
 
             # Strip markdown fences if the model added them
             clean = raw.strip()

@@ -249,6 +249,126 @@ class EnvironmentValidator:
             )
         return None
 
+    # ── Project-type specific checks ─────────────────────────────────────────
+
+    def check_npm_available(self) -> Optional[ValidationIssue]:
+        if not shutil.which("npm"):
+            return ValidationIssue(
+                check="npm Available",
+                problem="npm command not found in PATH.",
+                cause="Node.js/npm is not installed.",
+                impact="Cannot install JavaScript dependencies or run the test script.",
+                resolution="Install Node.js 18+ from https://nodejs.org",
+            )
+        return None
+
+    def check_package_json(self) -> Optional[ValidationIssue]:
+        if not os.path.exists(os.path.join(self.repo_path, "package.json")):
+            return ValidationIssue(
+                check="package.json Exists",
+                problem="package.json not found in repository root.",
+                cause="This project was detected as React Native but has no package.json.",
+                impact="Cannot resolve or install JavaScript dependencies.",
+                resolution="Ensure package.json is committed at the repository root.",
+            )
+        return None
+
+    def check_node_modules(self) -> Optional[ValidationIssue]:
+        if not os.path.isdir(os.path.join(self.repo_path, "node_modules")):
+            return ValidationIssue(
+                check="node_modules Installed",
+                problem="node_modules directory not found.",
+                cause="npm install has not been run for this project.",
+                impact="Test execution will fail on missing packages.",
+                resolution="The platform installs these automatically. Or run: npm install",
+                is_fatal=False,  # preparation installs these right after validation
+            )
+        return None
+
+    def check_gradle_available(self) -> Optional[ValidationIssue]:
+        has_wrapper = os.path.exists(os.path.join(self.repo_path, "gradlew"))
+        if has_wrapper or shutil.which("gradle"):
+            return None
+        return ValidationIssue(
+            check="Gradle Available",
+            problem="Neither ./gradlew nor a global gradle was found.",
+            cause="Gradle is not installed and the project has no wrapper.",
+            impact="Cannot build or run the Android test suite.",
+            resolution="Commit the Gradle wrapper, or install Gradle from https://gradle.org",
+        )
+
+    def check_android_sdk(self) -> Optional[ValidationIssue]:
+        if os.getenv("ANDROID_HOME") or os.getenv("ANDROID_SDK_ROOT") or shutil.which("adb"):
+            return None
+        return ValidationIssue(
+            check="Android SDK",
+            problem="ANDROID_HOME / ANDROID_SDK_ROOT is not set and adb is not in PATH.",
+            cause="The Android SDK is not installed or not exported.",
+            impact="Cannot build the app or talk to Android devices.",
+            resolution="Install the Android SDK and export ANDROID_HOME.",
+        )
+
+    def check_xcode_available(self) -> Optional[ValidationIssue]:
+        if not shutil.which("xcodebuild"):
+            return ValidationIssue(
+                check="Xcode Available",
+                problem="xcodebuild not found in PATH.",
+                cause="Xcode or the command line tools are not installed.",
+                impact="Cannot build or test an iOS application.",
+                resolution="Install Xcode, then run: xcode-select --install",
+            )
+        return None
+
+    def check_cocoapods(self) -> Optional[ValidationIssue]:
+        # Only relevant when the project actually declares a Podfile.
+        if not os.path.exists(os.path.join(self.repo_path, "Podfile")):
+            return None
+        if not shutil.which("pod"):
+            return ValidationIssue(
+                check="CocoaPods Available",
+                problem="The project has a Podfile but 'pod' is not in PATH.",
+                cause="CocoaPods is not installed.",
+                impact="iOS dependencies cannot be resolved.",
+                resolution="Install CocoaPods: sudo gem install cocoapods",
+            )
+        return None
+
+    def check_webdriveragent(self) -> Optional[ValidationIssue]:
+        """WebDriverAgent ships with the Appium XCUITest driver."""
+        out = _run(["npx", "appium", "driver", "list", "--installed"], timeout=20)
+        if out and "xcuitest" in out.lower():
+            return None
+        return ValidationIssue(
+            check="WebDriverAgent (XCUITest driver)",
+            problem="The Appium XCUITest driver does not appear to be installed.",
+            cause="WebDriverAgent is provided by the xcuitest driver, which is missing.",
+            impact="Appium cannot drive an iOS simulator or device.",
+            resolution="Install it: appium driver install xcuitest",
+            is_fatal=False,
+        )
+
+    def check_maven_available(self) -> Optional[ValidationIssue]:
+        if not shutil.which("mvn"):
+            return ValidationIssue(
+                check="Maven Available",
+                problem="mvn command not found in PATH.",
+                cause="Apache Maven is not installed.",
+                impact="Cannot resolve dependencies or run the Java test suite.",
+                resolution="Install Maven from https://maven.apache.org",
+            )
+        return None
+
+    def check_flutter_available(self) -> Optional[ValidationIssue]:
+        if not shutil.which("flutter"):
+            return ValidationIssue(
+                check="Flutter SDK",
+                problem="flutter command not found in PATH.",
+                cause="The Flutter SDK is not installed.",
+                impact="Cannot resolve packages or run Flutter integration tests.",
+                resolution="Install Flutter from https://docs.flutter.dev/get-started/install",
+            )
+        return None
+
     def check_node_version_compat(self) -> Optional[ValidationIssue]:
         out = _run(["node", "--version"])
         if not out:
@@ -275,8 +395,63 @@ class EnvironmentValidator:
 
     # ── Full Validation Run ──────────────────────────────────────────────────
 
+    def _type_specific_checks(self, project_type: str) -> List[Optional[ValidationIssue]]:
+        """Toolchain checks that apply only to a given project type.
+
+        A React Native / Flutter / native mobile project must NEVER be forced to
+        have a Python .venv — that mismatch was the source of the spurious
+        ".venv not found" failures.
+        """
+        from automation.projects.detector import ProjectType
+
+        if project_type == ProjectType.PYTHON:
+            return [
+                self.check_venv_healthy(),
+                self.check_dependencies_installed(),
+                self.check_python_version_compat(),
+            ]
+
+        if project_type == ProjectType.REACT_NATIVE:
+            return [
+                self.check_package_json(),
+                self.check_npm_available(),
+                self.check_node_modules(),
+                self.check_node_version_compat(),
+            ]
+
+        if project_type == ProjectType.FLUTTER:
+            return [self.check_flutter_available()]
+
+        if project_type == ProjectType.ANDROID:
+            return [self.check_gradle_available(), self.check_android_sdk()]
+
+        if project_type == ProjectType.IOS:
+            return [
+                self.check_xcode_available(),
+                self.check_cocoapods(),
+                self.check_webdriveragent(),
+            ]
+
+        if project_type == ProjectType.JAVA:
+            return [self.check_maven_available()]
+
+        # Unknown type — we cannot assert a toolchain; warn rather than block.
+        return [
+            ValidationIssue(
+                check="Project Type Detected",
+                problem="Could not determine the project type from the repository.",
+                cause="No package.json, pubspec.yaml, build.gradle, *.xcodeproj, pom.xml or requirements.txt was found.",
+                impact="Type-specific dependency checks were skipped.",
+                resolution="Add the appropriate manifest file to the repository root.",
+                is_fatal=False,
+            )
+        ]
+
     def validate_pre_execution(
-        self, device_id: Optional[str] = None, platform: Optional[str] = None
+        self,
+        device_id: Optional[str] = None,
+        platform: Optional[str] = None,
+        project_type: Optional[str] = None,
     ) -> ValidationResult:
         """
         Run all pre-execution checks. Returns a ValidationResult.
@@ -285,24 +460,40 @@ class EnvironmentValidator:
         *platform* ("ios"/"android") selects the device-tooling checks. When not
         supplied it is inferred from the device-id format (iOS simulator UDID vs
         ADB serial), defaulting to "android".
+
+        *project_type* selects the toolchain checks. When not supplied it is
+        auto-detected from the cloned repository, so Python-only checks are never
+        applied to a React Native or native mobile project.
         """
         if platform is None:
             platform = "ios" if _looks_like_ios_udid(device_id) else "android"
 
+        # Repository must exist before anything else can be meaningfully checked.
+        repo_issue = self.check_repository_exists()
+        if repo_issue:
+            logger.error(
+                f"[PRE-FLIGHT FAIL] {repo_issue.check}: {repo_issue.problem} — Fix: {repo_issue.resolution}"
+            )
+            return ValidationResult(passed=False, issues=[repo_issue], warnings=[])
+
+        if project_type is None:
+            from automation.projects.detector import detect_project_type
+
+            project_type = detect_project_type(self.repo_path).project_type
+
         fatal_issues: List[ValidationIssue] = []
         warnings: List[ValidationIssue] = []
 
-        checks = [
-            self.check_repository_exists(),
+        # Checks that apply to every project, regardless of type.
+        checks: List[Optional[ValidationIssue]] = [
             self.check_automation_yaml(),
-            self.check_venv_healthy(),
-            self.check_dependencies_installed(),
             self.check_git_available(),
             self.check_adb_available(platform),
             self.check_appium_available(platform),
-            self.check_python_version_compat(),
-            self.check_node_version_compat(),
         ]
+
+        # Checks that depend on what kind of project this is.
+        checks.extend(self._type_specific_checks(project_type))
 
         if device_id:
             checks.append(self.check_device_connected(device_id, platform))

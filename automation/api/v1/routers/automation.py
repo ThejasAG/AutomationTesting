@@ -6,10 +6,11 @@ from sqlalchemy.orm import Session
 from automation.device_manager.service import device_service
 from automation.runner.service import runner_service
 from automation.ai.services.intelligence import AIGitImpactAnalyzer, AITestRecommendationEngine
+from automation.auth.security import require_role
 from automation.database.config import get_db
 from automation.database.database import create_ai_recommendation
 from automation.projects.repository import ProjectRepository
-from automation.database.models import TestProject
+from automation.database.models import TestProject, TestRun
 
 router = APIRouter(prefix="/automation", tags=["Automation"])
 
@@ -83,6 +84,27 @@ def stop_run(req: StopRequest):
 @router.get("/status/{run_id}")
 def get_status(run_id: str):
     return runner_service.get_run_status(run_id)
+
+@router.post("/cancel-all-queued")
+def cancel_all_queued(
+    db: Session = Depends(get_db),
+    current_user=Depends(require_role(["admin"])),
+):
+    """Cancel every job still sitting in the queue. Admin only.
+
+    Drains the backlog so agents stop picking up stale work.
+    """
+    count = (
+        db.query(TestRun)
+        .filter(TestRun.job_state == "queued")
+        .update({"job_state": "cancelled", "status": "cancelled"}, synchronize_session=False)
+    )
+    db.commit()
+
+    return {
+        "cancelled": count,
+        "message": f"Cancelled {count} queued job{'s' if count != 1 else ''}.",
+    }
 
 @router.post("/plan")
 def generate_plan(request: RunRequest, db: Session = Depends(get_db)):

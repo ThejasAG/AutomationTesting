@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { MessageSquare, Plus, Trash2, Send, Bot, Loader2, AlertTriangle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import ChatMessage from '../components/ChatMessage';
-import type { StructuredPayload } from '../components/ChatMessage';
 import { getSessions, getSession, deleteSession, getApiBase, getHeaders } from '../api';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -297,7 +296,6 @@ export default function ChatPage() {
       const sseUrl = `${getApiBase()}/intelligence/chat/stream?${params.toString()}`;
 
       let accumulated = '';
-      let msgType: 'text' | 'structured' = 'text';
 
       const trySSE = () => {
         const es = new EventSource(sseUrl);
@@ -309,7 +307,6 @@ export default function ChatPage() {
 
             // Structured response (one-shot event)
             if (data.type === 'structured' && data.done) {
-              msgType = 'structured';
               const payloadStr = JSON.stringify(data.payload);
               setMessages(prev => {
                 const updated = [...prev];

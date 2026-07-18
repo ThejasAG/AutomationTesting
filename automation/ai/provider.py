@@ -4,7 +4,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
 import json
+import logging
 import httpx
+
+logger = logging.getLogger("ai.provider")
 
 
 @dataclass
@@ -184,12 +187,18 @@ class OpenAIProvider(LLMProvider):
 
 
 class OllamaProvider(LLMProvider):
-    """Ollama local model provider"""
+    """Ollama local model provider (POST /api/generate).
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3"):
+    Uses a synchronous ``httpx.Client``. If the Ollama server is unreachable or
+    errors, ``generate()`` logs a WARNING and transparently falls back to the
+    ``MockLLMProvider`` response so RCA never hard-fails on the dashboard.
+    """
+
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2"):
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._client = httpx.Client(timeout=120.0)
+        self._mock = MockLLMProvider()
 
     @property
     def name(self) -> str:
@@ -214,16 +223,24 @@ class OllamaProvider(LLMProvider):
             },
         }
 
-        response = self._client.post(f"{self._base_url}/api/generate", json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-        return LLMResponse(
-            content=data["response"],
-            model=self._model,
-            usage={"total_tokens": data.get("eval_count", 0)},
-            provider=self.name,
-        )
+        try:
+            response = self._client.post(f"{self._base_url}/api/generate", json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return LLMResponse(
+                content=data["response"],
+                model=self._model,
+                usage={"total_tokens": data.get("eval_count", 0)},
+                provider=self.name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ollama unavailable at %s (model=%s): %s — falling back to MockLLMProvider",
+                self._base_url, self._model, exc,
+            )
+            return self._mock.generate(
+                system_prompt, user_prompt, json_schema, max_tokens, temperature
+            )
 
     def close(self):
         self._client.close()

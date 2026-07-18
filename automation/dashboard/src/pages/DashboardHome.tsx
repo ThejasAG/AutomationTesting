@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getRuns, getTrends, getDevices } from '../api';
+import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued } from '../api';
 import type { TestRun, Trends, Device } from '../api';
-import { Activity, AlertTriangle, CheckCircle2, ChevronRight, Clock, FileText, Smartphone, PlayCircle } from 'lucide-react';
+import { Activity, AlertTriangle, CheckCircle2, ChevronRight, Clock, FileText, Smartphone, PlayCircle, Square, Loader2 } from 'lucide-react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
+
+// A run that has not reached a terminal state can still be stopped.
+const STOPPABLE = new Set(['queued', 'running', 'pending', 'preparing', 'downloading', 'collecting_evidence']);
 
 export default function DashboardHome() {
   const [runs, setRuns] = useState<TestRun[]>([]);
@@ -12,16 +15,63 @@ export default function DashboardHome() {
   const [loading, setLoading] = useState(true);
   const [runsError, setRunsError] = useState<string | null>(null);
   const [trendsError, setTrendsError] = useState<string | null>(null);
+  const [topRootCause, setTopRootCause] = useState<string>("No failures yet ✓");
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const navigate = useNavigate();
+
+  async function refreshRuns() {
+    try { setRuns(await getRuns()); setRunsError(null); } catch { setRunsError("Failed to load Runs."); }
+  }
 
   useEffect(() => {
     async function loadData() {
-      try { setRuns(await getRuns()); } catch (e) { setRunsError("Failed to load Runs."); }
+      await refreshRuns();
       try { setTrends(await getTrends()); } catch (e) { setTrendsError("Failed to load Trends."); }
       setLoading(false);
     }
     loadData();
   }, []);
+
+  const handleStop = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();  // don't navigate into the run
+    setStopping(id);
+    try { await stopRun(id); await refreshRuns(); }
+    catch { /* surfaced by the runs error banner on next refresh */ }
+    finally { setStopping(null); }
+  };
+
+  const handleCancelAll = async () => {
+    setCancelling(true);
+    try { await cancelAllQueued(); await refreshRuns(); }
+    finally { setCancelling(false); }
+  };
+
+  // Top AI Root Cause: find the latest failed run and pull its RCA root_cause.
+  useEffect(() => {
+    async function loadTopRootCause() {
+      const latestFailed = runs.slice(0, 10).find(r => r.status === 'failed');
+      if (!latestFailed) {
+        setTopRootCause("No failures yet ✓");
+        return;
+      }
+      try {
+        const rca = await getRCA(latestFailed.id);
+        if (!rca) {
+          // Failed run exists but RCA has not been generated at all.
+          setTopRootCause("No failures yet ✓");
+        } else if (!rca.root_cause || !rca.root_cause.trim()) {
+          // RCA row exists but the LLM has not filled in a root cause yet.
+          setTopRootCause("Analysis pending");
+        } else {
+          setTopRootCause(rca.root_cause);
+        }
+      } catch (e) {
+        setTopRootCause("Analysis pending");
+      }
+    }
+    if (runs.length > 0) loadTopRootCause();
+  }, [runs]);
 
   useEffect(() => {
     let mounted = true;
@@ -46,6 +96,7 @@ export default function DashboardHome() {
   if (loading) return <div className="page-header"><h1 className="page-title animate-fade-in">Loading Dashboard...</h1></div>;
 
   const runningCount = runs.filter(r => r.status === 'running').length;
+  const queuedCount = runs.filter(r => r.status === 'queued').length;
 
   return (
     <div className="animate-fade-in">
@@ -108,14 +159,32 @@ export default function DashboardHome() {
               <FileText size={18} /> Top AI Root Cause
             </div>
             <div className="stat-value" style={{ fontSize: '1.25rem', marginTop: '16px', lineHeight: '1.4' }}>
-              {trends.common_root_causes.length > 0 ? trends.common_root_causes[0].failure_category : "None"}
+              {topRootCause}
             </div>
           </div>
         </div>
       )}
 
-      <h2 style={{ marginBottom: '16px', fontSize: '1.25rem' }}>Recent Test Runs</h2>
-      
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+        <h2 style={{ fontSize: '1.25rem', margin: 0 }}>Recent Test Runs</h2>
+        {queuedCount > 0 && (
+          <button
+            onClick={handleCancelAll}
+            disabled={cancelling}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '6px',
+              background: 'transparent', border: '1px solid var(--danger)',
+              borderRadius: 'var(--radius-sm)', color: 'var(--danger)',
+              padding: '7px 14px', cursor: cancelling ? 'not-allowed' : 'pointer',
+              fontSize: '0.82rem', fontFamily: 'inherit', opacity: cancelling ? 0.5 : 1,
+            }}
+          >
+            {cancelling ? <Loader2 size={13} className="spin" /> : <Square size={13} />}
+            Cancel all queued ({queuedCount})
+          </button>
+        )}
+      </div>
+
       {runsError ? (
         <div className="card" style={{ border: '1px solid var(--danger)', backgroundColor: 'rgba(239, 68, 68, 0.1)' }}>
           <div style={{ color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -161,7 +230,26 @@ export default function DashboardHome() {
                     {formatDistanceToNow(parseISO(run.created_at), { addSuffix: true })}
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    <ChevronRight size={18} color="var(--text-muted)" />
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px' }}>
+                      {STOPPABLE.has(run.status) && (
+                        <button
+                          onClick={e => handleStop(e, run.id)}
+                          disabled={stopping === run.id}
+                          title="Stop this run"
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: '5px',
+                            background: 'transparent', border: '1px solid var(--danger)',
+                            borderRadius: 'var(--radius-sm)', color: 'var(--danger)',
+                            padding: '4px 10px', cursor: 'pointer', fontSize: '0.75rem',
+                            fontFamily: 'inherit', opacity: stopping === run.id ? 0.5 : 1,
+                          }}
+                        >
+                          {stopping === run.id ? <Loader2 size={11} className="spin" /> : <Square size={11} />}
+                          Stop
+                        </button>
+                      )}
+                      <ChevronRight size={18} color="var(--text-muted)" />
+                    </div>
                   </td>
                 </tr>
               ))}

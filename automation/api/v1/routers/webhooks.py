@@ -19,10 +19,12 @@ from fastapi import APIRouter, HTTPException, Request
 
 from automation.database import database
 from automation.database.config import SessionLocal
-from automation.database.models import TestProject
+from automation.database.models import TestProject, ApplicationGroup, TestRun
 from automation.device_manager.service import device_service
 from automation.device_manager.models import DeviceStatus
 from automation.intelligence.git_analyzer import git_analyzer
+from automation.intelligence.hybrid_impact_analyzer import HybridImpactAnalyzer
+from automation.projects.repository import repository_manager
 from automation.intelligence.recommendation import recommendation_engine
 
 logger = logging.getLogger("webhooks")
@@ -106,11 +108,13 @@ async def github_webhook(request: Request):
     # ── 4. Extract metadata from the payload ─────────────────────────────────
     changed_files = git_analyzer.extract_files_from_webhook(payload)
 
+    base_branch = None
     if is_pr:
         pr_number = pr.get("number")
         head = pr.get("head", {}) or {}
         branch = head.get("ref")
         commit_sha = head.get("sha")
+        base_branch = (pr.get("base", {}) or {}).get("ref")
     else:  # push to main
         pr_number = None
         branch = payload.get("ref", "").split("/")[-1] or None
@@ -121,19 +125,92 @@ async def github_webhook(request: Request):
     clone_url = repo.get("clone_url", "")
     ssh_url = repo.get("ssh_url", "")
 
+    # A PR payload only carries files when GitHub inlines them, and the git
+    # fallback below only ever looked at the LAST COMMIT. Diff the whole PR
+    # against its merge base instead, so a payment change in commit 1 of 12 is
+    # still seen when commit 12 only touched the README.
+    if is_pr and base_branch and commit_sha:
+        with SessionLocal() as _db:
+            _p = _find_project(_db, clone_url, ssh_url, repo_name)
+            if _p is not None and repository_manager.is_cloned(_p.id):
+                pr_files = git_analyzer.extract_pr_changed_files(
+                    repository_manager.get_repo_path(_p.id), commit_sha, base_branch
+                )
+                if pr_files:
+                    changed_files = pr_files
+
+    # ── 4b. Cross-app impact (Graphify + endpoint graph) ─────────────────────
+    # For a project inside an AppGroup, run the hybrid analyzer FIRST: it walks
+    # the changed file's blast radius, finds the endpoints it touches, and lists
+    # every OTHER app in the group that calls those endpoints. This is what turns
+    # "Business changed the order endpoint" into "→ also re-test Consumer".
+    cross_app_impact: list = []
+    affected_endpoints: list = []
+    graphify_nodes = 0
+    with SessionLocal() as _db:
+        _p = _find_project(_db, clone_url, ssh_url, repo_name)
+        if _p is not None and _p.group_id:
+            group = (
+                _db.query(ApplicationGroup)
+                .filter(ApplicationGroup.id == _p.group_id)
+                .first()
+            )
+            if group is not None:
+                app_configs = [
+                    {
+                        "name": m.name,
+                        "repo_path": repository_manager.get_repo_path(m.id),
+                        "app_role": m.project_type or m.platform,
+                        "test_suite": m.id,
+                        "project_id": m.id,
+                    }
+                    for m in group.projects
+                ]
+                try:
+                    impact = HybridImpactAnalyzer().analyze(changed_files, app_configs)
+                    cross_app_impact = impact.get("cross_app_impact", [])
+                    affected_endpoints = impact.get("affected_endpoints", [])
+                    graphify_nodes = impact.get("graphify_nodes_affected", 0)
+                except Exception as exc:
+                    logger.warning("Cross-app impact analysis failed: %s", exc)
+
     # ── 5. Impact analysis + test selection ──────────────────────────────────
     affected_modules = git_analyzer.identify_modules(changed_files)
 
-    selected_tests = set()
-    for module in affected_modules:
-        selected_tests.update(recommendation_engine.default_test_map.get(module, []))
-    # Fall back to a smoke test when files changed but no module mapped.
-    if not selected_tests and changed_files:
-        selected_tests.add("test_smoke.py")
-    selected_tests = sorted(selected_tests)
+    # Recommend only tests that EXIST in the clone. The old path selected
+    # test_checkout.py / test_cart.py / test_smoke.py from a hardcoded map —
+    # none of which are on disk — so a payment PR "ran" a suite of phantom files
+    # and reported success without executing anything.
+    selected_tests: list = []
+    missing_tests: list = []
+    no_coverage = False
+    with SessionLocal() as _db:
+        _project = _find_project(_db, clone_url, ssh_url, repo_name)
+        if _project is not None:
+            _rec = recommendation_engine.recommend_for_files(
+                changed_files, repository_manager.get_repo_path(_project.id)
+            )
+            selected_tests = _rec["recommended_tests"]
+            missing_tests = _rec["missing_tests"]
+            no_coverage = _rec["no_coverage"]
+            affected_modules = _rec["affected_modules"] or affected_modules
+
+    if missing_tests:
+        logger.warning(
+            "%s: %d recommended test(s) do not exist and were dropped: %s",
+            repo_name, len(missing_tests), ", ".join(missing_tests),
+        )
+    if no_coverage:
+        # Loud on purpose: a changed module with no test is the case that let the
+        # payment regression through, and it must not read as a clean run.
+        logger.error(
+            "%s: modules %s changed but NO test file covers them — this PR is "
+            "NOT verified by any suite.", repo_name, affected_modules,
+        )
 
     # ── 6. Match the project and queue a single TestRun ──────────────────────
     run_ids = []
+    android_run_id = None
     with SessionLocal() as db:
         project = _find_project(db, clone_url, ssh_url, repo_name)
         if not project:
@@ -172,8 +249,50 @@ async def github_webhook(request: Request):
             "triggered_by": f"github_webhook:{repo_name}",
             "branch": branch,
             "commit_sha": commit_sha,
+            "bot_type": "ios",
         })
         run_ids.append(run_id)
+
+        # ── 6b. Android cross-app run (Consumer + Business) ──────────────────
+        # If this project's group has the Android bot configured, spin up a
+        # SECOND run (bot_type="android") and hand it to the bot adapter.
+        if project.group_id:
+            group = (
+                db.query(ApplicationGroup)
+                .filter(ApplicationGroup.id == project.group_id)
+                .first()
+            )
+            if group is not None and group.android_bot_url:
+                from automation.api.v1.routers.jobs import trigger_android_bot
+
+                android_run_id = str(uuid.uuid4())
+                android_now = datetime.utcnow()
+                database.insert_test_run(db, {
+                    "id": android_run_id,
+                    "project_id": project.id,
+                    "test_suite": f"{group.name} (Android cross-app)",
+                    "test_name": "Consumer + Business scenarios",
+                    "status": "queued",
+                    "job_state": "queued",
+                    "started_at": android_now,
+                    "created_at": android_now,
+                    "device_name": "android-bot",
+                    "platform": "Android",
+                    "triggered_by": f"github_webhook:{repo_name}",
+                    "branch": branch,
+                    "commit_sha": commit_sha,
+                    "bot_type": "android",
+                })
+                android_run = db.query(TestRun).filter_by(id=android_run_id).first()
+                try:
+                    trigger_android_bot(
+                        db, android_run, scenarios=[],
+                        consumer_device=None, business_device=None,
+                        bot_url=group.android_bot_url,
+                    )
+                except Exception as exc:
+                    logger.warning("Android bot trigger failed: %s", exc)
+                run_ids.append(android_run_id)
 
     module_count = len(affected_modules)
     message = (
@@ -186,11 +305,24 @@ async def github_webhook(request: Request):
         repo_name, pr_number, affected_modules, selected_tests, len(run_ids),
     )
 
+    ios_run_id = run_ids[0] if run_ids else None
+    both = message + (" | iOS + Android tests triggered" if android_run_id else "")
+
     return {
         "status": "triggered",
         "pr_number": pr_number,
         "affected_modules": affected_modules,
         "selected_tests": selected_tests,
+        # Surfaced, not swallowed: a recommended file that is not on disk is a
+        # coverage hole, and "no_coverage" means this PR ran nothing at all.
+        "missing_tests": missing_tests,
+        "no_coverage": no_coverage,
+        "ios_run_id": ios_run_id,
+        "android_run_id": android_run_id,
         "run_ids": run_ids,
-        "message": message,
+        # Cross-app impact (empty unless the project belongs to an AppGroup).
+        "cross_app_impact": cross_app_impact,
+        "affected_endpoints": affected_endpoints,
+        "graphify_nodes": graphify_nodes,
+        "message": both,
     }
