@@ -1,0 +1,187 @@
+# Vyapy — COMPLETE Consumer + Business cross-app journey, start to end.
+#
+# This is the WHOLE flow in one place: a diner books, orders and pays on the
+# Consumer app while the restaurant accepts, cooks and bills on the Business
+# app — the two apps talking to the same backend. It is the scenario the whole
+# platform exists to protect: "a change in one app must not break the other."
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO RUN IT — three honest options, because no single button does it yet:
+#
+#   OPTION A (real cross-app, RECOMMENDED): Tanish's Android bot.
+#     It is the ONLY engine that drives BOTH apps in sync (threading events:
+#     order_placed -> kitchen_accepted -> payment_completed). Results now flow
+#     into this platform via the bridge (POST /runs/{id}/scenario-result) and
+#     show in the dashboard Scenarios tab. Trigger it, watch it here.
+#
+#   OPTION B (iOS, ONE app at a time): the platform's scenario runner.
+#     Runs the Consumer steps below live on the iPhone simulator. It CANNOT
+#     sync with the Business app — each `sync:` point below is a manual/paused
+#     handoff. And Consumer is currently BLOCKED before checkout by two app
+#     crashes (see blockers). So Option B runs the Consumer prefix only.
+#
+#   OPTION C (definition only): treat this file as the source of truth for what
+#     the flow IS, and drive it from whichever runner once the blockers clear.
+#
+# LABELS: Consumer labels are REAL (verified live). Business labels are marked
+# `TBD` — the Business app has never been driven from iOS here, so its
+# accessibilityLabels must be captured first (capture-locators on
+# org.vyapy.sarls.vyabusinessipad). Do NOT trust the Business labels until then.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Vyapy full cross-app — book, order, cook, pay
+apps:
+  consumer:
+    bundle_id: org.vyapy.sarls.vyaconsumer
+    platform: ios            # iPhone 16 Pro simulator
+    account: roopa@xorstack.com
+  business:
+    bundle_id: org.vyapy.sarls.vyabusinessipad
+    platform: ios            # iPad simulator
+    labels_status: TBD       # capture before running the Business steps
+
+# Cross-app sync points, mirroring the Android bot's threading.Event model.
+# In Option A these are automatic; in Option B they are manual pauses.
+sync_events:
+  - order_placed          # Consumer submits the pre-order  -> Business sees it
+  - table_accepted        # Business accepts the reservation -> Consumer unblocks
+  - kitchen_accepted      # Business kitchen accepts the order
+  - items_served          # Business marks items served
+  - payment_requested     # Business requests payment / generates the bill
+  - payment_completed     # Consumer pays -> Business bill settles to €0.00
+
+# ═══════════════════════════════════════════════════════════════════════════
+# THE FLOW — interleaved by role. `role:` says which app/device runs the step.
+# ═══════════════════════════════════════════════════════════════════════════
+steps:
+
+  # ── 1. Consumer: open + reach the restaurant ──────────────────────────────
+  - role: consumer
+    step: open app
+    status: VERIFIED
+  - role: consumer
+    step: click Nylai kitchen2          # 2nd home card
+    status: VERIFIED
+
+  # ── 2. Consumer: book the slot (MUST be before adding products) ───────────
+  - role: consumer
+    step: click Reserve a table         # reservation Type
+    status: VERIFIED
+  - role: consumer
+    step: click 1 hr                    # Duration
+    status: VERIFIED
+  - role: consumer
+    step: click Today                   # Date
+    status: VERIFIED
+  - role: consumer
+    step: click bookAppoitment          # submit booking (does NOT crash if form filled)
+    status: VERIFIED
+    emits: order_placed
+
+  # ── 3. Business: accept the reservation ───────────────────────────────────
+  - role: business
+    step: open app
+    status: TBD
+  - role: business
+    step: open the pending reservations list
+    label: TBD                          # capture from live Business app
+    status: TBD
+    waits_for: order_placed
+  - role: business
+    step: accept the Nylai Kitchen2 reservation
+    label: TBD
+    status: TBD
+    emits: table_accepted
+
+  # ── 4. Consumer: add products to the cart ─────────────────────────────────
+  - role: consumer
+    step: click Menu
+    status: VERIFIED
+    waits_for: table_accepted
+  - role: consumer
+    step: add Tagliatelle               # product row matched by rendered text
+    status: VERIFIED
+  - role: consumer
+    step: click cartImage               # appears only once cart has an item
+    status: BLOCKED                     # see blockers.textencoder / appointment_type
+  - role: consumer
+    step: click cartCheckout
+    status: BLOCKED
+    emits: order_placed
+
+  # ── 5. Business: kitchen accepts + cooks + serves ─────────────────────────
+  - role: business
+    step: open the kitchen queue
+    label: TBD
+    status: TBD
+    waits_for: order_placed
+  - role: business
+    step: accept the order in the kitchen
+    label: TBD
+    status: TBD
+    emits: kitchen_accepted
+  - role: business
+    step: mark all items served
+    label: TBD
+    status: TBD
+    emits: items_served
+
+  # ── 6. Business: generate the bill / request payment ──────────────────────
+  - role: business
+    step: request payment / generate the bill
+    label: TBD
+    status: TBD
+    emits: payment_requested
+
+  # ── 7. Consumer: pay with the saved card ──────────────────────────────────
+  - role: consumer
+    step: click ePayment                # opens Stripe's native sheet
+    status: BLOCKED                     # unreachable until cart/checkout works
+    waits_for: payment_requested
+  - role: consumer
+    step: click Pay                     # Stripe sheet, saved card pre-selected
+    status: BLOCKED
+  - role: consumer
+    step: verify Your order is confirmed
+    status: BLOCKED
+    emits: payment_completed
+
+  # ── 8. Business: confirm the bill settled ─────────────────────────────────
+  - role: business
+    step: verify the bill Total is 0.00 (fully paid)
+    label: TBD
+    status: TBD
+    waits_for: payment_completed
+    validation: per_guest_bill          # Tanish bill_validator: sum(guests)=grand, VAT, tip
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WHY IT CANNOT RUN END-TO-END TODAY (fix these to unblock)
+# ═══════════════════════════════════════════════════════════════════════════
+blockers:
+  textencoder:
+    severity: BLOCKER
+    where: qrcode/byte-data.js:6 via <QRCode> in App/Screens/Wallet/UpcomingCard.js:2789
+    error: "Can't find variable: TextEncoder"
+    effect: crashes on every order screen the Consumer reaches after booking —
+            i.e. cart/checkout/payment. Fix = polyfill TextEncoder in index.js.
+  appointment_type:
+    severity: BLOCKER
+    where: getReservationParticipantCount <- componentDidMount
+    error: "null is not an object (evaluating 'appointment.type')"
+    effect: crashes if a product is tapped with NO slot and the popup's
+            preOrderBooking is taken. Avoided by booking via the form first.
+  business_labels_uncaptured:
+    severity: BLOCKER (Business half)
+    effect: >
+      every Business step above is marked TBD — the Business app has never been
+      driven from iOS here. Capture its accessibilityLabels first (capture-locators
+      on org.vyapy.sarls.vyabusinessipad), then replace the TBDs.
+  no_ios_cross_app_orchestration:
+    severity: ARCHITECTURE
+    effect: the iOS runner drives one app at a time with no sync events. True
+            end-to-end (both simulators, synchronized) is either Tanish's
+            Android bot (Option A) or a new two-simulator orchestrator.
+  metro_oom:
+    severity: OPERATIONAL
+    effect: the Consumer bundler OOMs; launch Metro with
+            NODE_OPTIONS=--max-old-space-size=12288.
