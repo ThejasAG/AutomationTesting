@@ -166,6 +166,30 @@ def trigger_android_bot_endpoint(
     )
 
 
+class CrossAppRunIn(BaseModel):
+    consumer_udid: str = "DA24A392-FF1B-4283-A5CE-CDDE0D000D21"
+    business_udid: str = "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"
+
+
+@runs_router.post("/cross-app")
+def run_cross_app_suite(
+    body: CrossAppRunIn,
+    current_user=Depends(get_current_user),
+):
+    """Run the FULL Consumer + Business scenario across BOTH iOS simulators at
+    once. Returns a run_id immediately; results stream into the Scenarios tab as
+    each phase completes (bot_type=ios-crossapp)."""
+    from automation.scenarios.cross_app_orchestrator import start_cross_app_run
+
+    run_id = start_cross_app_run(body.consumer_udid, body.business_udid)
+    return {
+        "started": True,
+        "run_id": run_id,
+        "message": "Cross-app run started on both simulators. "
+                   "Open the run's Scenarios tab to watch it.",
+    }
+
+
 @runs_router.get("/{run_id}/scenarios")
 def get_run_scenarios(
     run_id: str,

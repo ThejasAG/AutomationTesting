@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued } from '../api';
+import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued, runCrossAppSuite } from '../api';
 import type { TestRun, Trends, Device } from '../api';
 import { Activity, AlertTriangle, CheckCircle2, ChevronRight, Clock, FileText, Smartphone, PlayCircle, Square, Loader2 } from 'lucide-react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
@@ -19,6 +19,7 @@ export default function DashboardHome() {
   const [stopping, setStopping] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const navigate = useNavigate();
+  const [crossAppBusy, setCrossAppBusy] = useState(false);
 
   async function refreshRuns() {
     try { setRuns(await getRuns()); setRunsError(null); } catch { setRunsError("Failed to load Runs."); }
@@ -100,9 +101,31 @@ export default function DashboardHome() {
 
   return (
     <div className="animate-fade-in">
-      <header className="page-header">
-        <h1 className="page-title">Mobile Test Operations</h1>
-        <p className="page-subtitle">AI-powered insights, real device execution, and root cause analysis across your mobile test suites.</p>
+      <header className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <h1 className="page-title">Mobile Test Operations</h1>
+          <p className="page-subtitle">AI-powered insights, real device execution, and root cause analysis across your mobile test suites.</p>
+        </div>
+        <button
+          onClick={async () => {
+            if (crossAppBusy) return;
+            setCrossAppBusy(true);
+            try {
+              const r = await runCrossAppSuite();
+              navigate(`/runs/${r.run_id}`);
+            } catch (e: any) {
+              alert(e?.message || 'Could not start cross-app run');
+            } finally {
+              setCrossAppBusy(false);
+            }
+          }}
+          className="btn"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 18px', whiteSpace: 'nowrap' }}
+          title="Run the full Consumer + Business scenario across both iOS simulators at once"
+        >
+          {crossAppBusy ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <PlayCircle size={16} />}
+          {crossAppBusy ? 'Starting…' : 'Run Cross-App Suite'}
+        </button>
       </header>
 
       <div className="grid-3" style={{ marginBottom: '24px' }}>

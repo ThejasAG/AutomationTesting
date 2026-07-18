@@ -77,6 +77,16 @@ export async function getRunScenarios(runId: string): Promise<ScenariosResponse>
     return await handleResponse(res);
 }
 
+/** Run the full Consumer + Business scenario across BOTH iOS simulators at once. */
+export async function runCrossAppSuite(): Promise<{ started: boolean; run_id: string; message: string }> {
+    const res = await fetch(`${API_BASE}/runs/cross-app`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({}),
+    });
+    return await handleResponse(res);
+}
+
 export interface TestRun {
     id: string;
     test_suite: string;
