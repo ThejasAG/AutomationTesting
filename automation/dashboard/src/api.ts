@@ -168,6 +168,16 @@ export async function getRCA(id: string): Promise<RCAReport | null> {
     return data.rca;
 }
 
+/** Generate an AI root-cause report for a failed run (Ollama). Returns the RCA. */
+export async function triggerAnalysis(id: string): Promise<RCAReport | null> {
+    const res = await fetch(`${API_BASE}/runs/${id}/analyze`, {
+        method: 'POST',
+        headers: getHeaders(),
+    });
+    const data = await handleResponse(res);
+    return data.rca ?? null;
+}
+
 export async function getEvidence(id: string): Promise<Evidence | null> {
     const res = await fetch(`${API_BASE}/runs/${id}/evidence`, { headers: getHeaders() });
     if (res.status === 404) return null;

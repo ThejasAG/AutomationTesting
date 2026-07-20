@@ -277,10 +277,82 @@ def get_trends(days: int = 30, db: Session = Depends(get_db)):
     return database.get_trends(db, days)
 
 
-@v1_router.post("/runs/{run_id}/analyze")
-def trigger_analysis(run_id: str, background_tasks: BackgroundTasks):
-    """Trigger RCA analysis for a failed run"""
-    return {"status": "analysis_queued"}
+@v1_router.post("/runs/{run_id}/analyze", dependencies=[Depends(get_current_user)])
+def trigger_analysis(run_id: str, db: Session = Depends(get_db)):
+    """Generate an RCA report for a failed run (was a no-op stub).
+
+    Builds evidence from the run's error and its failed scenarios, runs the
+    RCAService (local Ollama), persists it, and returns it — so the dashboard's
+    'Trigger Analysis' button actually produces a report.
+    """
+    from automation.database.models import TestRun, ScenarioResult
+    from automation.ai.service import RCAService
+
+    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    existing = database.get_rca_report(db, run_id)
+    if existing:
+        return {"status": "exists", "rca": existing}
+
+    # Assemble evidence: the run's own error plus every failed scenario's reason.
+    scenarios = db.query(ScenarioResult).filter(ScenarioResult.run_id == run_id).all()
+    failed = [s for s in scenarios if s.status == "FAIL"]
+    evidence = {
+        "test_name": run.test_name,
+        "suite": run.test_suite,
+        "platform": run.platform,
+        "error_message": run.error_message or "",
+        "failed_scenarios": [
+            {
+                "scenario": f"{s.scenario_num} {s.scenario_name}",
+                "consumer": s.consumer_status,
+                "business": s.business_status,
+                "reason": s.error or "; ".join(s.reasons or []),
+            }
+            for s in failed
+        ],
+        "total_scenarios": len(scenarios),
+        "failed_count": len(failed),
+    }
+
+    try:
+        rca = RCAService().analyze(evidence)
+    except Exception as e:
+        logging.getLogger("api").exception("RCA generation failed")
+        raise HTTPException(status_code=502, detail=f"RCA generation failed: {e}")
+
+    from automation.ai.service import default_rca_config
+    from datetime import datetime as _dt
+    _cfg = default_rca_config()
+
+    def _text(v):
+        # Models sometimes return a list of bullet strings for a text field; the
+        # column is TEXT, so join them. Leaves plain strings/None untouched.
+        if isinstance(v, (list, tuple)):
+            return "\n".join(str(x) for x in v)
+        return v if v is None else str(v)
+
+    rca_data = {
+        "run_id": run_id,
+        "root_cause": _text(rca.root_cause),
+        "failure_category": _text(rca.failure_category),
+        "affected_modules": rca.affected_modules if isinstance(rca.affected_modules, list) else [],
+        "confidence": rca.confidence,
+        "possible_reason": _text(rca.possible_reason),
+        "impact": _text(rca.impact),
+        "suggested_fix": _text(rca.suggested_fix),
+        "priority": _text(rca.priority),
+        "severity": _text(rca.severity),
+        "responsible_module": _text(rca.responsible_module),
+        "summary": _text(rca.summary),
+        "llm_provider": _cfg.get("provider", "ollama"),
+        "llm_model": _cfg.get("model", "llama3.2"),
+        "generated_at": _dt.utcnow(),
+    }
+    database.insert_rca_report(db, rca_data)
+    return {"status": "generated", "rca": database.get_rca_report(db, run_id)}
 
 
 @v1_router.get("/health")

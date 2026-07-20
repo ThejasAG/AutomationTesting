@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getRun, getRCA, getEvidence, getAuthToken, getRunScenarios } from '../api';
+import { getRun, getRCA, getEvidence, getAuthToken, getRunScenarios, triggerAnalysis } from '../api';
 import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult } from '../api';
 import { format } from 'date-fns';
-import { ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, Monitor, Wifi, WifiOff, ChevronDown, ChevronRight, Smartphone, Users } from 'lucide-react';
+import { ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, Monitor, Wifi, WifiOff, ChevronDown, ChevronRight, Smartphone, Users, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 // ── Scenarios Tab (Android cross-app: Consumer + Business) ───────────────────
@@ -385,6 +385,8 @@ export default function RunDetails() {
   const [evidence, setEvidence] = useState<Evidence | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<'analysis' | 'scenarios'>('analysis');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -577,7 +579,30 @@ export default function RunDetails() {
             <Activity size={48} color="var(--text-muted)" style={{ margin: '0 auto 16px' }} />
             <h3 style={{ marginBottom: '8px' }}>No RCA Available</h3>
             <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>An RCA report has not been generated for this failed run yet.</p>
-            <button className="btn">Trigger Analysis</button>
+            {analyzeError && (
+              <p style={{ color: 'var(--danger)', marginBottom: '16px', fontSize: '0.85rem' }}>{analyzeError}</p>
+            )}
+            <button
+              className="btn"
+              disabled={analyzing}
+              onClick={async () => {
+                if (!id || analyzing) return;
+                setAnalyzing(true); setAnalyzeError(null);
+                try {
+                  const result = await triggerAnalysis(id);
+                  if (result) setRca(result);
+                  else setAnalyzeError('Analysis returned no report — check the backend logs.');
+                } catch (e: any) {
+                  setAnalyzeError(e?.message || 'Analysis failed. Is Ollama running?');
+                } finally {
+                  setAnalyzing(false);
+                }
+              }}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+            >
+              {analyzing && <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} />}
+              {analyzing ? 'Analyzing…' : 'Trigger Analysis'}
+            </button>
           </div>
         )
       )}

@@ -50,9 +50,25 @@ class RCAService:
             max_tokens=2000,
         )
 
-        # Parse JSON response
+        # Parse JSON response. Local models (Ollama) routinely wrap the JSON in a
+        # ```json ... ``` markdown fence and add a preamble; strip both, and fall
+        # back to the first {...} block, before giving up.
+        def _extract_json(text: str) -> str:
+            t = text.strip()
+            if "```" in t:
+                seg = t.split("```", 2)
+                t = seg[1] if len(seg) > 1 else t
+                if t.lstrip().lower().startswith("json"):
+                    t = t.lstrip()[4:]
+            t = t.strip()
+            if not t.startswith("{"):
+                start, end = t.find("{"), t.rfind("}")
+                if start != -1 and end > start:
+                    t = t[start:end + 1]
+            return t
+
         try:
-            parsed = json.loads(response.content)
+            parsed = json.loads(_extract_json(response.content))
         except json.JSONDecodeError:
             # Fallback for non-JSON responses
             parsed = {
