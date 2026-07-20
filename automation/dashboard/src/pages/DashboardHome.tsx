@@ -112,7 +112,7 @@ export default function DashboardHome() {
             setCrossAppBusy(true);
             try {
               const r = await runCrossAppSuite();
-              navigate(`/runs/${r.run_id}`);
+              navigate(`/run/${r.run_id}`);
             } catch (e: any) {
               alert(e?.message || 'Could not start cross-app run');
             } finally {

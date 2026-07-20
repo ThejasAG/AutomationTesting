@@ -741,6 +741,32 @@ class ScenarioRunner:
 
     # ── crash + popup awareness ──────────────────────────────────────────────
 
+    def dismiss_logbox(self) -> bool:
+        """Close a React-Native LogBox overlay if one is showing.
+
+        A yellow "Console Warning" (e.g. moment.js's non-ISO date deprecation,
+        which the app trips when a time/date is picked) is NOT a crash, but its
+        overlay covers the screen and swallows the next tap. Dismissing it lets
+        the run continue. Only touches the LogBox — never real app UI.
+        """
+        try:
+            src = self.d.page_source or ""
+        except Exception:
+            return False
+        if "Console Warning" not in src and "Console Error" not in src:
+            return False
+        for label in ("Dismiss", "Minimize"):
+            btns = self.d.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                f'type == "XCUIElementTypeButton" AND name == "{label}"')
+            if not btns:
+                btns = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, label)
+            if btns:
+                btns[0].click()
+                time.sleep(1)
+                return True
+        return False
+
     def app_crash(self) -> Optional[str]:
         """The JS error on screen, if the app has red-boxed. None when healthy.
 
@@ -807,6 +833,9 @@ class ScenarioRunner:
         # A step cannot succeed against a half-loaded screen, and an element is
         # not "missing" merely because the spinner has not cleared yet.
         self.wait_for_idle()
+        # A yellow LogBox warning (e.g. moment.js date deprecation on time/date
+        # selection) overlays the screen and would eat this tap — clear it first.
+        self.dismiss_logbox()
 
         try:
             res = self._do_step(step)

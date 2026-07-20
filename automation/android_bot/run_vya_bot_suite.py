@@ -58,7 +58,7 @@ def main():
     callback = f"{PLATFORM_BASE}/api/v1/runs/{run_id}/scenario-result"
     print("=" * 66)
     print(f"  Platform run : {run_id}")
-    print(f"  Dashboard    : http://localhost:5173/runs/{run_id}  (Scenarios tab)")
+    print(f"  Dashboard    : http://localhost:5173/run/{run_id}  (Scenarios tab)")
     print(f"  Callback     : {callback}")
     print(f"  Selection    : {selection}")
     print("=" * 66)
