@@ -101,7 +101,11 @@ class TestRun(Base):
     environment = Column(String)
     error_message = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
+    # A human-readable narrative report of this run (AI-generated, stored for reuse).
+    report_summary = Column(Text, nullable=True)
+    report_generated_at = Column(DateTime, nullable=True)
+
     # CI / Orchestration data
     triggered_by = Column(String, nullable=True)
     branch = Column(String, nullable=True)
@@ -340,3 +344,29 @@ class ChatMessage(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class SavedScenario(Base):
+    """A reusable, user-built scenario: an ordered list of plain-language steps
+    run against a chosen app + simulator. Created/edited/deleted from the
+    Scenarios tab and executed through the scenario runner."""
+    __tablename__ = "saved_scenarios"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    project_id = Column(String(36), ForeignKey("test_projects.id"), nullable=True, index=True)
+    bundle_id = Column(String(255), nullable=True)     # overrides the project's bundle id
+    device_id = Column(String(255), nullable=True)     # target simulator UDID
+    steps = Column(JSON, default=list)                 # ["tap Book Table", "select date", …]
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "name": self.name, "description": self.description,
+            "project_id": self.project_id, "bundle_id": self.bundle_id,
+            "device_id": self.device_id, "steps": self.steps or [],
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

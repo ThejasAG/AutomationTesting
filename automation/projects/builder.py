@@ -990,9 +990,21 @@ class AppBuilder:
 
     METRO_PORT = 8081
 
-    def _metro_running(self) -> bool:
-        """True only once Metro can actually SERVE, not merely once it has bound
-        the port.
+    # Apps that run their OWN Metro on a non-default port — they can't share 8081,
+    # which serves the Consumer bundle. Each is pointed at its packager via the
+    # RCT_jsLocation user-default. Extend as more RN apps are onboarded.
+    _APP_METRO_PORTS = {
+        "org.vyapy.sarls.vyabusinessipad": 8082,   # Business app (iPad)
+    }
+
+    @classmethod
+    def metro_port_for(cls, bundle_id: Optional[str]) -> int:
+        """The Metro port an app's Debug build expects (8081 unless it runs its own)."""
+        return cls._APP_METRO_PORTS.get(bundle_id or "", cls.METRO_PORT)
+
+    def _metro_running(self, port: int = METRO_PORT) -> bool:
+        """True only once Metro on *port* can actually SERVE, not merely once it has
+        bound the port.
 
         Metro opens its socket several seconds before it is ready to answer for a
         bundle. A plain TCP connect therefore succeeds too early: the app gets
@@ -1004,41 +1016,49 @@ class AppBuilder:
         from urllib.request import urlopen
 
         try:
-            with urlopen(
-                f"http://127.0.0.1:{self.METRO_PORT}/status", timeout=2
-            ) as resp:
+            with urlopen(f"http://127.0.0.1:{port}/status", timeout=2) as resp:
                 return b"packager-status:running" in resp.read(64)
         except Exception:
             return False
 
-    def ensure_metro(self, repo_path: str) -> Tuple[bool, str]:
-        """Start the Metro bundler if it is not already running.
+    def ensure_metro(self, repo_path: str, port: Optional[int] = None,
+                     udid: Optional[str] = None, bundle_id: Optional[str] = None) -> Tuple[bool, str]:
+        """Start the Metro bundler for this app if it is not already running.
 
         A DEBUG React Native build does not embed its JavaScript — it fetches the
-        bundle from Metro at localhost:8081 when the app launches. Without Metro
-        the app installs and starts, then shows a red error screen, which looks
-        exactly like a broken build. Appium would attach to a dead app.
+        bundle from Metro when the app launches. Without it the app shows the red
+        "No bundle URL present" screen. Apps that run their own packager (e.g. the
+        Business app on 8082) need Metro on *their* port AND the app pointed at it
+        via RCT_jsLocation — pass udid + bundle_id and this sets that user-default.
 
-        Metro is left running: it is a long-lived dev server shared by every run,
-        and killing it between runs would just force a slow cold restart.
+        Metro is left running: it is a long-lived dev server shared by every run.
         """
         repo_path = os.path.abspath(repo_path)
+        port = port or self.metro_port_for(bundle_id)
 
         if not os.path.exists(os.path.join(repo_path, "package.json")):
             return True, "Not a JS project — Metro not needed."
 
-        if self._metro_running():
-            return True, f"Metro already running on :{self.METRO_PORT}."
+        # Point the app at this packager (harmless on 8081; essential off it).
+        if udid and bundle_id:
+            try:
+                _run(["xcrun", "simctl", "spawn", udid, "defaults", "write", bundle_id,
+                      "RCT_jsLocation", f"localhost:{port}"], timeout=15)
+            except Exception as e:
+                logger.warning("Could not set RCT_jsLocation for %s: %s", bundle_id, e)
 
-        logger.info(f"Starting Metro bundler in {repo_path}")
+        if self._metro_running(port):
+            return True, f"Metro already running on :{port}."
+
+        logger.info(f"Starting Metro bundler in {repo_path} on :{port}")
         try:
             subprocess.Popen(
-                ["npx", "react-native", "start", "--port", str(self.METRO_PORT)],
+                ["npx", "react-native", "start", "--port", str(port)],
                 cwd=repo_path,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
-                env=_build_env(),
+                env=dict(_build_env(), RCT_METRO_PORT=str(port)),
                 start_new_session=True,  # survive the request/agent that spawned it
             )
         except FileNotFoundError:
@@ -1049,16 +1069,128 @@ class AppBuilder:
         # Metro takes a few seconds to bind the port on a cold start.
         import time as _time
         for _ in range(60):
-            if self._metro_running():
-                return True, f"Metro started on :{self.METRO_PORT}."
+            if self._metro_running(port):
+                return True, f"Metro started on :{port}."
             _time.sleep(1)
 
         return False, (
-            f"Metro did not come up on :{self.METRO_PORT} within 60s. A Debug build "
+            f"Metro did not come up on :{port} within 60s. A Debug build "
             f"cannot load its JS bundle without it."
         )
 
     # ── Install / launch ─────────────────────────────────────────────────────
+
+    def resolve_ios_device(
+        self, device_id: Optional[str], prefer: Optional[str] = None,
+        prefer_requested: bool = False,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Pick which simulator this run should use, so it always starts.
+
+        *prefer* is an optional device-family hint ("iPhone" / "iPad") derived from
+        the app under test, used to break ties toward the intended device.
+
+        *prefer_requested* honours an explicit user choice: if the requested UDID is
+        a real available simulator, use exactly it (the caller boots it if needed)
+        instead of falling back to whatever is already booted. Set this for runs
+        where the user picked the device from a dropdown; leave it off for
+        auto-selected runs (PR/webhook), where booted-wins is desired.
+
+        Policy (in order):
+          1. If simulators are already booted, run on one — no need to boot anything.
+             Among booted sims prefer one matching *prefer* (the app's intended
+             device family); then an explicitly-requested booted sim; then any
+             booted one.
+          2. Otherwise nothing is booted: keep the requested device if it exists on
+             this machine (the caller boots it next), else fall back to a *prefer*-
+             matching sim / an iPhone / any available sim.
+          3. If the machine has no available iOS simulator at all, return None.
+
+        Returns (resolved_udid, note) where note describes any substitution (None
+        when the requested device is used unchanged); (None, reason) if unusable.
+        """
+        try:
+            out = _run(
+                ["xcrun", "simctl", "list", "devices", "available", "-j"], timeout=15,
+            )[1]
+            data = json.loads(out)
+        except Exception as e:
+            return device_id, f"could not list simulators ({e}); using requested device as-is"
+
+        sims = []
+        for runtime, devs in data.get("devices", {}).items():
+            if "iOS" not in runtime:
+                continue
+            for d in devs:
+                if d.get("isAvailable"):
+                    sims.append({"udid": d["udid"], "name": d.get("name", ""),
+                                 "state": d.get("state", "Shutdown")})
+
+        if not sims:
+            return None, "no available iOS simulators on this machine"
+
+        def matches(s):
+            return bool(prefer) and prefer.lower() in s["name"].lower()
+
+        requested = next((s for s in sims if s["udid"] == device_id), None)
+        booted = [s for s in sims if s["state"] == "Booted"]
+
+        # 0. Explicit user choice wins: use exactly the requested sim if it exists.
+        if prefer_requested and requested:
+            return requested["udid"], None
+
+        # 1. Prefer an already-booted simulator — run with what's up. Within the
+        #    booted set, prefer the app's intended family, then the explicit request.
+        if booted:
+            # A booted, explicitly-requested sim always wins; only then fall back
+            # to the app's device family, then any booted sim.
+            pick = ((requested if requested in booted else None)
+                    or next((s for s in booted if matches(s)), None)
+                    or booted[0])
+            if pick is requested:
+                return pick["udid"], None
+            note = f"using already-booted simulator {pick['name']}"
+            if device_id and device_id != pick["udid"]:
+                note += f" (requested {device_id} is not booted)"
+            return pick["udid"], note
+
+        # 2. Nothing booted — keep the requested device (booted next), else fall back.
+        if requested:
+            return requested["udid"], None
+        pick = (next((s for s in sims if matches(s)), None)
+                or next((s for s in sims if "iPhone" in s["name"]), None)
+                or sims[0])
+        return pick["udid"], (
+            f"requested device {device_id or '(none)'} is not available here; "
+            f"falling back to {pick['name']}"
+        )
+
+    def ensure_ios_booted(self, device_id: str) -> Tuple[bool, str]:
+        """Boot the simulator if it is shut down.
+
+        `xcodebuild` happily builds against a shut-down sim, but `simctl install`
+        and `launch` fail with 'Unable to lookup in current state: Shutdown'
+        (SimError 405). Booting is idempotent here: a device that is already
+        Booted returns 'current state: Booted', which we treat as success.
+        """
+        ok, out = _run(["xcrun", "simctl", "bootstatus", device_id, "-b"], timeout=180)
+        if ok or "current state: Booted" in out or "already booted" in out.lower():
+            self._open_simulator_ui()
+            return True, f"Simulator {device_id[:8]} is booted."
+        # bootstatus -b boots then waits; if it refused, try a plain boot.
+        ok2, out2 = _run(["xcrun", "simctl", "boot", device_id], timeout=120)
+        if ok2 or "current state: Booted" in out2:
+            _run(["xcrun", "simctl", "bootstatus", device_id], timeout=180)
+            self._open_simulator_ui()
+            return True, f"Simulator {device_id[:8]} booted."
+        return False, f"Could not boot simulator {device_id[:8]}: {(out2 or out)[:200]}"
+
+    def _open_simulator_ui(self) -> None:
+        """Bring up the Simulator.app window. `simctl boot` runs the sim headless;
+        without this the run is invisible even though it is executing."""
+        try:
+            _run(["open", "-a", "Simulator"], timeout=15)
+        except Exception:
+            pass
 
     def install(self, device_id: str, artifact: str, platform: str) -> Tuple[bool, str]:
         """Install the built artifact onto the simulator/device."""

@@ -498,6 +498,35 @@ class ProjectPreparationService:
 
         # 8. Build the app and install it on the target device.
         #    Without this there is nothing on the simulator to automate.
+        if device_id and platform == "ios":
+            # A stale/foreign UDID (e.g. copied from another Mac) would fail the
+            # whole run at 'xcodebuild -destination id=…'. Swap it for a real sim.
+            # Hint the resolver toward the app's intended device family.
+            _n = (project_name or "").lower()
+            prefer = None
+            if any(k in _n for k in ("business", "ipad", "kitchen", "waiter", "merchant", "pos")):
+                prefer = "iPad"
+            elif any(k in _n for k in ("consumer", "diner", "customer", "iphone", "user")):
+                prefer = "iPhone"
+            resolved, note = app_builder.resolve_ios_device(device_id, prefer=prefer)
+            if resolved is None:
+                return PreparationResult(
+                    ok=False, project_type=project_type, branch=sync.branch,
+                    clone_status=CLONED, steps=steps,
+                    error=f"No usable iOS simulator: {note}", validation=validation,
+                )
+            if note:
+                step(f"⚠ {note}")
+            device_id = resolved
+            # simctl install/launch need the sim booted (build alone doesn't).
+            boot_ok, boot_msg = app_builder.ensure_ios_booted(device_id)
+            step(boot_msg)
+            if not boot_ok:
+                return PreparationResult(
+                    ok=False, project_type=project_type, branch=sync.branch,
+                    clone_status=CLONED, steps=steps,
+                    error=boot_msg, validation=validation,
+                )
         if device_id:
             build_ok, build_err = self._build_and_install(
                 project_id, repo_path, platform, device_id, project_name, step

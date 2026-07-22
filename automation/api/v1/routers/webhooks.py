@@ -21,6 +21,7 @@ from automation.database import database
 from automation.database.config import SessionLocal
 from automation.database.models import TestProject, ApplicationGroup, TestRun
 from automation.device_manager.service import device_service
+from automation.projects.builder import app_builder
 from automation.device_manager.models import DeviceStatus
 from automation.intelligence.git_analyzer import git_analyzer
 from automation.intelligence.hybrid_impact_analyzer import HybridImpactAnalyzer
@@ -219,9 +220,9 @@ async def github_webhook(request: Request):
                 detail=f"No TestProject matches repository '{repo_name}' ({clone_url or ssh_url})",
             )
 
-        online_devices = [
-            d for d in device_service.get_all_devices() if d.status == DeviceStatus.ONLINE
-        ]
+        # Only freshly-heartbeating devices count, so a dead agent's stale UDID
+        # is never handed to a run.
+        online_devices = device_service.get_online_devices()
 
         # Device selection priority:
         #   1. first ONLINE iOS device
@@ -231,6 +232,15 @@ async def github_webhook(request: Request):
             next((d for d in online_devices if (d.platform or "").lower() == "ios"), None)
             or next((d for d in online_devices if (d.platform or "").lower() == "android"), None)
         )
+
+        platform = device.platform if device else "iOS"
+        device_name = device.id if device else "pending"
+        # For iOS, store a device that actually exists on this host (prefer a
+        # booted sim) so the run does not fall back at build time.
+        if platform.lower() == "ios":
+            resolved, _ = app_builder.resolve_ios_device(device.id if device else None)
+            if resolved:
+                device_name = resolved
 
         now = datetime.utcnow()
         run_id = str(uuid.uuid4())
@@ -243,9 +253,9 @@ async def github_webhook(request: Request):
             "job_state": "queued",
             "started_at": now,
             "created_at": now,
-            "device_name": device.id if device else "pending",
+            "device_name": device_name,
             "os_version": device.platform_version if device else None,
-            "platform": device.platform if device else "iOS",
+            "platform": platform,
             "triggered_by": f"github_webhook:{repo_name}",
             "branch": branch,
             "commit_sha": commit_sha,

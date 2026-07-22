@@ -23,6 +23,7 @@ from automation.database.models import TestProject
 from automation.device_manager.models import DeviceStatus
 from automation.device_manager.service import device_service
 from automation.integrations.github import GitHubIntegration
+from automation.projects.builder import app_builder
 
 logger = logging.getLogger("pull_requests")
 
@@ -100,6 +101,47 @@ def list_pulls(project_id: str, db: Session = Depends(get_db)):
     return {"project_id": project_id, "repo": f"{owner}/{repo}", "pull_requests": prs}
 
 
+@router.get("/{project_id}/pulls/{number}/plan", dependencies=[Depends(get_current_user)])
+def plan_pull(project_id: str, number: int, db: Session = Depends(get_db)):
+    """Work out WHAT to test for this PR and HOW to reach it.
+
+    Reads the PR (title, description, changed files), then uses the local model to
+    pick the saved full-path scenarios that verify the change end-to-end (e.g. a
+    payment fix → the login→cart→checkout→pay scenario), with reasoning and gaps.
+    """
+    from automation.database.models import SavedScenario
+    from automation.intelligence.pr_planner import plan_pr_tests
+
+    project = _get_project(project_id, db)
+    owner, repo = _owner_repo(project.git_url)
+    scenarios = [
+        {"id": s.id, "name": s.name, "description": s.description, "steps": s.steps or []}
+        for s in db.query(SavedScenario).filter(
+            (SavedScenario.project_id == project_id) | (SavedScenario.project_id.is_(None))
+        ).all()
+    ]
+    try:
+        return plan_pr_tests(_github(), owner, repo, number, scenarios)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/{project_id}/pulls/{number}/autotest", dependencies=[Depends(get_current_user)])
+def autotest_pull(project_id: str, number: int, db: Session = Depends(get_db)):
+    """Autonomous QA for a PR: plan → build the PR branch → run the selected
+    scenarios → comment the verdict on the PR. Runs in the background (heavy)."""
+    import threading
+    from automation.intelligence.pr_autotest import run_pr_autotest
+
+    _get_project(project_id, db)  # 404 if missing
+    threading.Thread(
+        target=run_pr_autotest, args=(project_id, number), daemon=True,
+        name=f"pr-autotest-{number}",
+    ).start()
+    return {"started": True, "pr_number": number,
+            "message": "Autonomous QA started — it will comment the result on the PR."}
+
+
 @router.post("/{project_id}/pulls/{number}/test", dependencies=[Depends(get_current_user)])
 def test_pull(project_id: str, number: int, db: Session = Depends(get_db)):
     """Queue a test run against a PR's head branch."""
@@ -114,12 +156,22 @@ def test_pull(project_id: str, number: int, db: Session = Depends(get_db)):
         )
 
     # Same device-selection priority as the webhook: online iOS → online Android →
-    # 'pending' (queued with no device; picked up when one comes online).
-    online = [d for d in device_service.get_all_devices() if d.status == DeviceStatus.ONLINE]
+    # 'pending' (queued with no device; picked up when one comes online). Only
+    # freshly-heartbeating devices count, so a dead agent's stale UDID is skipped.
+    online = device_service.get_online_devices()
     device = (
         next((d for d in online if (d.platform or "").lower() == "ios"), None)
         or next((d for d in online if (d.platform or "").lower() == "android"), None)
     )
+
+    platform = (device.platform if device else (project.platform or "iOS"))
+    device_name = device.id if device else "pending"
+    # For iOS, store a device that actually exists on this host (prefer a booted
+    # sim) so the run does not fall back at build time on a stale/foreign UDID.
+    if platform.lower() == "ios":
+        resolved, _ = app_builder.resolve_ios_device(device.id if device else None)
+        if resolved:
+            device_name = resolved
 
     now = datetime.utcnow()
     run_id = str(uuid.uuid4())
@@ -132,9 +184,9 @@ def test_pull(project_id: str, number: int, db: Session = Depends(get_db)):
         "job_state": "queued",
         "started_at": now,
         "created_at": now,
-        "device_name": device.id if device else "pending",
+        "device_name": device_name,
         "os_version": device.platform_version if device else None,
-        "platform": device.platform if device else (project.platform or "iOS"),
+        "platform": platform,
         "triggered_by": f"pr_test:{owner}/{repo}#{number}",
         "branch": branch,
         "commit_sha": meta.get("commit_sha"),

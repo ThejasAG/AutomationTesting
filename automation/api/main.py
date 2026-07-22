@@ -38,6 +38,10 @@ from automation.api.v1.routers.groups import router as groups_router
 from automation.api.v1.routers.dependency import router as dependency_router
 from automation.api.v1.routers.pull_requests import router as pull_requests_router
 from automation.api.v1.routers.scenario import router as scenario_router
+from automation.api.v1.routers.scenarios import router as scenarios_router
+from automation.api.v1.routers.recorder import router as recorder_router
+from automation.api.v1.routers.reports import router as reports_router
+from automation.api.v1.routers.pr_poller_api import router as pr_poller_router
 from automation.appium_service.router import router as appium_router
 from automation.api.v1.routers.intelligence import router as intelligence_router
 from automation.api.v1.routers.agents import router as agents_router
@@ -155,6 +159,10 @@ v1_router.include_router(groups_router, dependencies=[Depends(get_current_user)]
 v1_router.include_router(dependency_router, dependencies=[Depends(get_current_user)])
 v1_router.include_router(pull_requests_router)
 v1_router.include_router(scenario_router)
+v1_router.include_router(scenarios_router)
+v1_router.include_router(recorder_router)
+v1_router.include_router(reports_router)
+v1_router.include_router(pr_poller_router)
 v1_router.include_router(intelligence_router)
 v1_router.include_router(agents_router)
 v1_router.include_router(jobs_router)
@@ -370,6 +378,8 @@ async def startup_event():
     install_secret_filter()  # Redact tokens/keys from all logs
     initialize_database()
     ops_monitor.start()
+    from automation.ci_cd import pr_poller
+    pr_poller.start()  # auto-queue runs for new PR commits (PR_POLL_ENABLED)
 
 
 @app.on_event("shutdown")

@@ -1,0 +1,11 @@
+=== building VyaBusiness (force) ===
+npm registry lookup failed for @react-native-firebase/app: The read operation timed out
+npm registry lookup failed for @react-native-firebase/messaging: The read operation timed out
+npm registry unreachable for 2 package(s) — only the curated RN 0.71.18 fixes were applied.
+RN compatibility: nothing to fix for /Users/roops/AutomationTestining/AutomationTesting/repos/1519bec5-d14c-45d9-9616-891b98c6e2d8
+Generating ios/main.jsbundle (entry=index.js) — project embeds it
+Building iOS: xcodebuild -workspace /Users/roops/AutomationTestining/AutomationTesting/repos/1519bec5-d14c-45d9-9616-891b98c6e2d8/ios/VyaBusinessiPad.xcworkspace -scheme VyaBusinessiPad -configuration Debug -sdk iphonesimulator -derivedDataPath /Users/roops/AutomationTestining/AutomationTesting/repos/1519bec5-d14c-45d9-9616-891b98c6e2d8/build/ios -destination id=DA24A392-FF1B-4283-A5CE-CDDE0D000D21 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO OTHER_CPLUSPLUSFLAGS=$(inherited) -D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION build
+ok=True artifact=/Users/roops/AutomationTestining/AutomationTesting/repos/1519bec5-d14c-45d9-9616-891b98c6e2d8/build/ios/Build/Products/Debug-iphonesimulator/VyaBusinessiPad.app bundle_id=org.vyapy.sarls.vyabusinessipad
+=== installing ===
+install ok=True
+Installed VyaBusinessiPad.app

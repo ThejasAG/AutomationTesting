@@ -197,9 +197,24 @@ def trigger_android_bot_endpoint(
     )
 
 
+class RoleCreds(BaseModel):
+    email: Optional[str] = None
+    password: Optional[str] = None
+
+
 class CrossAppRunIn(BaseModel):
-    consumer_udid: str = "DA24A392-FF1B-4283-A5CE-CDDE0D000D21"
-    business_udid: str = "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"
+    # Which simulator plays each role. Waiter == kitchen device means the run
+    # switches accounts on one device; different devices means two instances.
+    devices: Optional[Dict[str, str]] = None       # {consumer, waiter, kitchen}
+    credentials: Optional[Dict[str, RoleCreds]] = None
+    save: bool = True                              # persist devices/creds for next time
+
+
+@runs_router.get("/cross-app/config")
+def get_cross_app_config(current_user=Depends(get_current_user)):
+    """Simulators + saved device assignments + saved emails (passwords masked)."""
+    from automation.scenarios.cross_app_config import public_config
+    return public_config()
 
 
 @runs_router.post("/cross-app")
@@ -207,17 +222,38 @@ def run_cross_app_suite(
     body: CrossAppRunIn,
     current_user=Depends(get_current_user),
 ):
-    """Run the FULL Consumer + Business scenario across BOTH iOS simulators at
-    once. Returns a run_id immediately; results stream into the Scenarios tab as
-    each phase completes (bot_type=ios-crossapp)."""
+    """Run the FULL Consumer + Business scenario across the chosen iOS simulators.
+
+    Accepts per-role device assignments and credentials; saves them for reuse
+    when save=True. Returns a run_id immediately; results stream into the
+    Scenarios tab as each phase completes (bot_type=ios-crossapp).
+    """
+    from automation.scenarios import cross_app_config as cfgmod
     from automation.scenarios.cross_app_orchestrator import start_cross_app_run
 
-    run_id = start_cross_app_run(body.consumer_udid, body.business_udid)
+    creds_in = None
+    if body.credentials:
+        creds_in = {r: c.dict() for r, c in body.credentials.items()}
+
+    if body.save:
+        cfgmod.apply_update(body.devices, creds_in)
+        cfg = cfgmod.load_config()
+    else:
+        cfg = cfgmod.load_config()
+        if body.devices:
+            cfg["devices"].update({k: v for k, v in body.devices.items() if v})
+
+    run_id = start_cross_app_run(
+        consumer_udid=cfg["devices"]["consumer"],
+        waiter_udid=cfg["devices"]["waiter"],
+        kitchen_udid=cfg["devices"]["kitchen"],
+        credentials=cfg["credentials"],
+    )
     return {
         "started": True,
         "run_id": run_id,
-        "message": "Cross-app run started on both simulators. "
-                   "Open the run's Scenarios tab to watch it.",
+        "devices": cfg["devices"],
+        "message": "Cross-app run started. Open the run's Scenarios tab to watch it.",
     }
 
 

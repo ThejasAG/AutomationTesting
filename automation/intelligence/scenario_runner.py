@@ -51,6 +51,26 @@ _BOOK_POPUP_ACCEPT = "preOrderBooking"   # -> the booking flow
 _BOOK_POPUP_DISMISS = "orderLater"       # DISCARDS the pending item — never auto-tap
 _BOOK_POPUP_TEXT = "book a date in order to"
 
+# Ordinal words → 0-based index, so "select the 2nd time slot" picks the SECOND
+# chip, not the first. "last" maps to -1.
+_ORDINAL_WORDS = {
+    "first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4,
+    "sixth": 5, "seventh": 6, "eighth": 7, "ninth": 8, "tenth": 9, "last": -1,
+}
+
+
+def _ordinal_index(text: str) -> int:
+    """0-based index named in *text* ('2nd'→1, 'second'→1, 'last'→-1); 0 if none."""
+    t = text.lower()
+    for word, idx in _ORDINAL_WORDS.items():
+        if re.search(rf"\b{word}\b", t):
+            return idx
+    m = re.search(r"\b(\d+)\s*(?:st|nd|rd|th)\b", t)
+    if m:
+        return int(m.group(1)) - 1
+    return 0
+
+
 # ── Intent detection (checked in order) ──────────────────────────────────────
 _OPEN_APP = re.compile(r"\b(open|launch|start|go\s*to)\b.*\bapp\b", re.I)
 _ASSERT = re.compile(r"^\s*(assert|verify|check|confirm|ensure|expect|should\s+see|see\b)", re.I)
@@ -109,6 +129,8 @@ class StepResult:
     detail: str = ""            # error / note
     code: str = ""              # the recorded pytest line(s), if any
     screenshot: Optional[str] = None
+    healed: bool = False        # resolved via a fallback (fuzzy) locator, not the exact one
+    healed_note: str = ""       # what the self-healing matched instead
 
 
 @dataclass
@@ -180,6 +202,28 @@ class ScenarioRunner:
         # Names elements the app never named, and records how sure we were.
         self.catalog = catalog or AutoIdCatalog()
         self._screen = "unknown"
+        # page_source is a slow XCUITest round trip (1-3s). Several per-step checks
+        # need it back-to-back, so share one fetch via a short TTL cache and
+        # invalidate it the moment the screen is acted on.
+        self._src_cache: Tuple[Optional[str], float] = (None, 0.0)
+
+    def _page_source(self, ttl: float = 1.5) -> str:
+        """page_source with a short-lived cache, so the several checks that run
+        back-to-back within one step don't each pay the XCUITest round trip."""
+        src, ts = self._src_cache
+        if src is not None and (time.time() - ts) < ttl:
+            return src
+        try:
+            src = self.d.page_source or ""
+        except Exception:
+            src = ""
+        self._src_cache = (src, time.time())
+        return src
+
+    def _invalidate_source(self) -> None:
+        """Drop the cached page_source — call after acting on the screen so the
+        next check reads the real, post-action state."""
+        self._src_cache = (None, 0.0)
 
     # ── element resolution against the live screen ───────────────────────────
 
@@ -282,22 +326,25 @@ class ScenarioRunner:
 
     # ── resilience ───────────────────────────────────────────────────────────
 
-    def wait_for_idle(self, timeout: float = 12.0) -> bool:
+    def wait_for_idle(self, timeout: float = 4.0) -> bool:
         """Block while a spinner is on screen. Returns False on timeout.
 
-        An element is not 'missing' just because the screen has not finished
-        loading — treating those two as the same thing is what makes a suite
-        flaky.
+        Uses a cheap find_elements query for a visible ActivityIndicator rather
+        than a full page_source (which costs seconds on a complex RN screen and
+        was the dominant per-step cost). An element is not 'missing' just because
+        the screen has not finished loading — conflating those makes a suite flaky.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                src = (self.d.page_source or "").lower()
+                spinners = self.d.find_elements(
+                    AppiumBy.IOS_PREDICATE,
+                    'type == "XCUIElementTypeActivityIndicator" AND visible == true')
             except Exception:
                 return True
-            if not any(h in src for h in _LOADING_HINTS):
+            if not spinners:
                 return True
-            time.sleep(0.5)
+            time.sleep(0.4)
         return False
 
     def _resolve(self, words: List[str], prefer_container: bool = False,
@@ -509,6 +556,17 @@ class ScenarioRunner:
         if not s or s.startswith("#"):
             return StepResult(step=s, ok=True, action="skipped (comment/blank)")
 
+        # ORDER LATER — an explicit user choice on the "book a date" popup. The
+        # auto-handler never taps this (it discards the cart), but when the user
+        # asks for it by name we honour it.
+        if re.search(r"order\s*later|\blater\b", s, re.I):
+            els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, _BOOK_POPUP_DISMISS)
+            if els:
+                els[0].click()
+                self._wait_settle()
+                return StepResult(step=s, ok=True, action='chose "order later"',
+                                  code=f'    by_id(driver, "{_BOOK_POPUP_DISMISS}").click()')
+
         # OPEN APP
         if _OPEN_APP.search(s):
             self.d.activate_app(self.bid)
@@ -560,7 +618,9 @@ class ScenarioRunner:
             if not m and any(w.lower() in ("slot", "time", "option", "chip") for w in words):
                 chips = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "chip-container-outer-layer")
                 if chips:
-                    m = Match(chips[0], "chip", "chip-container-outer-layer", exact=True)
+                    idx = _ordinal_index(s)
+                    chip = chips[idx] if -len(chips) <= idx < len(chips) else chips[0]
+                    m = Match(chip, "chip", "chip-container-outer-layer", exact=True)
 
             if not m:
                 return StepResult(step=s, ok=False, action=f'"{phrase}" NOT found',
@@ -620,14 +680,87 @@ class ScenarioRunner:
         # Unrecognised — best effort tap on the whole phrase ("nylai kitchen 2").
         return self._tap_step(s, s, _locator_words(s), inferred=True)
 
+    def _fuzzy_resolve(self, words: List[str], step: str) -> Optional["Match"]:
+        """Self-healing fallback: find the closest visible control by text when the
+        exact locator no longer resolves (a testID/label changed on a new build).
+
+        Fast path: score against the CACHED page_source (one call, in-memory match),
+        then fetch only the single winning element's handle — not attribute reads
+        across the whole screen. Only returns a match it is reasonably sure of, so
+        healing recovers from small UI drift without turning into blind clicking."""
+        import difflib
+        import xml.etree.ElementTree as ET
+        nouns = [n.lower() for n in _nouns(words)]
+        target = " ".join(w.lower() for w in words).strip()
+        noun_str = " ".join(nouns).strip()
+        if not target:
+            return None
+        try:
+            root = ET.fromstring(self._page_source())
+        except Exception:
+            return None
+
+        best = None
+        best_score = 0.0
+        for el in root.iter():
+            a = el.attrib
+            if a.get("visible", "true") == "false":
+                continue
+            name, label, value = a.get("name") or "", a.get("label") or "", a.get("value") or ""
+            txt = (label or name or value).strip().lower()
+            if not txt or len(txt) > 80:
+                continue
+            score = max(
+                difflib.SequenceMatcher(None, target, txt).ratio(),
+                difflib.SequenceMatcher(None, noun_str, txt).ratio() if noun_str else 0.0,
+            )
+            if nouns and all(n in txt for n in nouns):
+                score = max(score, 0.9)
+            if score > best_score:
+                best_score, best = score, (name, label, a.get("type", ""))
+
+        if not best or best_score < 0.62:
+            return None
+
+        # Fetch the winning element's handle with a single query.
+        name, label, _typ = best
+        el = None
+        try:
+            if name:
+                els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, name)
+                el = els[0] if els else None
+            if el is None and label:
+                safe = label.replace('"', '')
+                els = self.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
+                el = els[0] if els else None
+        except Exception:
+            el = None
+        if el is None:
+            return None
+        return Match(el=el, by="fuzzy", value=(name or label), text=(label or name),
+                     method="fuzzy-heal", confidence=best_score)
+
     def _tap_step(self, s: str, phrase: str, words: List[str], inferred: bool = False) -> StepResult:
         m = self._resolve(words, prefer_container=True, step=s)
 
-        # "select a time slot" language -> the first slot chip.
+        # "select a time slot" language -> the slot chip named by any ordinal
+        # ("2nd time slot" -> chips[1]); defaults to the first chip.
         if not m and any(w.lower() in ("slot", "time", "option", "chip") for w in words):
             chips = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "chip-container-outer-layer")
             if chips:
-                m = Match(chips[0], "container", ("chip-container-outer-layer", None), exact=True)
+                idx = _ordinal_index(s)
+                chip = chips[idx] if -len(chips) <= idx < len(chips) else chips[0]
+                m = Match(chip, "container", ("chip-container-outer-layer", None), exact=True)
+
+        # SELF-HEAL: the exact locator did not resolve (e.g. a testID changed on a
+        # daily staging build). Before failing, find the closest visible control by
+        # text and use it — but flag the step as healed so the report shows the app
+        # changed and the scenario recovered rather than silently drifting.
+        healed_note = ""
+        if not m:
+            m = self._fuzzy_resolve(words, s)
+            if m:
+                healed_note = f'exact match not found — healed to "{self._describe(m)}" (fuzzy {int(m.confidence*100)}%)'
 
         if not m:
             return StepResult(
@@ -664,9 +797,12 @@ class ScenarioRunner:
                 action=f'tapped "{self._describe(m)}" — matched only {matched} of {nouns}',
                 detail=f"Give the intended target a testID (accessible={{true}}) if this is "
                        f"not the element you meant.",
-                code=code)
+                code=code, healed=bool(healed_note), healed_note=healed_note)
 
-        return StepResult(step=s, ok=True, action=f'tapped "{self._describe(m)}"', code=code)
+        return StepResult(step=s, ok=True,
+                          action=(f'healed → tapped "{self._describe(m)}"' if healed_note
+                                  else f'tapped "{self._describe(m)}"'),
+                          code=code, healed=bool(healed_note), healed_note=healed_note)
 
     def _swipe_step(self, s: str) -> StepResult:
         """Swipe the screen, or one element: 'swipe left on splitCard' / 'scroll down'.
@@ -734,7 +870,10 @@ class ScenarioRunner:
             self._used_ids.add(m.value)
         return StepResult(step=s, ok=True, action=f'saw "{self._describe(m)}"', code=code)
 
-    def _wait_settle(self, secs: float = 2.0):
+    def _wait_settle(self, secs: float = 0.8):
+        # Brief pause after acting. XCUITest no longer blocks on app-idle per
+        # command (waitForQuiescence off), and each step begins with wait_for_idle,
+        # so a long fixed settle here is wasted time. Was 2.0s.
         time.sleep(secs)
 
     # ── public ────────────────────────────────────────────────────────────────
@@ -749,11 +888,15 @@ class ScenarioRunner:
         overlay covers the screen and swallows the next tap. Dismissing it lets
         the run continue. Only touches the LogBox — never real app UI.
         """
+        # Cheap presence check instead of a full snapshot (runs before every step).
         try:
-            src = self.d.page_source or ""
+            present = self.d.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'label CONTAINS "Console Warning" OR label CONTAINS "Console Error" '
+                'OR name CONTAINS "Console Warning" OR name CONTAINS "Console Error"')
         except Exception:
             return False
-        if "Console Warning" not in src and "Console Error" not in src:
+        if not present:
             return False
         for label in ("Dismiss", "Minimize"):
             btns = self.d.find_elements(
@@ -773,23 +916,29 @@ class ScenarioRunner:
         A crash must never be reported as a passing step: once the red box is up
         the app is gone, and every step after it is measuring the error screen.
         """
+        # Cheap check: the RN red box surfaces identifiable static text. A targeted
+        # find_elements beats snapshotting the whole tree on every step.
         try:
-            src = self.d.page_source or ""
+            hits = self.d.find_elements(
+                AppiumBy.IOS_PREDICATE,
+                'type == "XCUIElementTypeStaticText" AND (label CONTAINS "Render Error" '
+                'OR label CONTAINS "RCTFatal" OR label CONTAINS "No bundle URL" '
+                'OR label CONTAINS "RedBox")')
         except Exception:
             return None
-        if "Render Error" in src:
-            m = re.findall(r'name="([^"]*(?:not an object|undefined is not|TypeError)[^"]*)"', src)
-            return (m[0][:160] if m else "Render Error (see screenshot)")
-        if "RCTFatal" in src or "No bundle URL present" in src:
-            return "RCTFatal — the JS bundle failed to load (is Metro running?)"
+        if hits:
+            try:
+                return (hits[0].get_attribute("label") or "app red-boxed (see screenshot)")[:160]
+            except Exception:
+                return "app red-boxed (see screenshot)"
         return None
 
     def book_popup_open(self) -> bool:
         """True when the 'You need to book a date' popup is intercepting."""
         try:
-            if self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, _BOOK_POPUP_ACCEPT):
-                return True
-            return _BOOK_POPUP_TEXT in (self.d.page_source or "").lower()
+            # Just the accept-button id — no page_source. It's the reliable signal
+            # and this runs after every step, so it must be cheap.
+            return bool(self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, _BOOK_POPUP_ACCEPT))
         except Exception:
             return False
 
@@ -841,6 +990,9 @@ class ScenarioRunner:
             res = self._do_step(step)
         except Exception as e:  # never let one step abort the whole scenario
             res = StepResult(step=step, ok=False, action="error", detail=str(e)[:200])
+
+        # The screen was just acted on — the cached source is stale now.
+        self._invalidate_source()
 
         # Did this step kill the app? Once the red box is up every later step is
         # measuring the error screen, so a crash is never a pass.

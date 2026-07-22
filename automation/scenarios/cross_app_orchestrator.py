@@ -150,12 +150,21 @@ class CrossAppOrchestrator:
         self,
         run_id: str,
         consumer_udid: str = DEFAULT_CONSUMER_UDID,
-        business_udid: str = DEFAULT_BUSINESS_UDID,
+        business_udid: Optional[str] = None,
+        waiter_udid: Optional[str] = None,
+        kitchen_udid: Optional[str] = None,
+        credentials: Optional[dict] = None,
         on_event: Optional[Callable[[dict], None]] = None,
     ):
         self.run_id = run_id
         self.consumer_udid = consumer_udid
-        self.business_udid = business_udid
+        # Waiter and kitchen may be the same iPad (switch accounts) or two
+        # devices. business_udid is kept as a back-compat alias for the waiter.
+        self.waiter_udid = waiter_udid or business_udid or DEFAULT_BUSINESS_UDID
+        self.kitchen_udid = kitchen_udid or self.waiter_udid
+        self.business_udid = self.waiter_udid
+        # {role: {email, password}} — used to log the Business app in.
+        self.credentials = credentials or {}
         self.on_event = on_event or (lambda e: None)
 
         # Cross-app sync barriers — mirror the scenario's sync_events.
@@ -274,12 +283,14 @@ class CrossAppOrchestrator:
         """
         if not r._resolve([BIZ_SIGNIN_BTN]):
             return True                          # already logged in
-        user = os.getenv("VYA_BUSINESS_USER", "")
-        pw = os.getenv("VYA_BUSINESS_PASSWORD", "")
+        # Prefer the run's configured waiter credentials; fall back to env.
+        waiter = self.credentials.get("waiter", {})
+        user = waiter.get("email") or os.getenv("VYA_BUSINESS_WAITER_USER", "")
+        pw = waiter.get("password") or os.getenv("VYA_BUSINESS_WAITER_PASSWORD", "")
         if not user or not pw:
             self._record("0", "Business login", "business", "FAIL",
-                         "no VYA_BUSINESS_USER / VYA_BUSINESS_PASSWORD set — "
-                         "cannot reach the waiter/kitchen screens")
+                         "no waiter credentials configured — set them in the "
+                         "cross-app run dialog or VYA_BUSINESS_WAITER_* env")
             self._persist_phase("0")
             return False
         try:
@@ -395,22 +406,31 @@ class CrossAppOrchestrator:
 
 
 def start_cross_app_run(consumer_udid: str = DEFAULT_CONSUMER_UDID,
-                        business_udid: str = DEFAULT_BUSINESS_UDID) -> str:
+                        business_udid: Optional[str] = None,
+                        waiter_udid: Optional[str] = None,
+                        kitchen_udid: Optional[str] = None,
+                        credentials: Optional[dict] = None) -> str:
     """Create a run row and kick off the orchestrator in a background thread.
     Returns the run_id immediately."""
     from automation.database import database
+    waiter = waiter_udid or business_udid or DEFAULT_BUSINESS_UDID
+    kitchen = kitchen_udid or waiter
+    same = "shared" if waiter == kitchen else "split"
     run_id = str(uuid.uuid4())
     with SessionLocal() as db:
         database.insert_test_run(db, {
             "id": run_id, "project_id": CONSUMER_PROJECT_ID,
             "test_suite": "Vyapy cross-app (iOS)",
-            "test_name": "Consumer + Business — both simulators",
+            "test_name": f"Consumer + Business ({same} waiter/kitchen)",
             "status": "running", "job_state": "running",
             "started_at": datetime.utcnow(), "created_at": datetime.utcnow(),
-            "device_name": f"{consumer_udid[:8]}+{business_udid[:8]}",
+            "device_name": f"C:{consumer_udid[:6]} W:{waiter[:6]} K:{kitchen[:6]}",
             "platform": "iOS", "bot_type": "ios-crossapp",
         })
-    orch = CrossAppOrchestrator(run_id, consumer_udid, business_udid)
+    orch = CrossAppOrchestrator(
+        run_id, consumer_udid, waiter_udid=waiter, kitchen_udid=kitchen,
+        credentials=credentials,
+    )
     threading.Thread(target=orch.run, name=f"crossapp-{run_id[:8]}", daemon=True).start()
     return run_id
 

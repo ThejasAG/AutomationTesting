@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import ModalPortal from '../components/ModalPortal';
 import {
   Save,
   Play,
@@ -26,8 +27,9 @@ import {
   generateScript,
   captureLocators,
   getDevices,
+  getScenarioDevices,
 } from '../api';
-import type { Project, Device } from '../api';
+import type { Project, Device, SimDevice } from '../api';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,13 +51,15 @@ function detectLanguage(filePath: string | null): string {
 
 interface DeviceModalProps {
   deviceId: string;
+  devices: SimDevice[];
   onDeviceChange: (val: string) => void;
   onConfirm: () => void;
   onClose: () => void;
 }
 
-function DeviceModal({ deviceId, onDeviceChange, onConfirm, onClose }: DeviceModalProps) {
+function DeviceModal({ deviceId, devices, onDeviceChange, onConfirm, onClose }: DeviceModalProps) {
   return (
+    <ModalPortal onClose={onClose}>
     <div
       style={{
         position: 'fixed',
@@ -66,12 +70,13 @@ function DeviceModal({ deviceId, onDeviceChange, onConfirm, onClose }: DeviceMod
         alignItems: 'center',
         justifyContent: 'center',
         zIndex: 999,
+        padding: 16,
       }}
       onClick={onClose}
     >
       <div
-        className="card animate-fade-in"
-        style={{ width: 420, padding: '32px', position: 'relative' }}
+        className="card modal-pop"
+        style={{ width: 420, maxWidth: '94vw', maxHeight: '90vh', overflowY: 'auto', padding: '32px', position: 'relative' }}
         onClick={e => e.stopPropagation()}
       >
         {/* Close button */}
@@ -97,18 +102,15 @@ function DeviceModal({ deviceId, onDeviceChange, onConfirm, onClose }: DeviceMod
         </div>
 
         <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '20px' }}>
-          Enter the ADB device ID to run the test against (e.g. <code style={{ color: 'var(--warning)' }}>emulator-5554</code>).
+          Pick the simulator to run this script on. Booted simulators are marked ●.
         </p>
 
-        <input
-          type="text"
-          placeholder="emulator-5554"
+        <select
           value={deviceId}
           onChange={e => onDeviceChange(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && deviceId.trim()) onConfirm(); }}
           autoFocus
           style={{
-            width: '100%',
+            width: '100%', boxSizing: 'border-box',
             background: 'rgba(255,255,255,0.05)',
             border: '1px solid var(--border-highlight)',
             borderRadius: 'var(--radius-sm)',
@@ -117,9 +119,16 @@ function DeviceModal({ deviceId, onDeviceChange, onConfirm, onClose }: DeviceMod
             fontSize: '0.95rem',
             marginBottom: '24px',
             outline: 'none',
-            fontFamily: "'Fira Code', monospace",
+            cursor: 'pointer',
           }}
-        />
+        >
+          {devices.length === 0 && <option value="">No simulators found</option>}
+          {devices.map(d => (
+            <option key={d.udid} value={d.udid}>
+              {d.name}{d.state === 'Booted' ? ' ● booted' : ''} — iOS {d.ios}
+            </option>
+          ))}
+        </select>
 
         <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
           <button
@@ -148,6 +157,7 @@ function DeviceModal({ deviceId, onDeviceChange, onConfirm, onClose }: DeviceMod
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 
@@ -235,17 +245,18 @@ function GenerateModal({ onClose, onGenerated }: GenModalProps) {
   };
 
   return (
+    <ModalPortal onClose={onClose}>
     <div
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.72)',
         backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center',
-        justifyContent: 'center', zIndex: 999,
+        justifyContent: 'center', zIndex: 999, padding: 16,
       }}
       onClick={onClose}
     >
       <div
-        className="card animate-fade-in"
-        style={{ width: 520, padding: '32px', position: 'relative' }}
+        className="card modal-pop"
+        style={{ width: 520, maxWidth: '94vw', maxHeight: '90vh', overflowY: 'auto', padding: '32px', position: 'relative' }}
         onClick={e => e.stopPropagation()}
       >
         <button
@@ -357,6 +368,7 @@ function GenerateModal({ onClose, onGenerated }: GenModalProps) {
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 
@@ -388,8 +400,23 @@ export default function ScriptEditorPage() {
 
   // Run / device state
   const [deviceId, setDeviceId] = useState<string>('');
+  const [sims, setSims] = useState<SimDevice[]>([]);
   const [showDeviceModal, setShowDeviceModal] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+
+  // ── Load available simulators; default to a booted one ──────────────────
+  useEffect(() => {
+    getScenarioDevices()
+      .then(({ simulators }) => {
+        setSims(simulators);
+        setDeviceId(prev => {
+          if (prev && simulators.some(s => s.udid === prev)) return prev;
+          const booted = simulators.find(s => s.state === 'Booted');
+          return (booted || simulators[0])?.udid || '';
+        });
+      })
+      .catch(() => { /* picker shows "no simulators found" */ });
+  }, []);
 
   // AI generation
   const [showGenModal, setShowGenModal] = useState(false);
@@ -643,6 +670,12 @@ export default function ScriptEditorPage() {
                 <Loader2 size={14} style={{ animation: 'se-spin 1s linear infinite' }} />
                 Loading files…
               </div>
+            ) : selectedProjectId && files.length === 0 ? (
+              <div style={{ padding: '20px 14px', color: 'var(--text-muted)', fontSize: '0.82rem', lineHeight: 1.6 }}>
+                No test scripts in this project yet.<br />
+                Use <strong>✨ Generate</strong> to create one, or record a flow in the
+                <strong> Scenarios</strong> tab — new scripts are saved under <code>e2e/</code>.
+              </div>
             ) : (
               <FileTree
                 files={files}
@@ -805,7 +838,7 @@ export default function ScriptEditorPage() {
                 onClick={() => setShowDeviceModal(true)}
               >
                 <MonitorSmartphone size={12} />
-                {deviceId}
+                {sims.find(s => s.udid === deviceId)?.name || deviceId || 'Select device'}
               </div>
             )}
 
@@ -851,6 +884,7 @@ export default function ScriptEditorPage() {
       {showDeviceModal && (
         <DeviceModal
           deviceId={deviceId}
+          devices={sims}
           onDeviceChange={setDeviceId}
           onConfirm={handleDeviceConfirm}
           onClose={() => setShowDeviceModal(false)}

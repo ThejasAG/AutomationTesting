@@ -1,11 +1,17 @@
 import time
 import logging
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from automation.device_manager.models import Device, DeviceHealth, DeviceStatus
 
 logger = logging.getLogger(__name__)
+
+# An agent heartbeats every few seconds. If we have not heard from a device
+# within this window its agent is gone (e.g. another Mac went offline), so it
+# must stop counting as ONLINE — otherwise a stale foreign UDID lingers forever
+# and gets handed to new runs.
+DEVICE_STALE_AFTER = timedelta(seconds=90)
 
 class DeviceDiscoveryService:
     def __init__(self):
@@ -36,8 +42,33 @@ class DeviceDiscoveryService:
                 )
                 self._devices_cache[did] = device
 
+    def _is_fresh(self, d: Device) -> bool:
+        return d.last_seen is not None and (datetime.utcnow() - d.last_seen) <= DEVICE_STALE_AFTER
+
     def get_all_devices(self) -> List[Device]:
+        # Expire devices we have not heard from within the staleness window so a
+        # dead agent's devices no longer report ONLINE.
+        for d in self._devices_cache.values():
+            if d.status == DeviceStatus.ONLINE and not self._is_fresh(d):
+                d.status = DeviceStatus.DISCONNECTED
         return list(self._devices_cache.values())
+
+    def get_online_devices(self) -> List[Device]:
+        """ONLINE devices with a fresh heartbeat — the only ones safe to run on."""
+        return [d for d in self.get_all_devices() if d.status == DeviceStatus.ONLINE]
+
+    def register_local_device(self, udid: str, name: str = "iOS Simulator",
+                              platform: str = "iOS", version: str = "") -> Device:
+        """Register a locally-resolved simulator so runs can target it even when
+        the agent-fed registry is empty (e.g. right after a restart). Idempotent."""
+        dev = Device(
+            id=udid, name=name, manufacturer="Apple", model=name,
+            platform=platform, platform_version=version or "",
+            status=DeviceStatus.ONLINE, provider="local",
+            last_seen=datetime.utcnow(),
+        )
+        self._devices_cache[udid] = dev
+        return dev
 
     def get_device(self, device_id: str) -> Optional[Device]:
         return self._devices_cache.get(device_id)

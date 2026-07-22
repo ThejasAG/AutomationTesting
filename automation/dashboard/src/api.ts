@@ -77,12 +77,32 @@ export async function getRunScenarios(runId: string): Promise<ScenariosResponse>
     return await handleResponse(res);
 }
 
-/** Run the full Consumer + Business scenario across BOTH iOS simulators at once. */
-export async function runCrossAppSuite(): Promise<{ started: boolean; run_id: string; message: string }> {
+export interface SimDevice { udid: string; name: string; state: string; ios: string; }
+export interface CrossAppConfig {
+    simulators: SimDevice[];
+    devices: { consumer: string; waiter: string; kitchen: string };
+    credentials: Record<'consumer' | 'waiter' | 'kitchen', { email: string; has_password: boolean }>;
+}
+
+export async function getCrossAppConfig(): Promise<CrossAppConfig> {
+    const res = await fetch(`${API_BASE}/runs/cross-app/config`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+export interface CrossAppRunBody {
+    devices?: { consumer?: string; waiter?: string; kitchen?: string };
+    credentials?: Record<string, { email?: string; password?: string }>;
+    save?: boolean;
+}
+
+/** Run the full Consumer + Business scenario across the chosen iOS simulators. */
+export async function runCrossAppSuite(
+    body: CrossAppRunBody = {},
+): Promise<{ started: boolean; run_id: string; message: string }> {
     const res = await fetch(`${API_BASE}/runs/cross-app`, {
         method: 'POST',
         headers: getHeaders(),
-        body: JSON.stringify({}),
+        body: JSON.stringify(body),
     });
     return await handleResponse(res);
 }
@@ -573,6 +593,122 @@ export async function getProjects(): Promise<Project[]> {
     return data.projects;
 }
 
+// ── Saved Scenarios (custom step builder) ────────────────────────────────────
+export interface SavedScenario {
+    id: string;
+    name: string;
+    description: string | null;
+    project_id: string | null;
+    bundle_id: string | null;
+    device_id: string | null;
+    steps: string[];
+    created_at: string | null;
+    updated_at: string | null;
+}
+export interface ScenarioInput {
+    name: string;
+    description?: string | null;
+    project_id?: string | null;
+    bundle_id?: string | null;
+    device_id?: string | null;
+    steps: string[];
+}
+
+export async function getScenarios(): Promise<SavedScenario[]> {
+    const res = await fetch(`${API_BASE}/scenarios`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+export async function createScenario(data: ScenarioInput): Promise<SavedScenario> {
+    const res = await fetch(`${API_BASE}/scenarios`, {
+        method: 'POST', headers: getHeaders(), body: JSON.stringify(data),
+    });
+    return await handleResponse(res);
+}
+export async function updateScenario(id: string, data: ScenarioInput): Promise<SavedScenario> {
+    const res = await fetch(`${API_BASE}/scenarios/${id}`, {
+        method: 'PUT', headers: getHeaders(), body: JSON.stringify(data),
+    });
+    return await handleResponse(res);
+}
+export async function deleteScenario(id: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/scenarios/${id}`, {
+        method: 'DELETE', headers: getHeaders(),
+    });
+    if (!res.ok && res.status !== 204) await handleResponse(res);
+}
+export async function getScenarioDevices(): Promise<{ simulators: SimDevice[] }> {
+    const res = await fetch(`${API_BASE}/scenarios/devices`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+// ── Live scenario recorder ───────────────────────────────────────────────────
+export interface RecorderFrame { image: string; width: number; height: number; steps: string[]; }
+export async function recorderStart(body: { project_id: string; device_id: string; bundle_id?: string | null })
+    : Promise<{ session_id: string; width: number; height: number }> {
+    const res = await fetch(`${API_BASE}/recorder/start`, { method: 'POST', headers: getHeaders(), body: JSON.stringify(body) });
+    return await handleResponse(res);
+}
+export async function recorderFrame(sid: string): Promise<RecorderFrame> {
+    const res = await fetch(`${API_BASE}/recorder/${sid}/frame`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+export async function recorderTap(sid: string, x: number, y: number): Promise<{ step: string; steps: string[]; image: string | null }> {
+    const res = await fetch(`${API_BASE}/recorder/${sid}/tap`, { method: 'POST', headers: getHeaders(), body: JSON.stringify({ x, y }) });
+    return await handleResponse(res);
+}
+export async function recorderSetSteps(sid: string, steps: string[]): Promise<{ steps: string[] }> {
+    const res = await fetch(`${API_BASE}/recorder/${sid}/steps`, { method: 'PUT', headers: getHeaders(), body: JSON.stringify({ steps }) });
+    return await handleResponse(res);
+}
+export async function recorderSave(sid: string, name: string, description?: string): Promise<SavedScenario> {
+    const res = await fetch(`${API_BASE}/recorder/${sid}/save`, { method: 'POST', headers: getHeaders(), body: JSON.stringify({ name, description }) });
+    return await handleResponse(res);
+}
+export async function recorderStop(sid: string): Promise<void> {
+    await fetch(`${API_BASE}/recorder/${sid}/stop`, { method: 'POST', headers: getHeaders() });
+}
+
+// ── Test Reports ─────────────────────────────────────────────────────────────
+export interface ReportRow {
+    id: string; test_name: string; test_suite: string; status: string;
+    device_name: string; platform: string; branch: string | null; commit_sha: string | null;
+    triggered_by: string | null; duration_ms: number | null; created_at: string | null;
+    scenarios_total: number; scenarios_passed: number; has_report: boolean;
+}
+export interface ReportScenario {
+    scenario_num: string | null; scenario_name: string | null; status: string;
+    consumer_status: string | null; business_status: string | null; error: string | null; role: string | null;
+}
+export interface FullReport extends ReportRow {
+    error_message: string | null; report_summary: string | null; report_generated_at: string | null;
+    scenarios: ReportScenario[];
+    rca: { root_cause: string | null; suggested_fix: string | null; summary: string | null; llm_provider: string | null } | null;
+}
+export async function getReports(): Promise<ReportRow[]> {
+    const res = await fetch(`${API_BASE}/reports`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+export interface ReportTrends {
+    days: number; total_runs: number; pass_rate: number; passed: number; failed: number;
+    daily: { date: string; passed: number; failed: number }[];
+    by_environment: { environment: string; passed: number; failed: number; pass_rate: number }[];
+    flaky: { test_name: string; runs: number; passed: number; failed: number }[];
+}
+export async function getReportTrends(days = 30): Promise<ReportTrends> {
+    const res = await fetch(`${API_BASE}/reports/trends?days=${days}`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+export async function getReport(runId: string): Promise<FullReport> {
+    const res = await fetch(`${API_BASE}/reports/${runId}`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+export async function generateReport(runId: string): Promise<{ report_summary: string; report_generated_at: string }> {
+    const res = await fetch(`${API_BASE}/reports/${runId}/generate`, { method: 'POST', headers: getHeaders() });
+    return await handleResponse(res);
+}
+// runScenarioStream (SSE) is defined below and reused by the Scenarios tab.
+
 export async function addProject(data: ProjectInput): Promise<Project> {
     const res = await fetch(`${API_BASE}/projects/`, {
         method: 'POST',
@@ -737,6 +873,23 @@ export async function getPullRequests(
     return await handleResponse(res);
 }
 
+export interface PRTestPlan {
+    pr_number: number; title: string; commit_sha: string; changed_files: string[];
+    affected_areas: string[]; summary: string; path_explanation: string; missing_coverage: string;
+    selected_scenarios: { id: string; name: string; reason: string; steps: string[] }[];
+}
+/** AI test plan for a PR: what to test and how to reach it. */
+export async function planPullRequest(projectId: string, number: number): Promise<PRTestPlan> {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/pulls/${number}/plan`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+/** Autonomous QA: plan → build PR branch → run scenarios → comment on the PR. */
+export async function autotestPullRequest(projectId: string, number: number): Promise<{ started: boolean; message: string }> {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/pulls/${number}/autotest`, { method: 'POST', headers: getHeaders() });
+    return await handleResponse(res);
+}
+
 export async function testPullRequest(
     projectId: string,
     number: number,
@@ -780,6 +933,8 @@ export interface ScenarioStepResult {
     action: string;
     detail: string;
     screenshot: string | null;
+    healed?: boolean;
+    healed_note?: string;
 }
 
 export interface ScenarioRunResult {
@@ -817,10 +972,52 @@ export type ScenarioEvent =
           ok: boolean;
           passed: number;
           total: number;
+          healed?: number;
           saved_to: string | null;
           script: string;
       }
     | { type: 'error'; detail: string };
+
+export type BatchEvent =
+    | { type: 'phase'; message: string }
+    | { type: 'scenario_start'; index: number; total: number; name: string }
+    | { type: 'step'; scenario_index: number; index: number; total: number; step: string; ok: boolean; action: string; detail: string; healed?: boolean }
+    | { type: 'scenario_done'; index: number; name: string; ok: boolean; passed: number; total: number; healed: number }
+    | { type: 'done'; scenarios: { name: string; ok: boolean; passed: number; total: number }[]; passed: number; total: number }
+    | { type: 'error'; detail: string };
+
+/** Run several scenarios against ONE reused Appium session (much faster). */
+export async function runScenariosBatch(
+    body: { project_id: string; device_id: string; bundle_id?: string; prepare?: boolean; scenarios: { name: string; steps: string[] }[] },
+    onEvent: (ev: BatchEvent) => void,
+    signal?: AbortSignal,
+): Promise<void> {
+    const res = await fetch(`${API_BASE}/scenario/run-batch/stream`, {
+        method: 'POST', headers: getHeaders(), body: JSON.stringify(body), signal,
+    });
+    if (!res.ok || !res.body) {
+        let detail = `HTTP ${res.status}`;
+        try { detail = (await res.json())?.detail ?? detail; } catch { /* keep */ }
+        throw new Error(detail);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        for (;;) {
+            const sep = buf.indexOf('\n\n');
+            if (sep === -1) break;
+            const frame = buf.slice(0, sep); buf = buf.slice(sep + 2);
+            for (const line of frame.split('\n')) {
+                if (!line.startsWith('data: ')) continue;
+                try { onEvent(JSON.parse(line.slice(6))); } catch { /* skip */ }
+            }
+        }
+    }
+}
 
 /** Run a scenario, reporting each step as it happens. Resolves when the stream
  *  ends. Uses fetch rather than EventSource: this is a POST with a body and an
@@ -833,6 +1030,7 @@ export async function runScenarioStream(
         bundle_id?: string;
         name?: string;
         save?: boolean;
+        prepare?: boolean;
     },
     onEvent: (ev: ScenarioEvent) => void,
     signal?: AbortSignal,

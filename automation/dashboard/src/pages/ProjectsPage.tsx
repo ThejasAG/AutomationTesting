@@ -16,6 +16,7 @@ import {
   Play, AlertTriangle, CheckCircle2, XCircle, Loader2, X, Smartphone,
   Layers, Server, HeartPulse,
 } from 'lucide-react';
+import ModalPortal from '../components/ModalPortal';
 
 // ── Presentation helpers ─────────────────────────────────────────────────────
 
@@ -721,17 +722,18 @@ export default function ProjectsPage() {
 
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
+    <ModalPortal onClose={onClose}>
     <div
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex',
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)', display: 'flex',
         alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16,
       }}
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="card"
-        style={{ maxWidth: 560, width: '100%', maxHeight: '80vh', overflowY: 'auto' }}
+        className="card modal-pop"
+        style={{ maxWidth: 560, width: '100%', maxHeight: '85vh', overflowY: 'auto' }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <h2 style={{ margin: 0, fontSize: '1.15rem' }}>{title}</h2>
@@ -742,5 +744,6 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
         {children}
       </div>
     </div>
+    </ModalPortal>
   );
 }

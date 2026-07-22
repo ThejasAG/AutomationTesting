@@ -36,6 +36,27 @@ _SKIP_DIRS: frozenset[str] = frozenset(
     {"__pycache__", ".git", ".venv", "node_modules", ".pytest_cache", ".mypy_cache"}
 )
 
+# Directories that hold the platform's TEST scripts (as opposed to the app's own
+# source). The Scripts tab lists these, not the whole repo.
+_TEST_DIRS: frozenset[str] = frozenset({"e2e", "tests", "test", "e2e_tests", "appium"})
+
+
+def _is_test_script(rel_path: "pathlib.PurePath") -> bool:
+    """A test script = a .py under a test directory, or a test_*.py / *_test.py
+    anywhere, or the project's automation.yaml. Filters out app source & config
+    JSON so the Scripts tab shows scripts, not the whole repo."""
+    parts = rel_path.parts
+    name = rel_path.name
+    ext = rel_path.suffix.lower()
+    if name in ("automation.yaml", "automation.yml"):
+        return True
+    if ext != ".py":
+        return False
+    if any(seg in _TEST_DIRS for seg in parts[:-1]):
+        return True
+    stem = rel_path.stem
+    return stem.startswith("test_") or stem.endswith("_test")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -488,11 +509,16 @@ def generate_yaml(project_id: str, db: Session = Depends(get_db)):
 )
 def list_project_files(
     project_id: str,
+    scripts_only: bool = True,
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    """Walk the cloned repository and return all files with allowed extensions.
+    """List repository files for the editor.
 
-    Hidden files and build/cache directories are excluded automatically.
+    By default (``scripts_only=True``) only TEST scripts are returned — the
+    Scripts tab is for authoring/running test scripts, not browsing the app's
+    own source and config JSON. Pass ``scripts_only=false`` to walk the whole
+    repo (all allowed extensions). Hidden files and build/cache dirs are always
+    excluded.
     """
     _get_project_or_404(project_id, db)
     repo_root = _get_repo_root(project_id)
@@ -514,6 +540,8 @@ def list_project_files(
 
             full_path = pathlib.Path(root) / filename
             rel_path = full_path.relative_to(repo_root)
+            if scripts_only and not _is_test_script(rel_path):
+                continue
             # Always return POSIX-style paths regardless of the host OS.
             files.append(
                 {
@@ -629,12 +657,33 @@ def run_project_file(
 
     Returns ``{"run_id": "<uuid>"}`` on success.
     """
-    _get_project_or_404(project_id, db)
+    project = _get_project_or_404(project_id, db)
+
+    device_id = body.device_id
+    # The user picks the simulator from a dropdown, so honour that exact choice
+    # (prefer_requested) — do NOT jump to whatever else is booted. Only an invalid
+    # id (e.g. a stale UDID or an Android 'emulator-5554') falls back to a real sim.
+    if (project.platform or "ios").lower() == "ios":
+        from automation.projects.builder import app_builder
+        from automation.device_manager.service import device_service
+        resolved, _ = app_builder.resolve_ios_device(device_id, prefer_requested=True)
+        if resolved:
+            device_id = resolved
+        # Boot exactly the chosen simulator so it — not some other booted one — is
+        # what runs. Booting a cold sim adds a few seconds; that's expected.
+        app_builder.ensure_ios_booted(device_id)
+        # The agent-fed registry can be empty (e.g. just after a restart), which
+        # would fail execute_project's device check. Register the chosen sim.
+        if not device_service.get_device(device_id):
+            from automation.scenarios.cross_app_config import list_ios_simulators
+            name = next((s["name"] for s in list_ios_simulators()
+                         if s["udid"] == device_id), "iOS Simulator")
+            device_service.register_local_device(device_id, name)
 
     try:
         run_id = runner_service.execute_project(
             project_id=project_id,
-            device_id=body.device_id,
+            device_id=device_id,
             triggered_by="Script Editor",
         )
         return {"run_id": run_id}

@@ -1,12 +1,22 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued, runCrossAppSuite } from '../api';
+import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued } from '../api';
+import CrossAppRunModal from '../components/CrossAppRunModal';
 import type { TestRun, Trends, Device } from '../api';
 import { Activity, AlertTriangle, CheckCircle2, ChevronRight, Clock, FileText, Smartphone, PlayCircle, Square, Loader2 } from 'lucide-react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 
 // A run that has not reached a terminal state can still be stopped.
 const STOPPABLE = new Set(['queued', 'running', 'pending', 'preparing', 'downloading', 'collecting_evidence']);
+
+// Status → the little icon shown inside its badge.
+function statusIcon(status: string) {
+  if (status === 'failed' || status === 'error') return <AlertTriangle size={12} />;
+  if (status === 'passed' || status === 'completed') return <CheckCircle2 size={12} />;
+  if (status === 'running') return <Loader2 size={12} className="spin" />;
+  if (STOPPABLE.has(status)) return <Clock size={12} />;
+  return <Square size={12} />;
+}
 
 export default function DashboardHome() {
   const [runs, setRuns] = useState<TestRun[]>([]);
@@ -19,7 +29,7 @@ export default function DashboardHome() {
   const [stopping, setStopping] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const navigate = useNavigate();
-  const [crossAppBusy, setCrossAppBusy] = useState(false);
+  const [crossAppModal, setCrossAppModal] = useState(false);
 
   async function refreshRuns() {
     try { setRuns(await getRuns()); setRunsError(null); } catch { setRunsError("Failed to load Runs."); }
@@ -107,26 +117,21 @@ export default function DashboardHome() {
           <p className="page-subtitle">AI-powered insights, real device execution, and root cause analysis across your mobile test suites.</p>
         </div>
         <button
-          onClick={async () => {
-            if (crossAppBusy) return;
-            setCrossAppBusy(true);
-            try {
-              const r = await runCrossAppSuite();
-              navigate(`/run/${r.run_id}`);
-            } catch (e: any) {
-              alert(e?.message || 'Could not start cross-app run');
-            } finally {
-              setCrossAppBusy(false);
-            }
-          }}
+          onClick={() => setCrossAppModal(true)}
           className="btn"
           style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 18px', whiteSpace: 'nowrap' }}
-          title="Run the full Consumer + Business scenario across both iOS simulators at once"
+          title="Assign simulators + logins, then run the Consumer + Business scenario"
         >
-          {crossAppBusy ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <PlayCircle size={16} />}
-          {crossAppBusy ? 'Starting…' : 'Run Cross-App Suite'}
+          <PlayCircle size={16} /> Run Cross-App Suite
         </button>
       </header>
+
+      {crossAppModal && (
+        <CrossAppRunModal
+          onClose={() => setCrossAppModal(false)}
+          onStarted={(runId) => { setCrossAppModal(false); navigate(`/run/${runId}`); }}
+        />
+      )}
 
       <div className="grid-3" style={{ marginBottom: '24px' }}>
           <div className="card">
@@ -188,8 +193,15 @@ export default function DashboardHome() {
         </div>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-        <h2 style={{ fontSize: '1.25rem', margin: 0 }}>Recent Test Runs</h2>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          <h2 style={{ fontSize: '1.25rem', margin: 0 }}>Recent Test Runs</h2>
+          {runs.length > 0 && (
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              {runs.length} total{runningCount > 0 ? ` · ${runningCount} running` : ''}{queuedCount > 0 ? ` · ${queuedCount} queued` : ''}
+            </span>
+          )}
+        </div>
         {queuedCount > 0 && (
           <button
             onClick={handleCancelAll}
@@ -215,7 +227,7 @@ export default function DashboardHome() {
           </div>
         </div>
       ) : (
-        <div className="table-container">
+        <div className="table-container table-scroll">
           <table>
             <thead>
               <tr>
@@ -233,7 +245,7 @@ export default function DashboardHome() {
                 <tr key={run.id} className="row-link" onClick={() => navigate(`/run/${run.id}`)}>
                   <td>
                     <span className={`badge ${run.status}`}>
-                      {run.status === 'failed' ? <AlertTriangle size={12}/> : <CheckCircle2 size={12}/>}
+                      {statusIcon(run.status)}
                       {run.status}
                     </span>
                   </td>
