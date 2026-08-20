@@ -22,6 +22,8 @@ classification a small local model can do, unlike writing a whole script.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import time
@@ -29,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from appium.webdriver.common.appiumby import AppiumBy
+
+logger = logging.getLogger("scenario_runner")
 
 from automation.intelligence.element_catalog import (
     AutoIdCatalog, METHOD_CONTAINER, METHOD_EXACT_ID, METHOD_HIERARCHY,
@@ -186,10 +190,26 @@ class Match:
 
 
 def _target_phrase(step: str, verb_re: re.Pattern) -> str:
-    """Everything after the leading verb is the target description."""
+    """Everything after the leading verb is the target description.
+
+    Strips trailing assertion suffixes so 'verify addNewEvent is visible' targets
+    'addNewEvent', not 'addNewEvent is visible'. Negation is detected separately.
+    """
     m = verb_re.match(step)
     rest = step[m.end():] if m else step
+    rest = rest.strip(" .:-\t")
+    rest = re.sub(
+        r"\s+(is|are|should\s+be|to\s+be|being)\s+(not\s+|no\s+longer\s+)?"
+        r"(visible|present|shown|displayed|there|available|enabled|on\s+screen)\s*$",
+        "", rest, flags=re.I)
     return rest.strip(" .:-\t")
+
+
+def _is_negative_assert(step: str) -> bool:
+    """True for 'verify X is NOT visible / not present / no longer shown / gone'."""
+    return bool(re.search(r"\b(not\s+(visible|present|shown|displayed|there)|"
+                          r"no\s+longer|isn'?t\s+(visible|present)|is\s+gone|"
+                          r"not\s+be\s+(visible|present)|absent)\b", step, re.I))
 
 
 class ScenarioRunner:
@@ -201,15 +221,35 @@ class ScenarioRunner:
         self._used_ids: set[str] = set()   # for building the script
         # Names elements the app never named, and records how sure we were.
         self.catalog = catalog or AutoIdCatalog()
+        # Numbers remembered by 'capture <label> as <name>', read back by
+        # 'verify calculation'. Per-runner, so scenarios never leak into each other.
+        self._captured: dict = {}
+        # Persistent self-healing memory: the locator that last worked per (app,target).
+        try:
+            from automation.intelligence.learned_locators import get_store
+            self.learned = get_store()
+        except Exception:
+            self.learned = None
         self._screen = "unknown"
         # page_source is a slow XCUITest round trip (1-3s). Several per-step checks
         # need it back-to-back, so share one fetch via a short TTL cache and
         # invalidate it the moment the screen is acted on.
         self._src_cache: Tuple[Optional[str], float] = (None, 0.0)
 
-    def _page_source(self, ttl: float = 1.5) -> str:
-        """page_source with a short-lived cache, so the several checks that run
-        back-to-back within one step don't each pay the XCUITest round trip."""
+    def _page_source(self, ttl: float = 60.0) -> str:
+        """page_source with a cache, so the several checks that run back-to-back
+        within one step don't each pay the XCUITest round trip.
+
+        The TTL must exceed the cost of the call it guards. Measured on this app
+        page_source is 241 KB and takes ~17.5s, so the old 1.5s TTL could never
+        hit: any two checks in a step were separated by more than 1.5s of Appium
+        work, and each paid full price. One failing step measured 338s — roughly
+        nineteen full fetches.
+
+        Correctness rests on INVALIDATION, not expiry: _invalidate_source() fires
+        after every action (run_one, clear_blockers). Anything that mutates the
+        screen and then re-reads it must invalidate first — the wait-for-element
+        poll in _tap_step does exactly that."""
         src, ts = self._src_cache
         if src is not None and (time.time() - ts) < ttl:
             return src
@@ -268,6 +308,23 @@ class ScenarioRunner:
             cid, kw = m.value
             return f"{cid} containing '{kw}'" if kw else str(cid)
         return "(unnamed element)"
+
+    def _seen(self, phrase: str, words: List[str], step: str) -> Optional["Match"]:
+        """Is *phrase* on screen? Cheapest oracle first: an exact accessibility id,
+        then an exact/token idb label, and only then the fuzzy resolver.
+
+        The same ladder _tap_step uses, for the same measured reason — _resolve
+        costs 30-150s a step on this app's tree while idb answers in ~1.6-3.4s.
+        idb also reports the GenericElements Appium's collapsed snapshot drops, so
+        without it a control can be plainly on screen and still be "not found"."""
+        m = self._exact_id(phrase)
+        if m:
+            return m
+        if phrase and self._idb_element(phrase):
+            # No element handle: every caller of this only REPORTS presence.
+            return Match(el=True, by="idb", value=f'label == "{phrase}"', text=phrase,
+                         exact=True, method="idb-label", confidence=1.0)
+        return self._resolve(words, step=step)
 
     def _vague(self, m: "Match", words: List[str]) -> Optional[Tuple[List[str], List[str]]]:
         """(nouns, matched) when the step named 2+ targets but the element only
@@ -337,12 +394,14 @@ class ScenarioRunner:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                spinners = self.d.find_elements(
+                busy = self.d.find_elements(
                     AppiumBy.IOS_PREDICATE,
-                    'type == "XCUIElementTypeActivityIndicator" AND visible == true')
+                    '(type == "XCUIElementTypeActivityIndicator" AND visible == true) '
+                    'OR (type == "XCUIElementTypeStaticText" AND visible == true AND '
+                    '(label CONTAINS[c] "loading" OR label CONTAINS[c] "please wait"))')
             except Exception:
                 return True
-            if not spinners:
+            if not busy:
                 return True
             time.sleep(0.4)
         return False
@@ -365,6 +424,23 @@ class ScenarioRunner:
         # The words rejoined are the label as a person would write it ("1 hr"),
         # which is often the exact accessibility id — tried before any squashing.
         phrase = " ".join(words)
+
+        # ── Self-heal fast path ────────────────────────────────────────────────
+        # Try the locator that last worked for this (app, target): one direct find
+        # instead of re-deriving through the fuzzy fallbacks. A miss (id drifted)
+        # just falls through to the normal strategies, which then RE-LEARN below.
+        drifted = False
+        if getattr(self, "learned", None):
+            try:
+                rec = self.learned.get(self.bid, phrase)
+                if rec:
+                    lm = self._try_learned(rec)
+                    if lm:
+                        return lm
+                    drifted = True   # had a learned locator but it no longer resolves
+            except Exception:
+                pass
+
         m = self._resolve_raw(words, prefer_container, phrase=phrase)
 
         # Nothing with an id matched — the element may simply have none.
@@ -386,6 +462,37 @@ class ScenarioRunner:
                 self.catalog.record_resolution(
                     step, METHOD_EXACT_ID, str(m.value), self._screen, 1.0)
                 m.confidence = 1.0
+                # Remember the real id that worked so next run resolves it directly;
+                # healed=drifted flags a genuine self-heal (the old locator had failed).
+                if getattr(self, "learned", None):
+                    try:
+                        from automation.intelligence.learned_locators import AID
+                        self.learned.learn(self.bid, phrase, AID, str(m.value), healed=drifted)
+                    except Exception:
+                        pass
+        return m
+
+    def _try_learned(self, rec) -> "Match":
+        """Find an element by a remembered (method, value). Returns a falsy Match on
+        miss, so the caller falls through to the normal strategies and re-learns."""
+        from automation.intelligence.learned_locators import AID
+        method, value = rec
+        by = AppiumBy.ACCESSIBILITY_ID if method == AID else AppiumBy.IOS_PREDICATE
+        try:
+            els = self.d.find_elements(by, value)
+        except Exception:
+            return Match()
+        vis = []
+        for e in els:
+            try:
+                if e.is_displayed():
+                    vis.append(e)
+            except Exception:
+                vis.append(e)
+        if not vis:
+            return Match()
+        m = Match(el=vis[0], value=value, method=METHOD_EXACT_ID, confidence=0.97)
+        m.text = self._element_text(m.el)
         return m
 
     def _scan_containers(self, words: List[str], step: str) -> "Match":
@@ -458,7 +565,46 @@ class ScenarioRunner:
                 return Match(els[0], "accessibility_id", cand, exact=True,
                              method=METHOD_EXACT_ID)
 
+        # 1b. Normalized id/label match — bridges spacing + case between the
+        #     written step ("Nylai kitchen 2") and the real testID ("NylaiKitchen2").
+        #     Exact-normalized wins over a mere prefix so we tap the card, not its
+        #     "…Fav"/"…Unsub" sibling buttons.
+        def _norm(s):
+            return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+        target = _norm(phrase) or _norm(joined)
+        if target and long_words:
+            seed = max(long_words, key=len)
+            try:
+                cands = self.d.find_elements(
+                    AppiumBy.IOS_PREDICATE,
+                    f'name CONTAINS[c] "{seed}" OR label CONTAINS[c] "{seed}"')
+            except Exception:
+                cands = []
+            exact_el, contains_el = None, None
+            for el in cands[: self._MAX_CANDIDATES]:
+                for attr in ("name", "label"):
+                    try:
+                        nv = _norm(el.get_attribute(attr))
+                    except Exception:
+                        nv = ""
+                    if not nv or len(nv) >= self._AGGREGATE_CHARS:
+                        continue
+                    if nv == target and exact_el is None:
+                        exact_el = el
+                    elif target in nv and contains_el is None:
+                        contains_el = el
+                if exact_el is not None:
+                    break
+            chosen = exact_el or contains_el
+            if chosen is not None:
+                return Match(chosen, "accessibility_id", target,
+                             exact=bool(exact_el), method=METHOD_EXACT_ID)
+
         # 2. a tappable container whose subtree contains a keyword (cards, chips)
+        # Same rule as 3/4 below: a MULTI-word step may not be satisfied by ONE of its
+        # words. 'click book now' matched the container of `bookAppoitment` on "book"
+        # alone (0.85) and re-tapped a button the flow had already pressed, sending the
+        # app somewhere the next step could not recover from.
         if prefer_container:
             for cid in self._CONTAINERS:
                 containers = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cid)
@@ -466,24 +612,58 @@ class ScenarioRunner:
                     for c in containers:
                         if c.find_elements(AppiumBy.IOS_PREDICATE,
                                            f'name CONTAINS[c] "{w}" OR label CONTAINS[c] "{w}"'):
+                            if len(long_words) > 1:
+                                text = self._element_text(c, ("name", "label")).lower()
+                                covered = sum(1 for x in long_words if x.lower() in text)
+                                if covered < len(long_words):
+                                    self._last_ambiguous = (
+                                        f"'{' '.join(words)}' only partially matches the "
+                                        f"container '{text[:60]}' (matched {covered}/"
+                                        f"{len(long_words)} words — on '{w}'). "
+                                        f"Refusing to guess; use the exact id.")
+                                    continue
                             return Match(c, "container", (cid, w), method=METHOD_CONTAINER)
 
         # 3. id CONTAINS a keyword (e.g. "book" -> bookAppoitment)
-        for w in sorted(long_words, key=len, reverse=True):
-            pred = f'name CONTAINS[c] "{w}" AND name.length < {self._AGGREGATE_CHARS}'
-            el = self._most_specific(
-                self.d.find_elements(AppiumBy.IOS_PREDICATE, pred), w, ("name",))
-            if el is not None:
-                return Match(el, "ios_predicate", pred, method=METHOD_PARTIAL_ID)
-
         # 4. visible label CONTAINS a keyword
-        for w in sorted(long_words, key=len, reverse=True):
-            pred = (f'(name CONTAINS[c] "{w}" AND name.length < {self._AGGREGATE_CHARS})'
-                    f' OR (label CONTAINS[c] "{w}" AND label.length < {self._AGGREGATE_CHARS})')
-            el = self._most_specific(
-                self.d.find_elements(AppiumBy.IOS_PREDICATE, pred), w, ("name", "label"))
-            if el is not None:
-                return Match(el, "ios_predicate", pred, method=METHOD_PARTIAL_ID)
+        #
+        # NEVER match on ONE word of a MULTI-word step. "click book now" used to match
+        # preOrderBooking, because "book" is a substring of preOrder-BOOK-ing — the run
+        # silently chose PRE-ORDER, and the next step ("order later") then hung for the
+        # full 150s on a screen the flow never meant to be on. A wrong tap is worse than
+        # no tap: it changes app state and the failure surfaces somewhere unrelated.
+        # So when the step gives several words, the element must account for ALL of them;
+        # if nothing does, say so and list what was there instead of guessing.
+        for attrs, name_only in ((("name",), True), (("name", "label"), False)):
+            hits: List[tuple] = []                # (matched_word_count, text_len, el, w)
+            for w in sorted(long_words, key=len, reverse=True):
+                if name_only:
+                    pred = f'name CONTAINS[c] "{w}" AND name.length < {self._AGGREGATE_CHARS}'
+                else:
+                    pred = (f'(name CONTAINS[c] "{w}" AND name.length < {self._AGGREGATE_CHARS})'
+                            f' OR (label CONTAINS[c] "{w}" AND label.length < {self._AGGREGATE_CHARS})')
+                el = self._most_specific(
+                    self.d.find_elements(AppiumBy.IOS_PREDICATE, pred), w, attrs)
+                if el is None:
+                    continue
+                text = self._element_text(el, attrs).lower()
+                covered = sum(1 for x in long_words if x.lower() in text)
+                hits.append((covered, len(text), el, w, pred))
+
+            if not hits:
+                continue
+            best = max(hits, key=lambda h: (h[0], -h[1]))
+            covered, _len, el, w, pred = best
+            if covered < len(long_words):
+                # Partial evidence only. Record WHY nothing was tapped so the step's
+                # failure names the real problem rather than "element not found".
+                self._last_ambiguous = (
+                    f"'{' '.join(words)}' only partially matches "
+                    f"'{self._element_text(el, attrs)}' (matched {covered}/{len(long_words)} "
+                    f"words — on '{w}'). Refusing to guess; use the exact id."
+                )
+                continue
+            return Match(el, "ios_predicate", pred, method=METHOD_PARTIAL_ID)
 
         return Match()
 
@@ -556,6 +736,32 @@ class ScenarioRunner:
         if not s or s.startswith("#"):
             return StepResult(step=s, ok=True, action="skipped (comment/blank)")
 
+        # VERIFY ELEMENT SIZE — "verify size/width/height of <X> = <N>" (px).
+        if re.search(r"verify\s+(size|width|height)\b", s, re.I):
+            return self._verify_size(s)
+
+        # VERIFY BILL / DISCOUNT — reuse the bot's proven bill_validator on the
+        # current bill screen (item sums, totals, coupon/discount).
+        if re.search(r"verify\s+(bill|total|discount|coupon)\b", s, re.I):
+            return self._verify_bill(s)
+
+        # CAPTURE — "capture <label> as <name>". Must come before the tap resolver, or
+        # the whole line is treated as something to click.
+        if re.match(r"^\s*capture\s+.+\s+as\s+[A-Za-z_][\w]*\s*$", s, re.I):
+            return self._capture_number(s)
+
+        # VERIFY CALCULATION — "verify calculation <math> = <expected>", checks the
+        # computed result against a number visible on screen (bills, XP math, etc.).
+        if re.search(r"verify\s+calculation|verify\s+.+=", s, re.I) and "=" in s:
+            calc = self._verify_calculation(s)
+            if calc is not None:
+                return calc
+
+        # API ASSERTION — "verify api <path> <field> == <value>" reads a backend
+        # value (for data that is NOT on screen, e.g. inventory stock).
+        if re.search(r"\bverify\s+api\b|\bapi\s+check\b", s, re.I):
+            return self._verify_api(s)
+
         # ORDER LATER — an explicit user choice on the "book a date" popup. The
         # auto-handler never taps this (it discards the cart), but when the user
         # asks for it by name we honour it.
@@ -601,6 +807,20 @@ class ScenarioRunner:
             phrase = _target_phrase(s, _ASSERT)
             low = phrase.lower()
 
+            # NEGATIVE assertion: "verify X is NOT visible / no longer present".
+            # Passes when the element is ABSENT (e.g. "Points" gone after rename).
+            if _is_negative_assert(s):
+                words = _locator_words(phrase)
+                m = self._seen(phrase, words, s)
+                gone = not m
+                return StepResult(
+                    step=s, ok=gone,
+                    action=f'"{phrase}" is correctly absent' if gone
+                           else f'"{phrase}" is STILL present (should be gone)',
+                    detail="" if gone else f'Found "{self._describe(m)}" — expected it to be absent.',
+                    code=f'    assert not driver.find_elements(AppiumBy.IOS_PREDICATE, '
+                         f'\'label CONTAINS[c] "{phrase}"\'), "{phrase} should be absent"')
+
             # app-state assertion ("the app is running / did not crash")
             if (("app" in low and any(k in low for k in ("run", "crash", "foreground", "alive", "load", "open")))
                     or any(k in low for k in ("no crash", "not crash", "no redbox", "no error"))):
@@ -613,7 +833,7 @@ class ScenarioRunner:
                     code='    assert driver.query_app_state(BUNDLE_ID) == 4, "app not in foreground"')
 
             words = _locator_words(phrase)
-            m = self._resolve(words, step=s)
+            m = self._seen(phrase, words, s)
             # chip/slot assertion — chips carry times, not the words "time/slot".
             if not m and any(w.lower() in ("slot", "time", "option", "chip") for w in words):
                 chips = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "chip-container-outer-layer")
@@ -623,8 +843,10 @@ class ScenarioRunner:
                     m = Match(chip, "chip", "chip-container-outer-layer", exact=True)
 
             if not m:
+                why = getattr(self, "_last_ambiguous", "")
+                self._last_ambiguous = ""
                 return StepResult(step=s, ok=False, action=f'"{phrase}" NOT found',
-                                  detail=f"No element matches '{phrase}'.")
+                                  detail=(why or f"No element matches '{phrase}'."))
 
             vague = self._vague(m, words)
             if vague:
@@ -740,17 +962,234 @@ class ScenarioRunner:
         return Match(el=el, by="fuzzy", value=(name or label), text=(label or name),
                      method="fuzzy-heal", confidence=best_score)
 
+    def _exact_id(self, phrase: str) -> Optional["Match"]:
+        """Resolve the target phrase as an EXACT accessibility id. Recorded steps
+        carry the element's real testID, which must match exactly rather than be
+        re-interpreted by word matching."""
+        pid = (phrase or "").strip()
+        if not pid:
+            return None
+        try:
+            els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, pid)
+        except Exception:
+            return None
+        if els:
+            return Match(el=els[0], by="accessibility_id", value=pid, text=pid,
+                         exact=True, method="exact-id", confidence=1.0)
+        return None
+
+
+    # ── idb fallback ────────────────────────────────────────────────────────
+    # Appium's XCUITest snapshot is depth-capped and does not report this app's
+    # GenericElement nodes at all — BOOK NOW (`bookAppoitment`), `orderLater`,
+    # `preOrderBooking`, `pickUpOrderConfirm` and the menu category chips are all
+    # invisible to it. Every strategy above then fails and the step burns its full
+    # timeout. idb reads the real tree, so use it as a last resort before giving up.
+    def _device_udid(self) -> str:
+        """The simulator this session drives. Appium normalises capability keys
+        differently across versions, so check every spelling rather than assume
+        one — getting this wrong makes the idb fallback silently do nothing."""
+        cached = getattr(self, "_udid", "")
+        if cached:
+            return cached
+        udid = ""
+        try:
+            caps = self.d.capabilities or {}
+            for k in ("udid", "appium:udid", "deviceUDID", "appium:deviceUDID"):
+                if caps.get(k):
+                    udid = str(caps[k]); break
+        except Exception:
+            udid = ""
+        self._udid = udid
+        return udid
+
+    def _idb_on_screen(self, pt) -> bool:
+        """Is this point actually visible? An idb tap is a raw coordinate tap, so
+        unlike an Appium element click it will NOT scroll the target into view —
+        tapping an off-screen frame hits whatever is at those pixels instead."""
+        try:
+            size = self.d.get_window_size()
+            return 0 <= pt[0] <= size["width"] and 0 <= pt[1] <= size["height"]
+        except Exception:
+            return False
+
+    def _idb_all(self) -> List[dict]:
+        """Every element idb can see, as raw dicts. ~1.6-3.4s, versus ~17s for
+        driver.page_source — and idb reports the GenericElement nodes Appium's
+        depth-capped snapshot drops entirely."""
+        udid = self._device_udid()
+        if not udid:
+            return []
+        try:
+            import subprocess
+            from automation.scenarios.idb_path import idb_binary
+            raw = subprocess.run([idb_binary(), "ui", "describe-all", "--udid", udid],
+                                 capture_output=True, text=True, timeout=45).stdout
+            return json.loads(raw) if raw.strip().startswith("[") else []
+        except Exception:
+            return []
+
+    @staticmethod
+    def _centre(e: dict):
+        f = e.get("frame") or {}
+        return (int(f.get("x", 0) + f.get("width", 0) / 2),
+                int(f.get("y", 0) + f.get("height", 0) / 2))
+
+    def _idb_element(self, name: str, arr: Optional[List[dict]] = None):
+        """Frame centre (cx, cy) of the element whose accessibility label is *name*.
+
+        Falls back to a label that CONTAINS *name* as a distinct token: the
+        restaurant cards are labelled "card-container-outer-layer NylaiKitchen2 …",
+        so an exact-only match sent every `click NylaiKitchen2` down the fuzzy
+        resolver at ~63.8s a step. A \\b-delimited token is still strict —
+        "NylaiKitchen2" does not match "NylaiKitchen2Sub" or "NylaiKitchen2Fav",
+        which are separate targets in these scenarios — and an ambiguous phrase
+        (two or more elements) is rejected rather than guessed."""
+        labels = [((e.get("AXLabel") or "").strip(), e)
+                  for e in (self._idb_all() if arr is None else arr)]
+        for label, e in labels:
+            if label == name:
+                return self._centre(e)
+        try:
+            tok = re.compile(r"\b" + re.escape(name) + r"\b")
+        except re.error:
+            return None
+        hits = [e for label, e in labels if label and tok.search(label)]
+        return self._centre(hits[0]) if len(hits) == 1 else None
+
+    # A COLLAPSED LogBox toast is a single GenericElement carrying the warning
+    # text — it exposes no "Dismiss" button at all, so dismiss_logbox(), which
+    # looks for one, never sees it. Measured on this build: the toast is a
+    # full-width strip at (10, 801.7, 382, 48) — directly over BOOK NOW at
+    # (201, 804) and over the Wallet tab. An idb tap is a RAW COORDINATE tap, so
+    # it lands on the toast, LogBox EXPANDS, and the step cheerfully reports a tap
+    # the app never received. That is the "tap 1 did not open the dialog" retry:
+    # attempt 2 works only because the now-expanded LogBox does have "Dismiss".
+    _LOGBOX = re.compile(r"Console (Warning|Error)|LogBox|addLog|Unhandled Promise Rejection"
+                         r"|Require cycle|Warning:|VirtualizedList", re.I)
+
+    def _logbox_toast(self, arr: List[dict]) -> Optional[dict]:
+        """The collapsed LogBox toast in *arr*, if one is up."""
+        for e in arr:
+            if e.get("type") == "GenericElement" and self._LOGBOX.search(e.get("AXLabel") or ""):
+                return e
+        return None
+
+    def _dismiss_toast(self, e: dict) -> bool:
+        """Tap the toast's ✕, which sits at the right end of its own frame.
+        Anywhere else on the toast EXPANDS LogBox over the whole screen, which is
+        strictly worse than the toast — so aim from the measured frame, never at
+        the toast's centre."""
+        f = e.get("frame") or {}
+        if not f.get("width"):
+            return False
+        pt = (int(f["x"] + f["width"] - 20), int(f["y"] + f.get("height", 0) / 2))
+        try:
+            import subprocess
+            from automation.scenarios.idb_path import idb_binary
+            subprocess.run([idb_binary(), "ui", "tap", "--udid", self._device_udid(),
+                            str(pt[0]), str(pt[1])], timeout=15)
+        except Exception:
+            return False
+        time.sleep(1.0)
+        self._invalidate_source()
+        return True
+
+    def _idb_tap_name(self, name: str) -> bool:
+        arr = self._idb_all()
+        # Clear the toast BEFORE locating, not just before tapping: this debug
+        # build emits warnings continuously, so one can land between a step's
+        # dismiss_logbox() and this tap.
+        toast = self._logbox_toast(arr)
+        if toast and self._dismiss_toast(toast):
+            arr = self._idb_all()
+        pt = self._idb_element(name, arr)
+        if not pt:
+            return False
+        try:
+            import subprocess
+            from automation.scenarios.idb_path import idb_binary
+            udid = self._device_udid()
+            subprocess.run([idb_binary(), "ui", "tap", "--udid", udid,
+                            str(pt[0]), str(pt[1])], timeout=15)
+            self._invalidate_source()   # the screen just changed under the cache
+            return True
+        except Exception:
+            return False
+
     def _tap_step(self, s: str, phrase: str, words: List[str], inferred: bool = False) -> StepResult:
-        m = self._resolve(words, prefer_container=True, step=s)
+        # Exact accessibility-id first (recorded testIDs), then word/text resolution.
+        m = self._exact_id(phrase)
+
+        # Before the fuzzy resolver: an EXACT accessibility-label match via idb.
+        # Measured on this app _resolve("Home") takes 68.9s and returns a 0.7
+        # confidence PARTIAL match, while idb finds the same control in 1.6s by
+        # exact label — and the wait-for-element loop below re-runs the resolver
+        # four more times, which is where 276s of a 336s scenario went.
+        # This is not a guess: an exact label match is strictly more precise than
+        # the partial match it saves us from computing.
+        if not m and phrase and not inferred:
+            pt = self._idb_element(phrase)
+            if pt and self._idb_on_screen(pt) and self._idb_tap_name(phrase):
+                self._wait_settle()
+                return StepResult(step=s, ok=True,
+                                  action=f'tapped "{phrase}" (idb exact-id)')
+
+        if not m:
+            m = self._resolve(words, prefer_container=True, step=s)
+
+        # The element may not be on screen YET — a list/feed that loads from an API
+        # renders a moment after the screen appears. Retry a few times before
+        # giving up, so a slow render is not mistaken for a missing element.
+        if not m:
+            for _ in range(4):
+                time.sleep(0.8)
+                self.wait_for_idle(2.0)
+                # This loop exists to catch an element that renders LATE, so it
+                # must look at the real screen each pass. The cache is keyed on
+                # invalidation now, and nothing acted on the screen here — so
+                # drop it explicitly, or all four passes re-read one stale tree
+                # and a slow render is reported as a missing element.
+                self._invalidate_source()
+                # Ask the cheap oracle first: if the element has rendered, idb
+                # sees it in ~1.6s. Only pay for the fuzzy resolver when it has
+                # genuinely not appeared.
+                if phrase and not inferred:
+                    pt = self._idb_element(phrase)
+                    if pt and self._idb_on_screen(pt) and self._idb_tap_name(phrase):
+                        self._wait_settle()
+                        return StepResult(step=s, ok=True,
+                                          action=f'tapped "{phrase}" (idb exact-id, after wait)')
+                m = self._exact_id(phrase) or self._resolve(words, prefer_container=True, step=s)
+                if m:
+                    break
 
         # "select a time slot" language -> the slot chip named by any ordinal
         # ("2nd time slot" -> chips[1]); defaults to the first chip.
         if not m and any(w.lower() in ("slot", "time", "option", "chip") for w in words):
+            # Consumer app: chips share one id. Business app: each chip is a
+            # distinct time-labeled id like "18:00Btn" — collect those in order.
             chips = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "chip-container-outer-layer")
+            cid = "chip-container-outer-layer"
+            if not chips:
+                try:
+                    timed = self.d.find_elements(
+                        AppiumBy.IOS_PREDICATE,
+                        'name MATCHES "^[0-9]{1,2}:[0-9]{2}Btn$" OR '
+                        'label MATCHES "^[0-9]{1,2}:[0-9]{2}Btn$"')
+                    # Order by the time in the id so "1st slot" = earliest (≈ now).
+                    def _t(e):
+                        v = (e.get_attribute("name") or e.get_attribute("label") or "")
+                        mt = re.match(r"(\d{1,2}):(\d{2})", v)
+                        return (int(mt.group(1)), int(mt.group(2))) if mt else (99, 99)
+                    chips = sorted(timed, key=_t)
+                    cid = "time-slot"
+                except Exception:
+                    chips = []
             if chips:
                 idx = _ordinal_index(s)
                 chip = chips[idx] if -len(chips) <= idx < len(chips) else chips[0]
-                m = Match(chip, "container", ("chip-container-outer-layer", None), exact=True)
+                m = Match(chip, "container", (cid, None), exact=True)
 
         # SELF-HEAL: the exact locator did not resolve (e.g. a testID changed on a
         # daily staging build). Before failing, find the closest visible control by
@@ -762,13 +1201,23 @@ class ScenarioRunner:
             if m:
                 healed_note = f'exact match not found — healed to "{self._describe(m)}" (fuzzy {int(m.confidence*100)}%)'
 
+        # Last resort before failing: tap it through idb. See _idb_element above —
+        # this app's GenericElement controls are invisible to Appium entirely, so
+        # without this every booking scenario dies on BOOK NOW / order later.
+        if not m and phrase and not inferred:
+            if self._idb_tap_name(phrase):
+                self._wait_settle()
+                return StepResult(step=s, ok=True,
+                                  action=f'tapped "{phrase}" (idb — Appium could not see it)')
+
         if not m:
             return StepResult(
                 step=s, ok=False,
                 action="did not understand this step" if inferred else f'could not find "{phrase}"',
                 detail=(f"Could not map '{s}' to an action or element." if inferred else
-                        f"No element matches '{phrase}' — it may need a testID "
-                        f"(accessible={{true}})."))
+                        (getattr(self, "_last_ambiguous", "") or
+                         f"No element matches '{phrase}' — it may need a testID "
+                         f"(accessible={{true}}).")))
 
         # Never let a GUESS destroy the session. Tapping a wrong button is
         # recoverable; logging out or deleting the account ends the run and
@@ -786,8 +1235,24 @@ class ScenarioRunner:
         # dangerous when it is SILENT, so the report always names the element
         # actually tapped, and says so when it answered to only part of the step.
         # (Asserting stays strict — claiming something is true is not best-effort.)
+        sig_before = self._screen_signature()
         code = self._tap_resolved(m)
         self._wait_settle()
+
+        # VERIFY the tap did something. Appium reports a click as successful once
+        # it has dispatched it, which says nothing about whether the app acted:
+        # BOOK NOW is found, clicked, logged [ok] — and the reservation form stays
+        # put, so the NEXT step hunts for a dialog that never opened and burns its
+        # whole timeout. When the screen is unchanged, re-tap the same control at
+        # its real coordinates through idb, which does land.
+        if self._screen_signature() == sig_before and phrase:
+            if self._idb_tap_name(phrase):
+                self._wait_settle()
+                if self._screen_signature() != sig_before:
+                    return StepResult(
+                        step=s, ok=True,
+                        action=f'tapped "{phrase}" (Appium click had no effect; idb re-tap worked)',
+                        code=code, healed=bool(healed_note), healed_note=healed_note)
 
         vague = self._vague(m, words)
         if vague:
@@ -888,27 +1353,242 @@ class ScenarioRunner:
         overlay covers the screen and swallows the next tap. Dismissing it lets
         the run continue. Only touches the LogBox — never real app UI.
         """
-        # Cheap presence check instead of a full snapshot (runs before every step).
-        try:
-            present = self.d.find_elements(
-                AppiumBy.IOS_PREDICATE,
-                'label CONTAINS "Console Warning" OR label CONTAINS "Console Error" '
-                'OR name CONTAINS "Console Warning" OR name CONTAINS "Console Error"')
-        except Exception:
-            return False
-        if not present:
-            return False
+        # Look for the DISMISS CONTROL directly — do not gate on the overlay's text.
+        # The old gate required a label containing "Console Warning"/"Console Error", but a
+        # collapsed LogBox toast shows its MESSAGE instead ("Rendering <Context> directly is
+        # not supported", "no valid aps-environment entitlement", "Each child in a list should
+        # have a unique key"). So the gate returned False, the dismiss below never ran, and the
+        # toast sat over the bottom of the screen eating taps: a run tapped BOOK NOW, logged
+        # '[ok] tapped bookAppoitment by id', and the booking was never created — every later
+        # segment then failed looking for a reservation that does not exist.
+        # Same cost as the old gate (one predicate query), strictly more effective.
         for label in ("Dismiss", "Minimize"):
-            btns = self.d.find_elements(
-                AppiumBy.IOS_PREDICATE,
-                f'type == "XCUIElementTypeButton" AND name == "{label}"')
-            if not btns:
-                btns = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, label)
+            try:
+                btns = self.d.find_elements(
+                    AppiumBy.IOS_PREDICATE,
+                    f'type == "XCUIElementTypeButton" AND name == "{label}"')
+                if not btns:
+                    btns = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, label)
+            except Exception:
+                return False
             if btns:
-                btns[0].click()
+                try:
+                    btns[0].click()
+                except Exception:
+                    return False
                 time.sleep(1)
                 return True
-        return False
+        # Nothing named Dismiss/Minimize — but a COLLAPSED toast has no such
+        # control at all (see _logbox_toast). It still covers the bottom strip and
+        # still eats taps, so clear it here rather than discovering it as a
+        # mysteriously ignored tap several steps later.
+        toast = self._logbox_toast(self._idb_all())
+        return bool(toast and self._dismiss_toast(toast))
+
+    # ── Calculation & API assertions (Phase 3) ───────────────────────────────
+    def _safe_eval(self, expr: str) -> Optional[float]:
+        """Evaluate a pure arithmetic expression (numbers + - * / ( ) . only)."""
+        expr = expr.strip()
+        if not expr or not re.fullmatch(r"[\d\s.+\-*/()]+", expr):
+            return None
+        try:
+            return float(eval(expr, {"__builtins__": {}}, {}))  # sandboxed: digits/ops only
+        except Exception:
+            return None
+
+    def _screen_numbers(self):
+        """All numbers currently visible on screen, with the element text they're in."""
+        out = []
+        try:
+            src = self._page_source()
+        except Exception:
+            src = ""
+        for m in re.finditer(r'(?:name|label|value)="([^"]*?)(\d[\d.,]*)([^"]*)"', src):
+            try:
+                out.append((float(m.group(2).replace(",", "")), (m.group(1) + m.group(2) + m.group(3))[:60]))
+            except ValueError:
+                continue
+        return out
+
+    def _capture_number(self, s: str) -> "StepResult":
+        """`capture <label> as <name>` — remember a number on screen under *name*.
+
+        The XP scenarios were written as "capture XP balance as before" … "verify
+        calculation before + 20 = after", but no capture intent existed: the line fell
+        through to the tap resolver, matched nothing meaningful, and the calculation
+        that depended on it could never have real values. Storing the number makes the
+        pair work, and makes before/after arithmetic expressible at all.
+        """
+        m = re.match(r"^\s*capture\s+(.+?)\s+as\s+([A-Za-z_][\w]*)\s*$", s, re.I)
+        if not m:
+            return StepResult(step=s, ok=False, action="could not read this capture step",
+                              detail="Use: capture <label> as <name>  "
+                                     "(e.g. 'capture XP balance as before').")
+        label, name = m.group(1).strip(), m.group(2)
+        words = [w for w in re.findall(r"[A-Za-z]{3,}", label)]
+        nums = self._screen_numbers()
+        if not nums:
+            return StepResult(step=s, ok=False, action=f'no number to capture as "{name}"',
+                              detail="No numbers are visible on this screen.")
+        # Prefer a number whose surrounding text mentions the label; else the first.
+        chosen, ctx_used = None, ""
+        for val, ctx in nums:
+            if words and all(w.lower() in ctx.lower() for w in words):
+                chosen, ctx_used = val, ctx
+                break
+        if chosen is None:
+            return StepResult(
+                step=s, ok=False, action=f'could not find a number for "{label}"',
+                detail=f"Visible numbers: {[f'{v:g} ({c[:26]})' for v, c in nums[:6]]}")
+        self._captured[name] = chosen
+        return StepResult(step=s, ok=True,
+                          action=f'captured {name} = {chosen:g} (from "{ctx_used[:34]}")',
+                          code=f"    {name} = {chosen:g}  # captured from screen")
+
+    def _verify_calculation(self, s: str) -> Optional["StepResult"]:
+        """`verify calculation <lhs> = <rhs>`.
+
+        - RHS is evaluated as arithmetic (e.g. '10 - 1' → 9, or a literal '9').
+        - If LHS is a label, the number shown for that label is compared to RHS.
+        - Otherwise the computed result is asserted to be visible on screen.
+        """
+        body = re.sub(r"^\s*(assert|verify|check|confirm|ensure|expect)\s+", "", s, flags=re.I)
+        body = re.sub(r"^\s*calculation\s+", "", body, flags=re.I)
+        if "=" not in body:
+            return None
+        lhs, rhs = body.split("=", 1)
+        # Substitute captured names so "before + 20 = after" becomes real arithmetic.
+        for nm, val in (getattr(self, "_captured", None) or {}).items():
+            pat = re.compile(rf"\b{re.escape(nm)}\b")
+            lhs, rhs = pat.sub(f"{val:g}", lhs), pat.sub(f"{val:g}", rhs)
+        expected = self._safe_eval(rhs)
+        if expected is None:
+            # RHS wasn't pure math — maybe LHS is the math and RHS a label; try LHS.
+            expected = self._safe_eval(lhs)
+            lhs, rhs = rhs, lhs
+        if expected is None:
+            return None  # not a calculation we can evaluate — fall through to normal assert
+
+        # Both sides numeric (captured values on each side): compare them, do not go
+        # hunting for the value on screen — "before + 20 = after" is about the two
+        # captures, not about what is currently displayed.
+        left = self._safe_eval(lhs)
+        if left is not None:
+            ok = abs(left - expected) <= 0.01
+            return StepResult(
+                step=s, ok=ok,
+                action=(f"calculation checks out ({left:g} = {expected:g})" if ok
+                        else f"calculation FAILED: {left:g} != {expected:g}"),
+                detail="" if ok else f"Expected {expected:g}, got {left:g}.",
+                code=f"    assert {left:g} == {expected:g}")
+
+        nums = self._screen_numbers()
+        label_words = [w for w in re.findall(r"[A-Za-z]{3,}", lhs)]
+        actual = None
+        # Prefer a number in an element whose text mentions the label.
+        for val, ctx in nums:
+            if label_words and all(w.lower() in ctx.lower() for w in label_words) and abs(val - expected) <= 0.01:
+                actual = val; break
+        if actual is None:
+            # Fall back: is the expected value visible anywhere?
+            for val, _ctx in nums:
+                if abs(val - expected) <= 0.01:
+                    actual = val; break
+        ok = actual is not None
+        return StepResult(
+            step=s, ok=ok,
+            action=f"calculation checks out (= {expected:g})" if ok else "calculation mismatch",
+            detail="" if ok else f"Expected {expected:g} on screen; not found among visible numbers.",
+            code=f'    # verify calculation: expected {expected:g} visible')
+
+    def _verify_size(self, s: str) -> "StepResult":
+        """`verify size/width/height of <element> = <N>` — checks pixel dimensions.
+
+        Handles UI-size tickets (e.g. 'close table button should be 60px') that
+        have no on-screen number — it reads the element's rect from Appium.
+        """
+        m = re.search(r"verify\s+(size|width|height)\s+of\s+(.+?)\s*(?:=|is|to)\s*(\d+)", s, re.I)
+        if not m:
+            return StepResult(step=s, ok=False, action="bad size assertion",
+                              detail='Use: verify width of <element> = <px>')
+        dim, target, expected = m.group(1).lower(), m.group(2).strip(), int(m.group(3))
+        el = self._exact_id(target)
+        if not el:
+            mm = self._resolve(_locator_words(target), step=s)
+            el = mm.el if mm else None
+        if el is None:
+            return StepResult(step=s, ok=False, action=f'"{target}" not found',
+                              detail=f"No element matches '{target}' to measure.")
+        try:
+            rect = el.rect  # {x, y, width, height}
+            actual = rect["height"] if dim == "height" else rect["width"]
+        except Exception as e:
+            return StepResult(step=s, ok=False, action="could not read size", detail=str(e)[:120])
+        ok = abs(actual - expected) <= 2   # 2px tolerance
+        return StepResult(step=s, ok=ok,
+                          action=f'{dim} = {actual}px' if ok else f'{dim} is {actual}px, expected {expected}px',
+                          detail="" if ok else f"{target}: measured {dim}={actual}px, expected {expected}px.",
+                          code=f'    assert abs(el.rect["{"height" if dim=="height" else "width"}"] - {expected}) <= 2')
+
+    def _verify_bill(self, s: str) -> "StepResult":
+        """Reuse the bot's bill_validator on the current bill screen (items→total,
+        coupon/discount). This brings the bot's proven financial checks into the
+        platform runner without running the whole bot."""
+        try:
+            from automation.intelligence import bill_validator as bv
+        except Exception as e:
+            return StepResult(step=s, ok=False, action="bill_validator unavailable", detail=str(e)[:120])
+        xml = self._page_source()
+        low = s.lower()
+        # discount/coupon check: "verify discount <original> <coupon_value>"
+        if "discount" in low or "coupon" in low:
+            nums = [float(x) for x in re.findall(r"[\d.]+", s)]
+            if len(nums) >= 2:
+                res = bv.validate_coupon(xml, nums[0], nums[1])
+            else:
+                return StepResult(step=s, ok=False, action="need original + coupon value",
+                                  detail='Use: verify discount <original_total> <coupon_value>')
+        else:
+            res = bv.validate_bill(xml)
+        ok = bool(res.get("pass"))
+        return StepResult(step=s, ok=ok,
+                          action="bill checks out" if ok else "bill mismatch",
+                          detail=(res.get("calculation") or "") if ok else res.get("reason", "bill validation failed"),
+                          code='    # bill_validator (from the Vya bot)')
+
+    def _verify_api(self, s: str) -> "StepResult":
+        """`verify api <url> <jsonpath-ish field> == <value>` — read a backend value.
+
+        Uses the project's API base when a relative path is given. This covers
+        data that is NOT on screen (e.g. inventory stock after a cancel).
+        """
+        import os, json, httpx
+        m = re.search(r"api\s+(\S+)\s+([\w.\[\]]+)\s*(==|=|!=|>|<)\s*(\S+)", s, re.I)
+        if not m:
+            return StepResult(step=s, ok=False, action="bad api assertion",
+                              detail='Use: verify api <url> <field> == <value>')
+        path, field, op, expected = m.group(1), m.group(2), m.group(3), m.group(4).strip('"\'')
+        base = os.getenv("APP_API_BASE", "")
+        url = path if path.startswith("http") else f"{base.rstrip('/')}/{path.lstrip('/')}"
+        try:
+            r = httpx.get(url, timeout=15)
+            data = r.json()
+            for key in re.split(r"[.\[\]]+", field):
+                if key == "":
+                    continue
+                data = data[int(key)] if key.isdigit() else data[key]
+            actual = str(data)
+        except Exception as e:
+            return StepResult(step=s, ok=False, action="api read failed", detail=str(e)[:160])
+        try:
+            an, en = float(actual), float(expected)
+            ok = {"==": an == en, "=": an == en, "!=": an != en, ">": an > en, "<": an < en}[op]
+        except ValueError:
+            ok = (actual == expected) if op in ("==", "=") else (actual != expected)
+        return StepResult(step=s, ok=ok,
+                          action=f"api {field}={actual} {op} {expected}" if ok else "api value mismatch",
+                          detail="" if ok else f"backend {field}={actual}, expected {op} {expected}",
+                          code=f'    # verify api: {field} {op} {expected}')
 
     def app_crash(self) -> Optional[str]:
         """The JS error on screen, if the app has red-boxed. None when healthy.
@@ -931,6 +1611,13 @@ class ScenarioRunner:
                 return (hits[0].get_attribute("label") or "app red-boxed (see screenshot)")[:160]
             except Exception:
                 return "app red-boxed (see screenshot)"
+        # Native crash: the app process is no longer running/foreground (state 1 =
+        # not running). A JS redbox keeps the app foreground; a native crash kills it.
+        try:
+            if self.d.query_app_state(self.bid) == 1:
+                return "app terminated (native crash — process no longer running)"
+        except Exception:
+            pass
         return None
 
     def book_popup_open(self) -> bool:
@@ -970,6 +1657,253 @@ class ScenarioRunner:
             action="took the booking offer from the popup",
             code=f'    by_id(driver, "{_BOOK_POPUP_ACCEPT}").click()')
 
+    # Controls that dismiss an obstacle, most-preferred first. GRANTING a permission is
+    # preferred over denying: denying also clears the dialog, but then the location-gated
+    # home screen returns no restaurants and the run fails later for an invented reason.
+    _BLOCKER_BUTTONS = (
+        "Allow While Using App", "Allow Once", "Allow", "OK", "Continue",
+        "Got it", "GOT IT", "YES, GOT IT", "Skip", "Next", "Get Started",
+        "Maybe Later", "Not Now", "Done", "Close", "Dismiss",
+    )
+    # Never press these to "unblock" — they destroy state or make a real choice for the
+    # user. An obstacle should be stepped over, not answered on their behalf.
+    _BLOCKER_NEVER = ("Don't Allow", "Dont Allow", "Deny", "Delete", "Log out", "Logout",
+                      "Sign out", "Cancel", "Remove", "Reset", "Skip Login")
+
+    def clear_blockers(self, intent: str = "") -> str:
+        """Dismiss something standing in the way. Returns what it pressed, or "".
+
+        Deterministic first: a known dismiss control by exact label. Only if none is
+        present does it ask the model, and only to answer "which control gets past
+        this screen" — never "which control is the step's target". The model's answer
+        is rejected unless it names an element that is actually on screen.
+        """
+        # 0. SYSTEM alerts first — "Would Like to Send You Notifications", location,
+        #    camera, Bluetooth. These belong to SpringBoard, NOT the app, so they do not
+        #    appear in page_source at all: element queries for "Allow" find nothing while
+        #    the dialog is plainly on screen and blocking every tap. The alert API is the
+        #    only way to reach them. accept() presses the affirmative button (Allow),
+        #    which is what unblocks — denying also closes it but then location-gated
+        #    screens come back empty and the run fails later for an invented reason.
+        try:
+            alert = self.d.switch_to.alert
+            text = (alert.text or "").strip()
+            alert.accept()
+            time.sleep(1.2)
+            self._invalidate_source()
+            first = text.splitlines()[0] if text else "system alert"
+            return f"allowed system alert: {first[:60]}"
+        except Exception:
+            pass                      # no alert present — the normal case
+
+        # 1. Known dismiss controls, in preference order — but a tap only COUNTS if the
+        #    screen actually changed. Tapping "Skip" on this app's onboarding did nothing
+        #    (the label is not the tappable element), and without this check the unblocker
+        #    reported "cleared: Skip" seven times in a row while the screen sat still —
+        #    the same false-success it exists to prevent.
+        before = self._screen_signature()
+        for label in self._BLOCKER_BUTTONS:
+            try:
+                els = self.d.find_elements(AppiumBy.IOS_PREDICATE,
+                                           f'label == "{label}" OR name == "{label}"')
+            except Exception:
+                continue
+            for el in els:
+                try:
+                    if not el.is_displayed():
+                        continue
+                    el.click()
+                    time.sleep(1.2)
+                    self._invalidate_source()
+                    if self._screen_signature() != before:
+                        return label
+                    # An element click did nothing. On RN screens the visible text is
+                    # often a plain label with the TouchableOpacity as an ancestor, so
+                    # clicking the label is a no-op (the same trap as the T&C checkbox,
+                    # where the tappable square sat inside a wider row). A coordinate
+                    # tap at its centre goes through the real hit-test.
+                    if self._tap_center(el):
+                        time.sleep(1.2)
+                        self._invalidate_source()
+                        if self._screen_signature() != before:
+                            return f"{label} (tap)"
+                    # Still nothing — that control is inert here. Try the next candidate.
+                except Exception:
+                    continue
+
+        # 2. Nothing known matched — ask the model what clears this screen.
+        return self._llm_unblock(intent)
+
+    def _llm_unblock(self, intent: str = "") -> str:
+        """Last resort: let the model name a control that gets past an unknown screen.
+
+        Strictly bounded — it may only choose from ids ON SCREEN, never a destructive
+        one, and the choice is reported so a green step never hides a guess.
+        """
+        if os.getenv("AI_UNBLOCK", "true").lower() in ("0", "false", "no"):
+            return ""
+        try:
+            onscreen = self._visible_labels()
+        except Exception:
+            return ""
+        if not onscreen:
+            return ""
+        try:
+            from automation.ai.provider import create_provider, default_config
+        except Exception as e:
+            logger.debug("no AI provider for unblock: %s", e)
+            return ""
+
+        system = (
+            "You unblock an automated mobile test. You are given the goal and the "
+            "controls on screen. Reply with the exact text of ONE control, or NONE."
+        )
+        prompt = (
+            "An automated test is stuck. It was trying to: "
+            f"{intent or 'proceed with the app'}.\n"
+            f"Controls on screen: {onscreen[:40]}\n\n"
+            "If this screen is an OBSTACLE unrelated to that goal (a permission alert, "
+            "an onboarding slide, a rating prompt, a cookie notice), reply with the ONE "
+            "control that gets past it. Prefer granting permission over denying it. "
+            "If this screen IS the goal, or nothing would clear it, reply NONE.\n"
+            "Reply with the control text only."
+        )
+        try:
+            resp = create_provider(default_config).generate(
+                system, prompt, json_schema={}, max_tokens=24, temperature=0)
+            answer = (resp.content or "").strip().strip('"').splitlines()[0].strip()
+        except Exception as e:
+            logger.debug("unblock model call failed: %s", e)
+            return ""
+        if not answer or answer.upper() == "NONE":
+            return ""
+        if any(bad.lower() in answer.lower() for bad in self._BLOCKER_NEVER):
+            logger.info("Refusing model's unblock suggestion %r — destructive.", answer)
+            return ""
+        # It must name something actually on screen; otherwise it invented one.
+        if not any(answer.lower() == o.lower() for o in onscreen):
+            logger.info("Refusing model's unblock suggestion %r — not on screen.", answer)
+            return ""
+        # It must plausibly DISMISS something. Asked about a normal home screen the model
+        # happily answered "Wallet" — a real control, not destructive, and tapping it
+        # would navigate AWAY from the step's target and make the failure worse. So an
+        # answer is only accepted when it reads like a dismissal, or when it is a button
+        # inside a genuine system alert (where every button dismisses the alert).
+        if not (self._is_dismissive(answer) or self._in_system_alert(answer)):
+            logger.info("Refusing model's unblock suggestion %r — not a dismiss control.",
+                        answer)
+            return ""
+        try:
+            before = self._screen_signature()
+            els = self.d.find_elements(AppiumBy.IOS_PREDICATE,
+                                       f'label == "{answer}" OR name == "{answer}"')
+            if els:
+                els[0].click()
+                time.sleep(1.2)
+                self._invalidate_source()
+                # Same rule as the deterministic path: a tap that changed nothing
+                # cleared nothing, and must not be reported as a success.
+                if self._screen_signature() != before:
+                    return f"{answer} (AI)"
+                logger.info("Model's unblock %r changed nothing — not counting it.", answer)
+        except Exception:
+            pass
+        return ""
+
+    # Words that mean "get past this", in the phrasings apps actually use.
+    _DISMISSIVE = re.compile(
+        r"\b(allow|ok|okay|continue|next|skip|got\s*it|understood|agree|accept|"
+        r"proceed|start|get\s+started|later|not\s+now|maybe|done|close|dismiss|"
+        r"confirm|yes)\b", re.I)
+
+    def _is_dismissive(self, text: str) -> bool:
+        return bool(self._DISMISSIVE.search(text or ""))
+
+    def _in_system_alert(self, text: str) -> bool:
+        """True when *text* is a button inside a real alert — there, any button dismisses."""
+        try:
+            alerts = self.d.find_elements(AppiumBy.IOS_PREDICATE,
+                                          'type == "XCUIElementTypeAlert"')
+            for a in alerts:
+                for b in a.find_elements(AppiumBy.IOS_PREDICATE,
+                                         'type == "XCUIElementTypeButton"'):
+                    if (b.get_attribute("label") or b.get_attribute("name") or "").strip() == text:
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _tap_center(self, el) -> bool:
+        """Tap an element's centre by coordinate, bypassing the element hit-test."""
+        try:
+            from selenium.webdriver.common.actions.action_builder import ActionBuilder
+            from selenium.webdriver.common.actions.pointer_input import PointerInput
+            r = el.rect
+            x = int(r["x"] + r["width"] / 2)
+            y = int(r["y"] + r["height"] / 2)
+            a = ActionBuilder(self.d, mouse=PointerInput("touch", "finger"))
+            a.pointer_action.move_to_location(x, y).pointer_down().pause(0.1).pointer_up()
+            a.perform()
+            return True
+        except Exception as e:
+            logger.debug("coordinate tap failed: %s", e)
+            return False
+
+    def _screen_signature(self) -> str:
+        """Cheap fingerprint of what is on screen, to tell whether a tap did anything.
+
+        Measured on this app: driver.page_source is 241 KB and takes ~17.5s, while
+        idb's describe-all takes ~3.4s and reports the tree Appium's depth-capped
+        snapshot misses. Anything calling this twice per tap has to use idb, or a
+        7-step scenario spends four minutes just fingerprinting screens.
+        """
+        udid = self._device_udid()
+        if udid:
+            try:
+                import subprocess
+                from automation.scenarios.idb_path import idb_binary
+                raw = subprocess.run([idb_binary(), "ui", "describe-all", "--udid", udid],
+                                     capture_output=True, text=True, timeout=30).stdout
+                arr = json.loads(raw) if raw.strip().startswith("[") else []
+                labels = [(e.get("AXLabel") or "").strip() for e in arr]
+                return "|".join([l for l in labels if l][:25])
+            except Exception:
+                pass
+        try:
+            return "|".join(self._visible_labels(limit=25))
+        except Exception:
+            return ""
+
+    def _visible_labels(self, limit: int = 40) -> List[str]:
+        """Short, tappable-looking labels on screen — the model's only menu.
+
+        idb first, for the same reason _screen_signature uses it: ~1.6-3.4s
+        against ~17s for page_source, and it sees this app's GenericElements."""
+        out: List[str] = []
+        for e in self._idb_all():
+            txt = (e.get("AXLabel") or "").strip()
+            if txt and len(txt) <= 40 and txt not in out:
+                out.append(txt)
+            if len(out) >= limit:
+                return out
+        if out:
+            return out
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(self._page_source())
+        except Exception:
+            return out
+        for el in root.iter():
+            a = el.attrib
+            if a.get("visible", "true") == "false":
+                continue
+            txt = (a.get("label") or a.get("name") or "").strip()
+            if txt and len(txt) <= 40 and txt not in out:
+                out.append(txt)
+            if len(out) >= limit:
+                break
+        return out
+
     def run_one(self, step: str, index: int) -> StepResult:
         """Run a single step and return its result. Never raises.
 
@@ -990,6 +1924,32 @@ class ScenarioRunner:
             res = self._do_step(step)
         except Exception as e:  # never let one step abort the whole scenario
             res = StepResult(step=step, ok=False, action="error", detail=str(e)[:200])
+
+        # A step can fail simply because something UNASKED-FOR is in the way — an iOS
+        # permission alert, an onboarding carousel, a "rate us" sheet. No rule covers
+        # those, and none should: they are obstacles, not targets. Clear the obstacle
+        # and retry the step ONCE, exactly as written.
+        #
+        # This is deliberately NOT the same thing as guessing what a step meant. The
+        # step's own target is never substituted — 'click book now' still fails rather
+        # than becoming preOrderBooking. Only things standing BETWEEN us and the screen
+        # get touched.
+        if not res.ok and not getattr(self, "_unblocking", False):
+            self._unblocking = True                 # never recurse
+            try:
+                cleared = self.clear_blockers(intent=step)
+            finally:
+                self._unblocking = False
+            if cleared:
+                self._invalidate_source()
+                try:
+                    retried = self._do_step(step)
+                except Exception as e:
+                    retried = StepResult(step=step, ok=False, action="error",
+                                         detail=str(e)[:200])
+                if retried.ok:
+                    retried.action = f"{retried.action} (after clearing: {cleared})"
+                    res = retried
 
         # The screen was just acted on — the cached source is stale now.
         self._invalidate_source()

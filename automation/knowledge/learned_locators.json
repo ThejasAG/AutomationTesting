@@ -1,0 +1,86 @@
+{
+"org.vyapy.sarls.vyabusinessipadstaging": {
+"firstname": {
+"hits": 3,
+"heals": 2,
+"drifts": 0,
+"method": "aid",
+"value": "firstName",
+"ts": 1785928468
+},
+"lastname": {
+"hits": 3,
+"heals": 2,
+"drifts": 0,
+"method": "aid",
+"value": "lastName",
+"ts": 1785928526
+},
+"menu": {
+"hits": 9,
+"heals": 8,
+"drifts": 0,
+"method": "aid",
+"value": "menu",
+"ts": 1786012494
+},
+"addnewevent": {
+"hits": 2,
+"heals": 1,
+"drifts": 0,
+"method": "aid",
+"value": "addNewEvent",
+"ts": 1786191674
+},
+"mobileinputbtn": {
+"hits": 6,
+"heals": 5,
+"drifts": 0,
+"method": "aid",
+"value": "mobileInputBtn",
+"ts": 1785993384
+},
+"additemsbtn": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "addItemsBtn",
+"ts": 1786101895
+},
+"selectallitemsbtn": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "selectAllItemsBtn",
+"ts": 1786185215
+}
+},
+"org.vyapy.sarls.vyaconsumerstaging": {
+"homesearchbar": {
+"hits": 2,
+"heals": 1,
+"drifts": 0,
+"method": "aid",
+"value": "homeSearchBar",
+"ts": 1787201579
+},
+"homerestuarantbar": {
+"hits": 2,
+"heals": 1,
+"drifts": 0,
+"method": "aid",
+"value": "homeRestuarantBar",
+"ts": 1787201614
+},
+"homecouponicon": {
+"hits": 2,
+"heals": 1,
+"drifts": 0,
+"method": "aid",
+"value": "homeCouponIcon",
+"ts": 1787201643
+}
+}
+}

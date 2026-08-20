@@ -6,7 +6,7 @@ from datetime import datetime
 
 from automation.database.config import get_db
 from automation.database.models import ExecutionAgent
-from automation.auth.security import get_current_user
+from automation.auth.security import get_current_user, require_agent
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
 
@@ -21,7 +21,8 @@ class HeartbeatRequest(BaseModel):
     connected_devices: List[Dict[str, Any]]
 
 @router.post("/register")
-def register_agent(req: RegisterAgentRequest, db: Session = Depends(get_db)):
+def register_agent(req: RegisterAgentRequest, db: Session = Depends(get_db),
+                   _agent=Depends(require_agent)):
     # Simple registration, ideally protected by an API key or auth token, but for now we'll leave it open for agents
     agent = ExecutionAgent(
         hostname=req.hostname,
@@ -42,7 +43,8 @@ def register_agent(req: RegisterAgentRequest, db: Session = Depends(get_db)):
     return {"id": agent.id, "status": "registered"}
 
 @router.post("/{agent_id}/heartbeat")
-def heartbeat(agent_id: str, req: HeartbeatRequest, db: Session = Depends(get_db)):
+def heartbeat(agent_id: str, req: HeartbeatRequest, db: Session = Depends(get_db),
+              _agent=Depends(require_agent)):
     agent = db.query(ExecutionAgent).filter(ExecutionAgent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")

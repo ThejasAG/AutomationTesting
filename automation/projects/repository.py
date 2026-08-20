@@ -313,6 +313,14 @@ class RepositoryManager:
         if self.get_current_branch(project_id) == branch:
             return
 
+        # Discard local edits FIRST. Every successful run dirties the tree — preparation
+        # rewrites automation.yaml, the RN compatibility repair rewrites package.json and
+        # yarn.lock, and stray .pyc files get tracked — so the NEXT job that needs a
+        # different branch died with "Your local changes would be overwritten by checkout".
+        # pull() has always reset before pulling; switching branches needs the same, or a
+        # PR test can never run after a build has happened.
+        self._reset_worktree(repo_path)
+
         # Make sure the ref is known locally before switching to it.
         self._run_git(["fetch", "origin", branch], cwd=repo_path)
 
@@ -336,12 +344,32 @@ class RepositoryManager:
         stashed_venv = self._stash_venv(repo_path)
         try:
             self._reset_worktree(repo_path)
-            res = self._run_git(["pull", "origin", branch], cwd=repo_path)
+            # REBASE, don't merge. Some checkouts carry deliberate local commits — the
+            # staging apps are the prod repo plus patches that set their own bundle id
+            # ("vyaconsumerstaging"), app name and staging API URL, all marked
+            # "do not push". Once upstream moves on, plain `git pull` sees divergent
+            # branches and refuses ("need to specify how to reconcile them"), which is
+            # what broke Latest build. Rebase replays those patches on top of the new
+            # upstream, so the checkout gets the latest code AND stays staging.
+            # `reset --hard` would take the latest code and silently destroy them.
+            # autoStash because _reset_worktree deliberately KEEPS ios/Podfile.lock
+            # modified (reverting it costs a multi-minute `pod install --repo-update`
+            # on every run). Rebase refuses to start with unstaged changes, so without
+            # this the pull fails on exactly the repos the reset was tuned for.
+            res = self._run_git(
+                ["-c", "rebase.autoStash=true", "pull", "--rebase", "origin", branch],
+                cwd=repo_path,
+            )
             if res.returncode != 0:
+                # Never leave the repo mid-rebase — that breaks every later run with a
+                # confusing state rather than a clear error.
+                self._run_git(["rebase", "--abort"], cwd=repo_path)
                 self._restore_venv(repo_path, stashed_venv)
                 stashed_venv = None
-                logger.error(f"Pull failed: {res.stderr}")
-                raise RuntimeError(f"git pull failed: {res.stderr.strip()}")
+                logger.error(f"Pull (rebase) failed: {res.stderr}")
+                raise RuntimeError(
+                    f"git pull --rebase failed: {res.stderr.strip()[:400]}"
+                )
         except RuntimeError:
             raise
         except Exception as e:

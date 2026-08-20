@@ -45,6 +45,10 @@ BUSINESS_BUNDLE = "org.vyapy.sarls.vyabusinessipad"
 
 DEFAULT_CONSUMER_UDID = "DA24A392-FF1B-4283-A5CE-CDDE0D000D21"   # iPhone 16 Pro
 DEFAULT_BUSINESS_UDID = "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"   # iPad Pro 11"
+# Dedicated phone for the B-app (waiter+kitchen) when running "phone" mode — a SEPARATE
+# iPhone 16 (base), NOT the consumer's iPhone 16 Pro. Sharing one sim with the consumer
+# caused WDA session collisions; this device is its own sim with the staging B-app installed.
+DEFAULT_BUSINESS_PHONE_UDID = "B1093E61-C510-4E6E-8A60-C2D05D150F64"   # iPhone 16
 APPIUM_URL = "http://127.0.0.1:4723"
 
 # The Business app is a SEPARATE React Native app — it cannot share Metro on
@@ -57,11 +61,14 @@ BIZ_PASSWORD_FIELD = "passwordValue"
 BIZ_SIGNIN_BTN = "signInBtn"
 
 
-def ensure_business_metro(udid: str) -> bool:
+def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
     """Start the Business app's own Metro on 8082 and point the app at it.
 
-    Returns True when :8082 answers. Without this the iPad app stalls on its
-    splash because 8081 is serving the Consumer bundle.
+    Returns True when :8082 answers. Without this the app stalls on a BLANK
+    splash because 8081 serves the Consumer bundle. `bundle` is the app actually
+    being driven — pass the STAGING bundle for staging runs, else its
+    RCT_jsLocation is never set and the staging app shows blank (this bit a fresh
+    iPhone that had never had the default persisted).
     """
     # Already up?
     try:
@@ -93,7 +100,7 @@ def ensure_business_metro(udid: str) -> bool:
     # Point the Business app at its own packager (RCTBundleURLProvider reads this).
     try:
         subprocess.run(
-            ["xcrun", "simctl", "spawn", udid, "defaults", "write", BUSINESS_BUNDLE,
+            ["xcrun", "simctl", "spawn", udid, "defaults", "write", bundle,
              "RCT_jsLocation", f"localhost:{BUSINESS_METRO_PORT}"],
             check=False, timeout=15,
         )
@@ -112,13 +119,39 @@ def _options(udid: str, bundle_id: str, wda_port: int) -> XCUITestOptions:
     o.udid = udid
     o.bundle_id = bundle_id
     o.no_reset = True
-    o.set_capability("wdaLaunchTimeout", 180000)
-    o.set_capability("usePrebuiltWDA", True)
-    # Distinct WDA port per session so the two simulators can run concurrently.
-    o.set_capability("wdaLocalPort", wda_port)
+    # Keep the session alive through long idle gaps. Appium's default newCommandTimeout is
+    # 60s — but this flow leaves a session idle far longer: a PRE-WARMED business session
+    # waits out the whole ~3-min consumer segment, and idb-heavy steps (@add_all_products)
+    # go >60s without an Appium call. Both made the session TERMINATE mid-run ("A session is
+    # either terminated or not started" — the #1 flaky failure). 20 min covers any segment.
+    o.set_capability("newCommandTimeout", 1200)
+    # WDA launch/build ceiling. A FRESH sim (e.g. the phone the first time it runs the B-app)
+    # has NO prebuilt WebDriverAgent, so Appium compiles it from scratch — that took ~188s and
+    # BLEW the old 180s limit, so Appium dropped the session-creation connection and the client
+    # saw 'RemoteDisconnected: Remote end closed connection without response'. 360s gives the
+    # first-ever build room; once built, usePrebuiltWDA reuses it and subsequent launches are fast.
+    # WDA config from the central resolver. Distinct port per session so the two
+    # simulators run concurrently — that part was already right here, so the
+    # explicit port is passed through and pinned unchanged (8100 consumer /
+    # 8101 business). What was missing is derivedDataPath: this path set
+    # usePrebuiltWDA=True while never telling Appium WHERE the prebuilt build is,
+    # so Appium could not shortcut to launching it.
+    from automation.appium_service import wda as _wda
+    _wda.apply(o, udid=udid, wda_port=wda_port)
     # The Business app fires a native "Send You Notifications" permission alert on
     # launch that sits ON TOP of the login form and swallows every tap/keystroke.
     o.set_capability("autoAcceptAlerts", True)
+    # ── Anti-hang: the Vya RN apps animate constantly (spinners, loaders), so
+    # XCUITest's default "wait for the app to be idle" before every command never
+    # settles and each tap/find HANGS for minutes. Disable quiescence waiting and
+    # keep snapshots shallow/fast so commands return promptly on this big UI tree.
+    o.set_capability("waitForQuiescence", False)      # don't block on app idle
+    o.set_capability("waitForIdleTimeout", 0)         # 0s idle wait
+    o.set_capability("shouldWaitForQuiescence", False)
+    o.set_capability("maxTypingFrequency", 30)
+    # NOTE: do NOT cap snapshotMaxDepth here — this app's cards (e.g. NylaiKitchen2)
+    # live deep in the tree, and a shallow cap made the resolver miss them without
+    # actually speeding snapshots up. waitForQuiescence=False is what stops the hangs.
     return o
 
 
@@ -139,8 +172,51 @@ def _fill_field(d, name: str, text: str) -> bool:
         return False
     els[0].click()
     time.sleep(0.5)
-    els[0].send_keys(text)
-    return True
+    # CLEAR FIRST. The apps run with noReset:True, so a field can already hold the previous
+    # session's value — send_keys APPENDS to it. That produced a login e-mail of
+    # 'emp2A@xorstack.rstack.comemp2A@xo@xorst...' ("Please enter valid email address"), and
+    # every retry concatenated more, so the run reported "login rejected / wrong creds" when
+    # the credentials were fine. clear() is a no-op on an empty field.
+    try:
+        els[0].clear()
+        time.sleep(0.2)
+    except Exception:
+        pass
+    # Type, then VERIFY, and retype character-by-character if the field dropped
+    # anything. Measured on the iPhone 16 business sim: send_keys('emp2A@…') left
+    # the field holding 'emA@…' — the 'p' and '2' were swallowed by the RN
+    # TextInput mid-burst. The old code logged that mismatch and returned False,
+    # but the caller submitted the mangled value regardless, so a perfectly good
+    # credential produced three "bounced back to the sign-in screen" attempts and
+    # was reported as an app-side Firebase problem.
+    def _value():
+        try:
+            return els[0].get_attribute("value") or ""
+        except Exception:
+            return None
+
+    for attempt in (1, 2, 3):
+        if attempt > 1:
+            try:
+                els[0].click(); time.sleep(0.3); els[0].clear(); time.sleep(0.3)
+            except Exception:
+                pass
+        if attempt < 3:
+            els[0].send_keys(text)
+        else:
+            # Last resort: one character at a time, which the input keeps up with.
+            for ch in text:
+                els[0].send_keys(ch)
+                time.sleep(0.06)
+        time.sleep(0.3)
+        got = _value()
+        if got is None:
+            return True                       # cannot read it back; assume typed
+        if not got or got == text or "•" in got or "●" in got:
+            return True                       # match, or a masked secure field
+        logger.warning("_fill_field(%s): typed %r but field holds %r (attempt %d/3)",
+                       name, text, got, attempt)
+    return False
 
 
 class CrossAppOrchestrator:

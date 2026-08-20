@@ -9,6 +9,8 @@ validation is skipped (dev mode only).
 
 import hashlib
 import hmac
+
+from automation.auth.security import IS_PRODUCTION
 import json
 import logging
 import os
@@ -83,6 +85,12 @@ async def github_webhook(request: Request):
         signature = request.headers.get("X-Hub-Signature-256", "")
         if not _verify_signature(secret, body, signature):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    elif IS_PRODUCTION:
+        # An unsigned webhook endpoint lets anyone who can reach it queue runs
+        # against our repositories. Refuse rather than accept it unverified.
+        logger.error("GITHUB_WEBHOOK_SECRET not set — refusing unverified webhook")
+        raise HTTPException(status_code=503,
+                            detail="Webhook signature validation is not configured.")
     else:
         logger.warning("GITHUB_WEBHOOK_SECRET not set — skipping signature validation (dev mode)")
 
@@ -195,6 +203,14 @@ async def github_webhook(request: Request):
             missing_tests = _rec["missing_tests"]
             no_coverage = _rec["no_coverage"]
             affected_modules = _rec["affected_modules"] or affected_modules
+            # Test impact prediction: run the highest-risk tests first.
+            if selected_tests:
+                try:
+                    from automation.intelligence.impact_predictor import test_impact_predictor
+                    selected_tests = test_impact_predictor.reorder_tests(
+                        selected_tests, _project.id, changed_files)
+                except Exception as _e:
+                    logger.warning("risk reorder failed: %s", _e)
 
     if missing_tests:
         logger.warning(
@@ -256,12 +272,25 @@ async def github_webhook(request: Request):
             "device_name": device_name,
             "os_version": device.platform_version if device else None,
             "platform": platform,
-            "triggered_by": f"github_webhook:{repo_name}",
+            # Encode the PR number so the run-completion path can comment back.
+            "triggered_by": (f"github_webhook:{repo_name}#{pr_number}"
+                             if is_pr and pr_number else f"github_webhook:{repo_name}"),
             "branch": branch,
             "commit_sha": commit_sha,
             "bot_type": "ios",
         })
         run_ids.append(run_id)
+
+        # Mark the PR check as pending immediately (before the run executes).
+        if is_pr and pr_number and commit_sha and "/" in repo_name:
+            try:
+                from automation.integrations.pr_comment import pr_comment_bot
+                owner, short_repo = repo_name.split("/", 1)
+                pr_comment_bot.update_pr_status(
+                    short_repo, commit_sha, "pending",
+                    "QA tests queued", owner=owner)
+            except Exception as exc:
+                logger.warning("PR pending status failed: %s", exc)
 
         # ── 6b. Android cross-app run (Consumer + Business) ──────────────────
         # If this project's group has the Android bot configured, spin up a
@@ -318,6 +347,41 @@ async def github_webhook(request: Request):
     ios_run_id = run_ids[0] if run_ids else None
     both = message + (" | iOS + Android tests triggered" if android_run_id else "")
 
+    # Ticket-driven testing: run any ticket linked to this PR — either by an explicit
+    # pr_number, OR by a match_key (e.g. "NEWVYA-1134") that appears in the PR's branch,
+    # title or body. The key path is what lets you link a ticket BEFORE its PR exists;
+    # on a key match we back-fill pr_number so the link is recorded.
+    linked_tickets = []
+    if is_pr and pr_number:
+        try:
+            import threading
+            from automation.database.models import Ticket
+            from automation.api.v1.routers.tickets import run_ticket_scenarios
+            haystack = " ".join(str(x or "") for x in (
+                branch, pr.get("title"), pr.get("body"))).lower()
+            matched = {}  # ticket_id -> Ticket (dedup)
+            with SessionLocal() as _tdb:
+                for t in _tdb.query(Ticket).all():
+                    by_number = t.pr_number and str(t.pr_number) == str(pr_number)
+                    by_key = t.match_key and t.match_key.lower() in haystack
+                    if by_number or by_key:
+                        matched[t.id] = t
+                        if by_key and not t.pr_number:
+                            t.pr_number = str(pr_number)   # back-fill the now-known PR
+                            if pr.get("html_url"):
+                                t.pr_url = pr.get("html_url")
+                if matched:
+                    _tdb.commit()
+                tids = list(matched.keys())
+            for tid in tids:
+                threading.Thread(target=run_ticket_scenarios, args=(tid,), daemon=True).start()
+            linked_tickets = tids
+            if tids:
+                logger.info("PR #%s triggered %d linked ticket(s) (by number or key)",
+                            pr_number, len(tids))
+        except Exception as _e:
+            logger.warning("ticket trigger failed: %s", _e)
+
     return {
         "status": "triggered",
         "pr_number": pr_number,
@@ -334,5 +398,6 @@ async def github_webhook(request: Request):
         "cross_app_impact": cross_app_impact,
         "affected_endpoints": affected_endpoints,
         "graphify_nodes": graphify_nodes,
+        "linked_tickets": linked_tickets,
         "message": both,
     }

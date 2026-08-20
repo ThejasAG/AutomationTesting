@@ -90,8 +90,13 @@ def _appium_options(device_id: str, bundle_id: str):
     opts.udid = device_id
     opts.bundle_id = bundle_id
     opts.no_reset = True
-    opts.set_capability("wdaLaunchTimeout", 180000)
-    opts.set_capability("usePrebuiltWDA", True)
+    # WDA config comes from the central resolver — derivedDataPath, wdaLocalPort,
+    # wdaLaunchTimeout, usePrebuiltWDA and useNewWDA. This used to hardcode one
+    # DerivedData path and set no wdaLocalPort, so it silently landed on Appium's
+    # default 8100 — the same port cross-app claims for the consumer sim, and a
+    # second session on that port tears the first one down mid-run.
+    from automation.appium_service import wda as _wda
+    _wda.apply(opts, udid=device_id)
     # ── Speed ────────────────────────────────────────────────────────────────
     # By default XCUITest waits for the app's main thread to be "quiescent" before
     # every single command — the biggest hidden cost on iOS. Turn it off; our own
@@ -109,9 +114,12 @@ _SPEED_SETTINGS = {
     "waitForIdleTimeout": 0,          # don't block on app-idle between commands
     "shouldWaitForQuiescence": False,
     "shouldUseCompactResponses": True,
-    "snapshotMaxDepth": 40,           # bound the UI-tree walk (default 50) → faster page_source
+    # React Native screens nest deeply — the real tappable rows sit well below
+    # depth 40, so a shallow cap made Appium blind to them ("No element matches"
+    # even though idb sees them). 60 reaches RN list rows while staying bounded.
+    "snapshotMaxDepth": 60,
     "useFirstMatch": True,            # return the first matching element, don't collect all
-    "customSnapshotTimeout": 3,       # cap how long a snapshot may take
+    "customSnapshotTimeout": 8,       # a deeper snapshot needs a little more time
 }
 
 
@@ -148,6 +156,118 @@ def _resolve_run(req: "ScenarioRequest", db: Session):
     return bundle_id, steps, repo_path
 
 
+def _persist_run_start(req: "ScenarioRequest") -> Optional[str]:
+    """Create a TestRun so this Scenarios-tab execution shows in Dashboard/Reports."""
+    import uuid
+    from automation.database.config import SessionLocal
+    from automation.database import database
+    try:
+        run_id = str(uuid.uuid4())
+        now = datetime.utcnow()
+        with SessionLocal() as db:
+            database.insert_test_run(db, {
+                "id": run_id, "project_id": req.project_id,
+                "test_suite": "Scenario (iOS)", "test_name": req.name or "scenario",
+                "status": "running", "job_state": "running",
+                "started_at": now, "created_at": now,
+                "device_name": req.device_id, "platform": "iOS", "bot_type": "ios",
+                "triggered_by": "scenarios-tab",
+            })
+        return run_id
+    except Exception as e:
+        logger.warning("scenario persist-start failed: %s", e)
+        return None
+
+
+def _persist_step(run_id: Optional[str], index: int, res, secs: Optional[float] = None) -> None:
+    if not run_id:
+        return
+    from automation.database.config import SessionLocal
+    from automation.database.models import ScenarioResult
+    try:
+        status = "PASS" if getattr(res, "ok", False) else "FAIL"
+        with SessionLocal() as db:
+            row = (db.query(ScenarioResult)
+                   .filter_by(run_id=run_id, scenario_num=str(index)).first())
+            if row is None:
+                row = ScenarioResult(run_id=run_id, scenario_num=str(index))
+                db.add(row)
+            row.scenario_name = getattr(res, "step", f"step {index}")
+            row.status = status
+            row.consumer_status = status
+            row.error = (getattr(res, "detail", "") or None) if status == "FAIL" else None
+            # Real wall-clock for THIS step. Left unset before, so every scenario-runner
+            # row reached the report with a blank duration.
+            if secs is not None:
+                row.launch_time = round(secs, 1)
+            db.commit()
+    except Exception as e:
+        logger.warning("scenario persist-step failed: %s", e)
+
+
+def _collect_crash_reports(run_id: str) -> None:
+    """Copy recent iOS-simulator crash reports into the run's evidence dir so the
+    RCA has the native stack trace, not just 'app not in foreground'."""
+    import glob, shutil, time as _t
+    try:
+        src_dir = os.path.expanduser("~/Library/Logs/DiagnosticReports")
+        dest = os.path.join(os.getcwd(), "reports", run_id, "crash")
+        os.makedirs(dest, exist_ok=True)
+        cutoff = _t.time() - 300  # crashes from the last 5 minutes
+        copied = 0
+        for f in glob.glob(os.path.join(src_dir, "*.ips")) + glob.glob(os.path.join(src_dir, "*.crash")):
+            try:
+                if os.path.getmtime(f) >= cutoff:
+                    shutil.copyfile(f, os.path.join(dest, os.path.basename(f)))
+                    copied += 1
+            except Exception:
+                continue
+        if copied:
+            logger.info("collected %d crash report(s) for run %s", copied, run_id)
+    except Exception as e:
+        logger.debug("crash-report collection failed: %s", e)
+
+
+def _persist_run_finish(run_id: Optional[str], started: datetime,
+                        out=None, error: Optional[str] = None) -> None:
+    if not run_id:
+        return
+    from automation.database.config import SessionLocal
+    from automation.database import database
+    try:
+        ok = bool(out and out.ok) and not error
+        status = "passed" if ok else "failed"
+        now = datetime.utcnow()
+        # Did the app crash during the run? The runner tags a crashed step's detail.
+        crashed = bool(out and any(
+            ("APP BUG" in (getattr(r, "detail", "") or "") or "CRASHED" in (getattr(r, "action", "") or "")
+             or "red-boxed" in (getattr(r, "detail", "") or "") or "terminated" in (getattr(r, "detail", "") or ""))
+            for r in getattr(out, "results", [])))
+        with SessionLocal() as db:
+            db_run = database.get_test_run(db, run_id)
+            if db_run:
+                db_run = dict(db_run)
+                db_run["status"] = status
+                db_run["job_state"] = status
+                db_run["completed_at"] = now
+                db_run["duration_ms"] = int((now - started).total_seconds() * 1000)
+                db_run["crash_detected"] = crashed
+                if error:
+                    db_run["error_message"] = error
+                database.insert_test_run(db, db_run)
+        if crashed:
+            _collect_crash_reports(run_id)
+        # A quick PM-friendly summary (uses the fast non-LLM fallback when Ollama is off).
+        try:
+            from automation.ai.services.summary import test_summary_generator
+            with SessionLocal() as db:
+                test_summary_generator.generate_run_summary(run_id, db)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning("scenario persist-finish failed: %s", e)
+
+
 def _scenario_events(
     req: ScenarioRequest, bundle_id: str, steps: List[str], repo_path: str
 ) -> Generator[str, None, None]:
@@ -160,6 +280,11 @@ def _scenario_events(
     from automation.projects.builder import app_builder
 
     driver = None
+    # Persist this run so it appears in Dashboard/Reports like every other run.
+    run_started = datetime.utcnow()
+    run_id = _persist_run_start(req)
+    if run_id:
+        yield _sse({"type": "run", "run_id": run_id})
     try:
         shot_dir = os.path.join(repo_path, "reports", "scenario")
         os.makedirs(shot_dir, exist_ok=True)
@@ -169,6 +294,7 @@ def _scenario_events(
         yield _sse({"type": "phase", "message": f"Booting simulator {req.device_id[:8]}…"})
         boot_ok, boot_msg = app_builder.ensure_ios_booted(req.device_id)
         if not boot_ok:
+            _persist_run_finish(run_id, run_started, error=boot_msg)
             yield _sse({"type": "error", "detail": boot_msg})
             return
         yield _sse({"type": "phase", "message": boot_msg})
@@ -187,6 +313,7 @@ def _scenario_events(
         yield _sse({"type": "phase", "message": "Starting the JS bundler (Metro)…"})
         metro_ok, metro_msg = app_builder.ensure_metro(repo_path, udid=req.device_id, bundle_id=bundle_id)
         if not metro_ok:
+            _persist_run_finish(run_id, run_started, error=metro_msg)
             yield _sse({
                 "type": "error",
                 "detail": f"{metro_msg} Without it the app opens on the red "
@@ -195,21 +322,18 @@ def _scenario_events(
             return
         yield _sse({"type": "phase", "message": metro_msg})
 
-        # Appium must be running — the session creation below connects to it. A
-        # clear message here beats a cryptic connection-refused stack trace.
-        try:
-            import urllib.request
-            with urllib.request.urlopen(f"{req.appium_url.rstrip('/')}/status", timeout=4):
-                pass
-        except Exception:
-            yield _sse({
-                "type": "error",
-                "detail": f"Appium server is not reachable at {req.appium_url}. "
-                          f"Start it in a terminal with 'appium' and run again.",
-            })
+        # Appium must be healthy. If it is wedged (stuck WebDriverAgent — what makes
+        # "the device stop working"), self-heal by restarting it, and SAY SO so a
+        # ~30s recovery never looks like a hang.
+        yield _sse({"type": "phase", "message": "Checking the automation engine (Appium)…"})
+        appium_ok, appium_msg = app_builder.ensure_appium(req.appium_url)
+        yield _sse({"type": "phase", "message": appium_msg})
+        if not appium_ok:
+            _persist_run_finish(run_id, run_started, error=appium_msg)
+            yield _sse({"type": "error", "detail": appium_msg})
             return
 
-        yield _sse({"type": "phase", "message": f"Connecting to {req.device_id} (building WDA can take a minute on first run)…"})
+        yield _sse({"type": "phase", "message": f"Connecting to {req.device_id} (building WebDriverAgent, ~30s on the first run — this is not a hang)…"})
         driver = webdriver.Remote(req.appium_url, options=_appium_options(req.device_id, bundle_id))
         _apply_speed_settings(driver)
 
@@ -247,8 +371,10 @@ def _scenario_events(
             # the line the user watches to know what is happening right now.
             yield _sse({"type": "step_start", "index": i, "total": total, "step": step})
 
+            step_started = _t.time()
             res = runner.run_one(step, i)
             out.results.append(res)
+            _persist_step(run_id, len(out.results) - 1, res, _t.time() - step_started)
             yield emit(res, i, total)
 
             # A "book a date" popup can intercept an add-to-cart. Take the
@@ -261,6 +387,7 @@ def _scenario_events(
                 popup = runner.handle_book_popup()
                 if popup is not None:
                     out.results.append(popup)
+                    _persist_step(run_id, len(out.results) - 1, popup)
                     yield emit(popup, i, total)
 
         out.script = runner.build_script(out)
@@ -278,6 +405,10 @@ def _scenario_events(
         report = runner.catalog.report()
         yield _sse({"type": "report", "report": report, "text": runner.catalog.render()})
 
+        # Finalize the saved run (status + duration + report) so it shows in
+        # Dashboard/Reports with a pass/fail verdict.
+        _persist_run_finish(run_id, run_started, out=out)
+
         yield _sse({
             "type": "done",
             "ok": out.ok,
@@ -287,10 +418,12 @@ def _scenario_events(
             "saved_to": (os.path.relpath(saved_path, repo_path) if saved_path else None),
             "script": out.script,
             "report": report,
+            "run_id": run_id,
         })
 
     except Exception as e:
         logger.exception("Scenario stream failed")
+        _persist_run_finish(run_id, run_started, error=f"Scenario run failed: {e}")
         yield _sse({"type": "error", "detail": f"Scenario run failed: {e}"})
     finally:
         if driver is not None:
@@ -373,14 +506,13 @@ def _batch_events(req: BatchRequest, bundle_id: str, repo_path: str) -> Generato
         if not metro_ok:
             yield _sse({"type": "error", "detail": metro_msg}); return
 
-        try:
-            import urllib.request
-            with urllib.request.urlopen(f"{req.appium_url.rstrip('/')}/status", timeout=4):
-                pass
-        except Exception:
-            yield _sse({"type": "error", "detail": f"Appium not reachable at {req.appium_url}. Start it with 'appium'."}); return
+        yield _sse({"type": "phase", "message": "Checking the automation engine (Appium)…"})
+        appium_ok, appium_msg = app_builder.ensure_appium(req.appium_url)
+        yield _sse({"type": "phase", "message": appium_msg})
+        if not appium_ok:
+            yield _sse({"type": "error", "detail": appium_msg}); return
 
-        yield _sse({"type": "phase", "message": "Connecting (one session for all scenarios)…"})
+        yield _sse({"type": "phase", "message": "Connecting once for all scenarios (building WebDriverAgent ~30s on first run — not a hang)…"})
         driver = webdriver.Remote(req.appium_url, options=_appium_options(req.device_id, bundle_id))
         _apply_speed_settings(driver)
 

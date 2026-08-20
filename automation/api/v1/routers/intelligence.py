@@ -20,6 +20,41 @@ from automation.intelligence.chat import chat_assistant
 
 router = APIRouter(prefix="/intelligence", tags=["intelligence"])
 
+
+def analyze_performance_trend(rows) -> Dict[str, Any]:
+    """Turn recent PerformanceSummary rows (newest-first) into a trend payload.
+
+    Shared by the /projects/{id}/performance-trends endpoint. Flags a
+    regression when the latest score drops >10 points vs the prior run.
+    """
+    ordered = list(reversed(rows))  # oldest → newest for charting
+    trend = [{
+        "run_id": r.run_id,
+        "date": r.created_at.isoformat() if r.created_at else None,
+        "score": r.performance_score,
+        "grade": r.grade,
+    } for r in ordered]
+
+    scores = [t["score"] for t in trend if t["score"] is not None]
+    avg_score = round(sum(scores) / len(scores)) if scores else 0
+    improving = len(scores) >= 2 and scores[-1] >= scores[0]
+
+    regression = None
+    if len(scores) >= 2 and (scores[-2] - scores[-1]) > 10:
+        regression = {
+            "drop": scores[-2] - scores[-1],
+            "from_score": scores[-2],
+            "to_score": scores[-1],
+            "run_id": trend[-1]["run_id"],
+        }
+
+    return {
+        "trend": trend,
+        "improving": improving,
+        "avg_score": avg_score,
+        "regression": regression,
+    }
+
 class RecommendRequest(BaseModel):
     project_id: str
     branch: str = "main"
@@ -313,24 +348,17 @@ def _call_gemini(api_key: str, user: str) -> str:
 
 
 def _call_ollama(system: str, user: str) -> str:
-    """Local Ollama model — no API key. Uses the same server the RCA/Chat features
-    already use. `format: json` nudges the model to return parseable JSON."""
-    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.getenv("LLM_MODEL_NAME", "llama3.2")
-    resp = httpx.post(
-        f"{base}/api/generate",
-        json={
-            "model": model,
-            "system": system,
-            "prompt": user,
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0.2, "num_predict": 4096},
-        },
-        timeout=300,
-    )
-    resp.raise_for_status()
-    return resp.json().get("response", "")
+    """Generate via the configured LLM provider (Groq/OpenAI/Ollama).
+
+    Named `_call_ollama` for back-compat; it now routes through the provider so
+    it's fast on Groq. Falls back to local Ollama only if that's what's configured.
+    """
+    from automation.ai.provider import create_provider, default_config
+    # Ask for JSON explicitly in the prompt (works across providers).
+    resp = create_provider(default_config).generate(
+        system, user + "\n\nRespond with valid JSON only.",
+        json_schema={}, max_tokens=4096, temperature=0.2)
+    return resp.content or ""
 
 
 def _call_claude(api_key: str, system: str, user: str) -> str:
@@ -389,8 +417,10 @@ def capture_locators(
     opts.udid = req.device_id
     opts.bundle_id = req.bundle_id
     opts.no_reset = True
-    opts.set_capability("wdaLaunchTimeout", 180000)
-    opts.set_capability("usePrebuiltWDA", True)
+    # Central WDA resolver — was usePrebuiltWDA=True with no derivedDataPath,
+    # so Appium had no idea where the prebuilt build lived.
+    from automation.appium_service import wda as _wda
+    _wda.apply(opts, udid=req.device_id)
 
     driver = None
     try:

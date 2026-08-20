@@ -78,11 +78,22 @@ def _sess_or_404(sid: str) -> Dict[str, Any]:
 def _element_at(source: str, px: float, py: float) -> Optional[Dict[str, str]]:
     """Deepest visible element whose rect contains the point (px,py in points).
 
-    Returns {label, testid, type} for the best tap target, or None."""
+    Returns {label, testid, type, locator} — 'locator' is the most reliable thing
+    to replay by: a UNIQUE accessibility id if the element has one (replays exactly),
+    otherwise the visible text. That is what makes a recording actually re-runnable."""
     try:
         root = ET.fromstring(source)
     except Exception:
         return None
+
+    # Count accessibility-id occurrences so we only trust an id that is unique
+    # (a shared wrapper id like "card-container-outer-layer" is not a locator).
+    name_counts: Dict[str, int] = {}
+    for el in root.iter():
+        n = (el.attrib.get("name") or "").strip()
+        if n:
+            name_counts[n] = name_counts.get(n, 0) + 1
+
     best = None
     best_area = None
     for el in root.iter():
@@ -101,25 +112,36 @@ def _element_at(source: str, px: float, py: float) -> Optional[Dict[str, str]]:
         area = w * h
         # Smallest containing element = the most specific thing under the finger.
         if best_area is None or area < best_area:
-            name = a.get("name") or ""
-            label = a.get("label") or ""
-            value = a.get("value") or ""
+            name = (a.get("name") or "").strip()
+            label = (a.get("label") or "").strip()
+            value = (a.get("value") or "").strip()
+            # Prefer a unique id (exact replay); else the visible text; else the id.
+            if name and name_counts.get(name, 0) == 1:
+                locator = name
+            elif label:
+                locator = label
+            elif value:
+                locator = value
+            else:
+                locator = name
             best = {
                 "label": (label or name or value or "").strip(),
-                "testid": name.strip(),
+                "testid": name,
                 "type": (a.get("type") or "").replace("XCUIElementType", ""),
+                "locator": locator,
             }
             best_area = area
     return best
 
 
 def _step_for(el: Optional[Dict[str, str]]) -> str:
-    """A replayable plain-language step for the tapped element."""
+    """A replayable step for the tapped element — uses the reliable locator so the
+    replay engine can find exactly what was tapped."""
     if not el:
         return "tap here"
-    label = el.get("label") or el.get("testid") or ""
-    if label:
-        return f'tap {label}'
+    loc = el.get("locator") or el.get("label") or el.get("testid") or ""
+    if loc:
+        return f'tap {loc}'
     t = el.get("type") or "element"
     return f"tap the {t.lower()}"
 
@@ -175,10 +197,15 @@ def start(body: StartBody, current_user=Depends(get_current_user)):
     opts.udid = device_id
     opts.bundle_id = bundle_id
     opts.no_reset = True
-    opts.set_capability("wdaLaunchTimeout", 180000)
-    opts.set_capability("usePrebuiltWDA", True)
+    # Central WDA resolver — was usePrebuiltWDA=True with no derivedDataPath.
+    from automation.appium_service import wda as _wda
+    _wda.apply(opts, udid=device_id)
     opts.set_capability("waitForQuiescence", False)   # don't wait for app-idle each command
     opts.set_capability("shouldUseCompactResponses", True)
+    # Self-heal a wedged Appium/WDA before connecting (what makes "device stop working").
+    appium_ok, appium_msg = app_builder.ensure_appium(body.appium_url)
+    if not appium_ok:
+        raise HTTPException(status_code=503, detail=appium_msg)
     try:
         driver = webdriver.Remote(body.appium_url, options=opts)
     except Exception as e:

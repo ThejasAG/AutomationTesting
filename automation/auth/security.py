@@ -2,16 +2,34 @@ from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 import os
+import secrets
 
 from automation.database.config import get_db
 from automation.database.models import User
 
 # Configuration
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
+# APP_ENV gates every fail-closed check below. Anything that is not an explicit
+# dev/test value is treated as production, so a missing or typo'd value fails
+# SAFE rather than silently opening the platform up.
+APP_ENV = os.getenv("APP_ENV", "dev").strip().lower()
+IS_PRODUCTION = APP_ENV not in ("dev", "development", "local", "test")
+
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    if IS_PRODUCTION:
+        # Never fall back to a constant that is committed to the repo: anyone
+        # holding the source could mint valid tokens for every deployment.
+        raise RuntimeError(
+            "JWT_SECRET_KEY is required when APP_ENV=%s. "
+            "Generate one with:  python3 -c 'import secrets; print(secrets.token_hex(32))'"
+            % APP_ENV
+        )
+    SECRET_KEY = "dev-only-insecure-key-not-valid-in-production"
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 REFRESH_TOKEN_EXPIRE_DAYS = 7
@@ -72,3 +90,25 @@ def require_role(allowed_roles: list):
             )
         return current_user
     return role_checker
+
+
+# ── Agent authentication ────────────────────────────────────────────────────
+# The execution agent is a machine, not a person: it has no login and no
+# refresh token, so it authenticates with a shared secret instead of a JWT.
+# Without this, anything that can reach the API can claim queued jobs and post
+# results for them.
+AGENT_TOKEN = os.getenv("AGENT_TOKEN", "").strip()
+
+
+def require_agent(x_agent_token: str = Header(default="")):
+    """Guard the endpoints only the execution agent is meant to call."""
+    if not AGENT_TOKEN:
+        if IS_PRODUCTION:
+            raise HTTPException(
+                status_code=503,
+                detail="AGENT_TOKEN is not configured on this server.",
+            )
+        return "agent"                      # dev: unauthenticated, as before
+    if not secrets.compare_digest(x_agent_token, AGENT_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid agent token")
+    return "agent"

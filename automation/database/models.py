@@ -115,6 +115,18 @@ class TestRun(Base):
     # Intelligence Data
     is_flaky = Column(Boolean, default=False)
     risk_score = Column(Integer, default=0)
+    # Flaky-retry: how many attempts this run took, and whether it only passed on a retry.
+    # Scenarios the PLAN chose for this job, as [{id, name, steps}]. The planner picks a
+    # subset via the dependency graph, but the agent used to ignore it entirely and run
+    # the repo's fixed `execution.command` — so the plan was advisory and every PR ran
+    # the same suite. Null/empty means "no plan; run the project's default command".
+    planned_scenarios = Column(JSON, nullable=True)
+    attempts = Column(Integer, default=1)
+    flaky_detected = Column(Boolean, default=False)
+    # Set True when a visual regression was found on an otherwise-passing run.
+    visual_warning = Column(Boolean, default=False)
+    # Set True when the app crashed / red-boxed during the run (APP bug, not automation).
+    crash_detected = Column(Boolean, default=False)
     
     # Distributed Execution
     agent_id = Column(String, ForeignKey("execution_agents.id"), nullable=True)
@@ -153,6 +165,11 @@ class ScenarioResult(Base):
     error = Column(Text, nullable=True)
     reasons = Column(JSON, nullable=True)
     launch_time = Column(Float, nullable=True)
+    # Failure evidence: a screenshot of the screen at the moment the segment failed,
+    # stored as a self-contained `data:image/png;base64,...` URI. Shown in the rich
+    # (web) report next to the failure reason; intentionally NOT included in the
+    # downloadable/exported report.
+    screenshot = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     run = relationship("TestRun", back_populates="scenarios")
@@ -359,6 +376,10 @@ class SavedScenario(Base):
     bundle_id = Column(String(255), nullable=True)     # overrides the project's bundle id
     device_id = Column(String(255), nullable=True)     # target simulator UDID
     steps = Column(JSON, default=list)                 # ["tap Book Table", "select date", …]
+    # Screens/modules this scenario exercises (e.g. ["Store", "Cart"]). Used for
+    # graph-driven smart test selection: run a scenario only when a PR's affected
+    # files touch what it covers.
+    covers = Column(JSON, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -367,6 +388,127 @@ class SavedScenario(Base):
             "id": self.id, "name": self.name, "description": self.description,
             "project_id": self.project_id, "bundle_id": self.bundle_id,
             "device_id": self.device_id, "steps": self.steps or [],
+            "covers": self.covers or [],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class CrossAppFlowEdit(Base):
+    """A user-edited (or brand-new) cross-app flow.
+
+    The built-in flows live in code (`cross_app_flows.FLOWS`) because their steps
+    encode hard-won on-device knowledge. Editing them from the dashboard writes a row
+    here instead of touching that file: `id` matching a built-in OVERRIDES it, any
+    other `id` is a new flow. Deleting the row reverts to the built-in definition, so
+    an experiment can never permanently destroy a working flow.
+    """
+    __tablename__ = "cross_app_flow_edits"
+
+    id = Column(String(100), primary_key=True)          # flow_id, e.g. "flow1" or "my_flow"
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    # [{"num": "1", "name": "...", "role": "consumer|waiter|kitchen", "steps": [...]}, ...]
+    segments = Column(JSON, default=list)
+    based_on = Column(String(100), nullable=True)       # built-in id this overrides, if any
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "name": self.name, "description": self.description or "",
+            "segments": self.segments or [], "based_on": self.based_on,
+            "custom": True,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PerformanceMetric(Base):
+    __tablename__ = "performance_metrics"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String, ForeignKey("test_runs.id"))
+    timestamp = Column(DateTime)
+    cpu_percent = Column(Float)
+    memory_mb = Column(Float)
+    fps = Column(Float, nullable=True)
+    network_requests = Column(Integer, default=0)
+    avg_response_ms = Column(Float, nullable=True)
+
+
+class PerformanceSummary(Base):
+    __tablename__ = "performance_summaries"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String, ForeignKey("test_runs.id"), unique=True)
+    app_launch_time_s = Column(Float, nullable=True)
+    avg_cpu_percent = Column(Float)
+    peak_cpu_percent = Column(Float)
+    avg_memory_mb = Column(Float)
+    peak_memory_mb = Column(Float)
+    avg_fps = Column(Float, nullable=True)
+    min_fps = Column(Float, nullable=True)
+    dropped_frames = Column(Integer, default=0)
+    api_calls = Column(Integer, default=0)
+    avg_api_response_ms = Column(Float, nullable=True)
+    slowest_api_ms = Column(Float, nullable=True)
+    slowest_api_endpoint = Column(String(500), nullable=True)
+    performance_score = Column(Integer, nullable=True)
+    grade = Column(String(1), nullable=True)
+    issues = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Ticket(Base):
+    """A pasted issue/ticket linked to a PR + the scenarios that verify it.
+
+    When a PR whose number matches `pr_number` is pushed, the platform runs the
+    linked scenarios and flips `status`. Powers the traceability view in the
+    (repurposed) Scripts page.
+    """
+    __tablename__ = "tickets"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    title = Column(String(500))
+    description = Column(Text)                          # full pasted ticket text
+    project_id = Column(String(36), ForeignKey("test_projects.id"), nullable=True, index=True)
+    pr_number = Column(String(50), nullable=True, index=True)   # linked PR (set manually or auto-filled)
+    pr_url = Column(String(500), nullable=True)
+    # Ticket/branch key that exists BEFORE the PR (e.g. "NEWVYA-1134"). When a PR whose
+    # branch/title/body contains this key is opened, the webhook links + tests it and
+    # back-fills pr_number — so you don't need a PR number that doesn't exist yet.
+    match_key = Column(String(120), nullable=True, index=True)
+    scenario_ids = Column(JSON, default=list)          # SavedScenario ids that cover it
+    # A reusable setup scenario (e.g. "Book an event") whose steps run BEFORE each
+    # linked scenario — so a "cancel event" check first creates the event to cancel.
+    setup_scenario_id = Column(String(36), nullable=True)
+    ticket_type = Column(String(20), default="ui")     # ui | calc | data | crash | mixed
+    status = Column(String(20), default="untested")    # untested | passed | failed | running
+    last_run_id = Column(String, nullable=True)        # most recent TestRun
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "title": self.title, "description": self.description,
+            "project_id": self.project_id, "pr_number": self.pr_number, "pr_url": self.pr_url,
+            "match_key": self.match_key,
+            "scenario_ids": self.scenario_ids or [], "ticket_type": self.ticket_type,
+            "setup_scenario_id": self.setup_scenario_id,
+            "status": self.status, "last_run_id": self.last_run_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class VisualRegressionResult(Base):
+    __tablename__ = "visual_regression_results"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String, ForeignKey("test_runs.id"))
+    screen_name = Column(String(255))
+    diff_percentage = Column(Float)
+    severity = Column(String(10))  # high/medium/low/none
+    baseline_path = Column(String(500))
+    current_path = Column(String(500))
+    diff_path = Column(String(500))
+    passed = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

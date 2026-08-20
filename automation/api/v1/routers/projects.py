@@ -689,3 +689,37 @@ def run_project_file(
         return {"run_id": run_id}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/{project_id}/trend-summary")
+def get_trend_summary(
+    project_id: str,
+    days: int = 7,
+    current_user=Depends(get_current_user),
+):
+    """AI-generated weekly-trend summary for a project's recent runs."""
+    from automation.ai.services.summary import test_summary_generator
+    return test_summary_generator.generate_trend_summary(project_id, days=days)
+
+
+@router.get("/{project_id}/performance-trends")
+def get_performance_trends(
+    project_id: str,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Performance scores for a project's last N runs + regression detection."""
+    from automation.database.models import PerformanceSummary
+    from automation.database.models import TestRun as _TestRun
+    from automation.api.v1.routers.intelligence import analyze_performance_trend
+
+    rows = (
+        db.query(PerformanceSummary)
+        .join(_TestRun, _TestRun.id == PerformanceSummary.run_id)
+        .filter(_TestRun.project_id == project_id)
+        .order_by(PerformanceSummary.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return analyze_performance_trend(rows)

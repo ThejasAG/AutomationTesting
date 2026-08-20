@@ -1,19 +1,54 @@
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import {
-  FileText, X, Loader2, Download, Sparkles, CheckCircle2, AlertTriangle, Clock, Smartphone,
+  FileText, X, Loader2, Download, Sparkles, CheckCircle2, AlertTriangle, Clock, Smartphone, Bug, FileDown,
 } from 'lucide-react';
-import { getReports, getReport, generateReport, getReportTrends } from '../api';
+import { getReports, getReport, generateReport, getReportTrends, getReportConfig, fileJira, API_BASE, getHeaders } from '../api';
 import type { ReportRow, FullReport, ReportTrends } from '../api';
 import ModalPortal from '../components/ModalPortal';
-import { formatDistanceToNow, parseISO } from 'date-fns';
+import { formatDistanceToNow } from 'date-fns';
+import { parseServerDate } from '../time';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Legend } from 'recharts';
+
+const ghostBtn: React.CSSProperties = {
+  display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem',
+  background: 'transparent', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)',
+  color: 'var(--text-secondary)', cursor: 'pointer',
+};
 
 function statusColor(s: string) {
   const t = (s || '').toLowerCase();
   if (t === 'passed' || t === 'completed') return 'passed';
   if (t === 'failed' || t === 'error') return 'failed';
   return t;
+}
+
+// Honest verdict badge: a run with 0 scenarios verified nothing — amber "no tests",
+// never a green pass.
+function VerdictBadge({ verdict }: { verdict: string }) {
+  if (verdict === 'no-tests') return (
+    <span className="badge" style={{ background: 'rgba(251,191,36,0.16)', color: '#fbbf24' }}>
+      <AlertTriangle size={12} /> no tests
+    </span>
+  );
+  if (verdict === 'failed') return <span className="badge failed"><AlertTriangle size={12} /> failed</span>;
+  if (verdict === 'passed') return <span className="badge passed"><CheckCircle2 size={12} /> passed</span>;
+  return <span className={`badge ${statusColor(verdict)}`}>{verdict}</span>;
+}
+
+// The rich report endpoint requires a login. window.open() performs a plain
+// browser navigation with no Authorization header, so it 401s — fetch the HTML
+// with credentials and open that instead of leaving the endpoint unprotected.
+async function openRichReport(runId: string) {
+    const tab = window.open('', '_blank');
+    try {
+        const res = await fetch(`${API_BASE}/reports/${runId}/rich`, { headers: getHeaders() });
+        if (!res.ok) throw new Error(`Report failed to load (${res.status})`);
+        const html = await res.text();
+        if (tab) { tab.document.open(); tab.document.write(html); tab.document.close(); }
+    } catch (e) {
+        if (tab) tab.document.body.innerText = `Could not open the report: ${(e as Error).message}`;
+    }
 }
 
 export default function ReportsPage() {
@@ -96,13 +131,12 @@ export default function ReportsPage() {
             <tbody>
               {rows.map(r => (
                 <tr key={r.id} className="row-link" onClick={() => setOpen(r.id)}>
-                  <td><span className={`badge ${statusColor(r.status)}`}>
-                    {statusColor(r.status) === 'failed' ? <AlertTriangle size={12} /> : <CheckCircle2 size={12} />}{r.status}</span></td>
+                  <td><VerdictBadge verdict={r.verdict} /></td>
                   <td style={{ fontWeight: 500 }}>{r.test_name}</td>
                   <td><span style={{ color: 'var(--text-secondary)', fontFamily: 'monospace', fontSize: '0.8rem' }}>{r.test_suite}</span></td>
                   <td><div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', fontSize: '0.8rem' }}><Smartphone size={13} /> {(r.device_name || 'N/A').slice(0, 10)}</div></td>
                   <td style={{ color: 'var(--text-secondary)' }}>{r.scenarios_total ? `${r.scenarios_passed}/${r.scenarios_total}` : '—'}</td>
-                  <td style={{ color: 'var(--text-secondary)' }}>{r.created_at ? formatDistanceToNow(parseISO(r.created_at), { addSuffix: true }) : '—'}</td>
+                  <td style={{ color: 'var(--text-secondary)' }}>{r.created_at ? formatDistanceToNow(parseServerDate(r.created_at), { addSuffix: true }) : '—'}</td>
                   <td>{r.has_report
                     ? <span style={{ fontSize: '0.75rem', color: 'var(--success)' }}>● ready</span>
                     : <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>— none</span>}</td>
@@ -122,8 +156,10 @@ function ReportModal({ runId, onClose, onChanged }: { runId: string; onClose: ()
   const [rep, setRep] = useState<FullReport | null>(null);
   const [gen, setGen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cfg, setCfg] = useState<{ slack: boolean; jira: boolean } | null>(null);
 
   useEffect(() => { getReport(runId).then(setRep).catch(e => setError(e?.message || 'Could not load')); }, [runId]);
+  useEffect(() => { getReportConfig().then(setCfg).catch(() => {}); }, []);
 
   const generate = async () => {
     setGen(true); setError(null);
@@ -135,17 +171,17 @@ function ReportModal({ runId, onClose, onChanged }: { runId: string; onClose: ()
     setGen(false);
   };
 
-  const exportHtml = () => {
-    if (!rep) return;
+  const buildHtml = (): string => {
+    if (!rep) return '';
     const esc = (s: string) => (s || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
     const rowsHtml = rep.scenarios.map(s =>
       `<tr><td>${esc(s.scenario_num || '')}</td><td>${esc(s.scenario_name || '')}</td><td>${esc(s.status)}</td><td>${esc(s.error || '')}</td></tr>`).join('');
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Report — ${esc(rep.test_name)}</title>
+    return `<!doctype html><html><head><meta charset="utf-8"><title>Report — ${esc(rep.test_name)}</title>
 <style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:820px;margin:40px auto;color:#1a1a2e;line-height:1.6;padding:0 20px}
 h1{margin-bottom:4px}.meta{color:#666;font-size:14px;margin-bottom:24px}.badge{padding:3px 10px;border-radius:99px;font-size:12px;font-weight:600}
 .pass{background:#d1fae5;color:#065f46}.fail{background:#fee2e2;color:#991b1b}
 table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #eee}
-th{background:#f8f8fa}.section{margin-top:28px}pre{white-space:pre-wrap}</style></head><body>
+th{background:#f8f8fa}.section{margin-top:28px}pre{white-space:pre-wrap}@media print{body{margin:0}}</style></head><body>
 <h1>${esc(rep.test_name)}</h1>
 <div class="meta"><span class="badge ${statusColor(rep.status) === 'failed' ? 'fail' : 'pass'}">${esc(rep.status)}</span>
 &nbsp; ${esc(rep.test_suite)} · ${esc(rep.device_name)} (${esc(rep.platform)}) · ${rep.scenarios_passed}/${rep.scenarios_total} scenarios passed
@@ -153,14 +189,37 @@ ${rep.branch ? ` · ${esc(rep.branch)}@${esc((rep.commit_sha || '').slice(0, 8))
 ${rep.report_summary ? `<div class="section"><h2>Summary</h2><div>${esc(rep.report_summary).replace(/\n/g, '<br>')}</div></div>` : ''}
 ${rep.rca ? `<div class="section"><h2>Root Cause</h2><p><b>${esc(rep.rca.root_cause || '')}</b></p><p>${esc(rep.rca.suggested_fix || '')}</p></div>` : ''}
 ${rep.scenarios.length ? `<div class="section"><h2>Scenario Results</h2><table><thead><tr><th>#</th><th>Scenario</th><th>Status</th><th>Detail</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>` : ''}
-<div class="meta" style="margin-top:32px">Generated by the Automation Platform${rep.report_generated_at ? ` · ${new Date(rep.report_generated_at).toLocaleString()}` : ''}</div>
+<div class="meta" style="margin-top:32px">Generated by the Automation Platform${rep.report_generated_at ? ` · ${parseServerDate(rep.report_generated_at).toLocaleString()}` : ''}</div>
 </body></html>`;
-    const blob = new Blob([html], { type: 'text/html' });
+  };
+
+  const exportHtml = () => {
+    if (!rep) return;
+    const blob = new Blob([buildHtml()], { type: 'text/html' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `report-${(rep.test_name || 'run').replace(/[^a-z0-9]+/gi, '_')}.html`;
     a.click();
     URL.revokeObjectURL(a.href);
+  };
+
+  const exportPdf = () => {
+    // Open the styled report and invoke the browser's print → "Save as PDF".
+    const w = window.open('', '_blank');
+    if (!w) return;
+    w.document.write(buildHtml());
+    w.document.close();
+    w.onload = () => { w.focus(); w.print(); };
+    setTimeout(() => { try { w.focus(); w.print(); } catch { /* */ } }, 400);
+  };
+
+  const [jira, setJira] = useState<{ key: string; url: string } | null>(null);
+  const [jiraBusy, setJiraBusy] = useState(false);
+  const doJira = async () => {
+    setJiraBusy(true); setError(null);
+    try { setJira(await fileJira(runId)); }
+    catch (e: any) { setError(e?.message || 'Could not file the ticket'); }
+    setJiraBusy(false);
   };
 
   return (
@@ -174,9 +233,16 @@ ${rep.scenarios.length ? `<div class="section"><h2>Scenario Results</h2><table><
           ) : (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
-                <span className={`badge ${statusColor(rep.status)}`}>{statusColor(rep.status) === 'failed' ? <AlertTriangle size={12} /> : <CheckCircle2 size={12} />}{rep.status}</span>
+                <VerdictBadge verdict={rep.verdict} />
                 <h3 style={{ margin: 0 }}>{rep.test_name}</h3>
               </div>
+              {rep.verdict === 'no-tests' && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', background: 'rgba(251,191,36,0.1)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 'var(--radius-sm)', padding: 12, margin: '8px 0 16px', fontSize: '0.84rem' }}>
+                  <AlertTriangle size={16} color="#fbbf24" style={{ flexShrink: 0, marginTop: 2 }} />
+                  <div><strong>Not a validated pass — 0 scenarios ran.</strong><br />
+                  The app may have built successfully, but nothing was actually tested. Record/tag scenarios for this app so PRs are really verified.</div>
+                </div>
+              )}
               <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 18 }}>
                 <span>{rep.test_suite}</span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><Smartphone size={12} /> {rep.device_name} ({rep.platform})</span>
@@ -190,10 +256,19 @@ ${rep.scenarios.length ? `<div class="section"><h2>Scenario Results</h2><table><
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: '0.9rem' }}><Sparkles size={15} color="var(--accent-primary)" /> Report summary</div>
                   <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={() => openRichReport(runId)} className="btn"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem', background: 'var(--accent-primary)' }}
+                      title="Open the full styled report (VAT tables, per-scenario validation) — print to PDF from there">
+                      <FileText size={13} /> Rich Report
+                    </button>
                     <button onClick={generate} disabled={gen} className="btn" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem' }}>
                       {gen ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />}{rep.report_summary ? 'Regenerate' : 'Generate'}
                     </button>
-                    {rep.report_summary && <button onClick={exportHtml} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem', background: 'transparent', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', color: 'var(--text-secondary)', cursor: 'pointer' }}><Download size={13} /> Export</button>}
+                    {rep.report_summary && <button onClick={exportHtml} style={ghostBtn}><Download size={13} /> HTML</button>}
+                    {rep.report_summary && <button onClick={exportPdf} style={ghostBtn}><FileDown size={13} /> PDF</button>}
+                    {cfg?.jira && (jira
+                      ? <a href={jira.url} target="_blank" rel="noreferrer" style={{ ...ghostBtn, color: 'var(--success)', textDecoration: 'none' }}><Bug size={13} /> {jira.key}</a>
+                      : <button onClick={doJira} disabled={jiraBusy} style={ghostBtn}>{jiraBusy ? <Loader2 size={13} className="spin" /> : <Bug size={13} />} File Jira</button>)}
                   </div>
                 </div>
                 {gen ? <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}><Loader2 size={12} className="spin" /> Writing the report with the local model (Ollama)…</div>

@@ -8,31 +8,26 @@ import os
 import urllib.request
 from typing import Dict, Any, List
 
+from automation.appium_service import wda
+
 APPIUM_LOG_DIR = os.path.abspath(os.path.join("logs", "appium"))
 
 
 def _prebuilt_wda_derived_data() -> str:
     """DerivedData dir holding an already-compiled WebDriverAgent, or "".
 
-    Xcode suffixes the dir with a hash, so the path cannot be hardcoded — any dir
-    containing a built WebDriverAgentRunner-Runner.app will do. Override with
-    WDA_DERIVED_DATA.
-    """
-    override = os.getenv("WDA_DERIVED_DATA")
-    if override:
-        return override
+    Delegates to the central resolver (automation.appium_service.wda) so this is
+    not a second, disagreeing implementation.
 
-    hits = glob.glob(
-        os.path.expanduser(
-            "~/Library/Developer/Xcode/DerivedData/WebDriverAgent-*/Build/Products/"
-            "Debug-iphonesimulator/WebDriverAgentRunner-Runner.app"
-        )
-    )
-    if not hits:
-        return ""
-    newest = max(hits, key=os.path.getmtime)
-    # .../<derived-data>/Build/Products/Debug-iphonesimulator/<app> -> <derived-data>
-    return os.path.abspath(os.path.join(newest, *[os.pardir] * 4))
+    The old body globbed for a `WebDriverAgentRunner-Runner.app` directory and
+    took the newest hit. On this machine the only hit is a bundle containing
+    PlugIns/ and nothing else — no Info.plist, no binary — left behind by an
+    interrupted build. It passed the isdir check and was handed to Appium as
+    "prebuilt", while the actually-working build sat elsewhere. The resolver
+    validates the bundle's contents instead of trusting its existence.
+    """
+    build = wda.resolve(allow_build=False)
+    return build.derived_data if build else ""
 
 logger = logging.getLogger(__name__)
 
@@ -103,15 +98,15 @@ class AppiumProcessManager:
         # build that dwarfs the tests themselves. Set here rather than in the
         # project's conftest so it survives the git reset between runs and applies
         # to every project, not just the one whose conftest happens to set it.
-        wda = _prebuilt_wda_derived_data()
-        if wda:
+        wda_dd = _prebuilt_wda_derived_data()   # not `wda` — that name is the resolver module
+        if wda_dd:
             cmd += [
                 "--default-capabilities",
                 json.dumps(
-                    {"appium:derivedDataPath": wda, "appium:usePrebuiltWDA": True}
+                    {"appium:derivedDataPath": wda_dd, "appium:usePrebuiltWDA": True}
                 ),
             ]
-            logger.info(f"Reusing prebuilt WebDriverAgent from {wda}")
+            logger.info(f"[WDA] Reusing prebuilt WebDriverAgent from {wda_dd}")
         else:
             logger.warning(
                 "No prebuilt WebDriverAgent found — Appium will compile it from "

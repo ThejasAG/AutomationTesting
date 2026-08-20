@@ -1,0 +1,1277 @@
+<title>Vya Automation Platform Audit</title>
+<style>
+  :root{
+    --ground:#F1F3F2; --surface:#FFFFFF; --sunk:#E8ECEA;
+    --ink:#131A19; --body:#2C3735; --muted:#5B6664; --faint:#8A9491;
+    --hair:#DBE1DF; --hair-strong:#C4CDCA;
+    --accent:#0E4A47; --accent-soft:#DDEAE8;
+    --ok:#1C6B45; --ok-bg:#DEEDE5;
+    --part:#8A5510; --part-bg:#F6E9D6;
+    --no:#9B2F26; --no-bg:#F6E0DD;
+    --unk:#5B6664; --unk-bg:#E6EAE8;
+    --shadow:0 1px 2px rgba(19,26,25,.05),0 8px 24px -14px rgba(19,26,25,.18);
+    --display:"Iowan Old Style",Charter,"Bitstream Charter",Georgia,serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#0D1312; --surface:#151D1C; --sunk:#111917;
+      --ink:#E7EDEB; --body:#CBD5D2; --muted:#94A19E; --faint:#6E7B78;
+      --hair:#25302E; --hair-strong:#33403D;
+      --accent:#6BC5B8; --accent-soft:#17302E;
+      --ok:#5FC38C; --ok-bg:#123024;
+      --part:#D9A441; --part-bg:#33260F;
+      --no:#E8827A; --no-bg:#331A17;
+      --unk:#94A19E; --unk-bg:#1D2726;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0D1312; --surface:#151D1C; --sunk:#111917;
+    --ink:#E7EDEB; --body:#CBD5D2; --muted:#94A19E; --faint:#6E7B78;
+    --hair:#25302E; --hair-strong:#33403D;
+    --accent:#6BC5B8; --accent-soft:#17302E;
+    --ok:#5FC38C; --ok-bg:#123024;
+    --part:#D9A441; --part-bg:#33260F;
+    --no:#E8827A; --no-bg:#331A17;
+    --unk:#94A19E; --unk-bg:#1D2726;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px -16px rgba(0,0,0,.7);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    background:var(--ground); color:var(--body);
+    font-family:var(--sans); font-size:16.5px; line-height:1.62;
+    margin:0; padding:0 20px 120px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:820px;margin:0 auto}
+
+  .masthead{padding:72px 0 40px;border-bottom:2px solid var(--ink)}
+  .kicker{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--accent);margin:0 0 18px}
+  h1{font-family:var(--display);font-weight:600;font-size:clamp(34px,6vw,52px);
+    line-height:1.08;letter-spacing:-.015em;color:var(--ink);margin:0 0 18px;
+    text-wrap:balance}
+  .standfirst{font-family:var(--display);font-size:19px;line-height:1.55;
+    color:var(--muted);margin:0;max-width:62ch}
+  .meta{display:flex;flex-wrap:wrap;gap:8px 28px;margin-top:30px;
+    font-family:var(--mono);font-size:11.5px;color:var(--faint);
+    letter-spacing:.04em}
+  .meta b{color:var(--body);font-weight:500}
+
+  .rule{background:var(--surface);border:1px solid var(--hair);
+    border-left:3px solid var(--accent);border-radius:2px;
+    padding:20px 24px;margin:36px 0 0;box-shadow:var(--shadow)}
+  .rule p{margin:0;font-size:15.5px;color:var(--body)}
+  .rule p+p{margin-top:10px}
+
+  section{padding-top:56px}
+  .num{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;
+    color:var(--faint);display:block;margin-bottom:9px}
+  h2{font-family:var(--display);font-weight:600;font-size:29px;line-height:1.2;
+    letter-spacing:-.01em;color:var(--ink);margin:0 0 22px;
+    padding-bottom:11px;border-bottom:1px solid var(--hair-strong);
+    text-wrap:balance}
+  h3{font-family:var(--sans);font-weight:650;font-size:16px;color:var(--ink);
+    margin:34px 0 12px;letter-spacing:-.005em}
+  h4{font-family:var(--mono);font-weight:500;font-size:11.5px;
+    letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+    margin:26px 0 10px}
+  p{margin:0 0 15px;max-width:72ch}
+  ul,ol{margin:0 0 15px;padding-left:22px;max-width:72ch}
+  li{margin-bottom:7px}
+  li::marker{color:var(--faint)}
+  strong{color:var(--ink);font-weight:620}
+  a{color:var(--accent)}
+  a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);
+    outline-offset:3px;border-radius:2px}
+
+  .s{display:inline-block;font-family:var(--mono);font-size:10.5px;
+    font-weight:500;letter-spacing:.07em;text-transform:uppercase;
+    padding:3px 8px;border-radius:3px;white-space:nowrap;line-height:1.4}
+  .s-ok{background:var(--ok-bg);color:var(--ok)}
+  .s-part{background:var(--part-bg);color:var(--part)}
+  .s-no{background:var(--no-bg);color:var(--no)}
+  .s-unk{background:var(--unk-bg);color:var(--unk)}
+
+  .ev{font-family:var(--mono);font-size:12.5px;line-height:1.65;
+    color:var(--muted);background:var(--sunk);
+    border-left:2px solid var(--hair-strong);
+    padding:11px 14px;margin:0 0 16px;border-radius:0 3px 3px 0;
+    overflow-x:auto}
+  .ev b{color:var(--ink);font-weight:600}
+  code{font-family:var(--mono);font-size:.87em;background:var(--sunk);
+    padding:1.5px 5px;border-radius:3px;color:var(--ink)}
+  .ev code{background:none;padding:0}
+
+  .tw{overflow-x:auto;margin:0 0 22px;border:1px solid var(--hair);
+    border-radius:3px;background:var(--surface);box-shadow:var(--shadow)}
+  table{border-collapse:collapse;width:100%;min-width:640px;font-size:14px}
+  th{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);font-weight:500;
+    text-align:left;padding:11px 14px;background:var(--sunk);
+    border-bottom:1px solid var(--hair-strong);vertical-align:bottom}
+  td{padding:11px 14px;border-bottom:1px solid var(--hair);
+    vertical-align:top;line-height:1.5}
+  tbody tr:last-child td{border-bottom:none}
+  td:first-child{color:var(--ink);font-weight:550}
+  td .path{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    word-break:break-word}
+
+  .flow{background:var(--surface);border:1px solid var(--hair);
+    border-radius:3px;padding:22px 24px;margin:0 0 22px;
+    box-shadow:var(--shadow);overflow-x:auto}
+  .flow ol{list-style:none;padding:0;margin:0;counter-reset:f;max-width:none}
+  .flow li{counter-increment:f;position:relative;padding:0 0 20px 46px;
+    margin:0 0 0 13px;border-left:1px solid var(--hair-strong)}
+  .flow li:last-child{border-left-color:transparent;padding-bottom:0}
+  .flow li::before{content:counter(f,decimal-leading-zero);
+    position:absolute;left:-13px;top:-2px;width:26px;height:26px;
+    background:var(--accent-soft);color:var(--accent);border-radius:50%;
+    font-family:var(--mono);font-size:10.5px;display:grid;place-items:center;
+    border:1px solid var(--hair)}
+  .flow .fh{color:var(--ink);font-weight:600;font-size:15px;
+    display:block;margin-bottom:3px}
+  .flow .fm{font-family:var(--mono);font-size:11.5px;color:var(--faint);
+    display:block;margin-bottom:5px;word-break:break-word}
+  .flow .fb{font-size:14px;color:var(--body)}
+  .flow .ff{font-size:13px;color:var(--muted);display:block;margin-top:5px}
+  .flow .ff b{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--no);font-weight:500}
+
+  .note{border:1px solid var(--hair);border-left:3px solid var(--part);
+    background:var(--surface);padding:16px 20px;margin:0 0 22px;
+    border-radius:0 3px 3px 0;font-size:15px}
+  .note p:last-child{margin-bottom:0}
+  .note .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--part);display:block;margin-bottom:7px}
+  .note.crit{border-left-color:var(--no)}
+  .note.crit .lbl{color:var(--no)}
+  .note.good{border-left-color:var(--ok)}
+  .note.good .lbl{color:var(--ok)}
+
+  details{border-bottom:1px solid var(--hair)}
+  details[open]{background:var(--surface)}
+  summary{cursor:pointer;padding:13px 14px;font-weight:580;color:var(--ink);
+    font-size:15px;list-style:none;display:flex;gap:11px;align-items:baseline}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:"+";font-family:var(--mono);color:var(--accent);
+    font-size:14px;flex:none}
+  details[open] summary::before{content:"–"}
+  details .ans{padding:0 14px 15px 39px;font-size:14.5px;color:var(--body)}
+  details .ans p{margin:0 0 10px}
+  details .ans p:last-child{margin-bottom:0}
+  .faqset{border:1px solid var(--hair);border-radius:3px;
+    background:var(--sunk);margin:0 0 22px;overflow:hidden;
+    box-shadow:var(--shadow)}
+  .faqset details:last-child{border-bottom:none}
+
+  .inv{background:var(--surface);border:1px solid var(--hair);
+    border-radius:3px;padding:20px 24px;margin:0 0 18px;
+    box-shadow:var(--shadow)}
+  .inv h3{margin-top:0;display:flex;align-items:center;gap:11px}
+  .inv ul{margin-bottom:0}
+  .inv li{font-size:14.5px}
+
+  @media (max-width:640px){
+    body{font-size:16px;padding:0 16px 80px}
+    .masthead{padding:48px 0 32px}
+    section{padding-top:44px}
+    h2{font-size:25px}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="kicker">Independent code audit · Evidence-based</p>
+  <h1>What the Automation Platform Actually Does</h1>
+  <p class="standfirst">A verified capability assessment of the AI-assisted mobile test automation platform — every claim traced to source, and every gap stated plainly.</p>
+  <div class="meta">
+    <span><b>Audit date</b> 19 August 2026</span>
+    <span><b>Branch</b> feature/android-bridge-and-platform-fixes</span>
+    <span><b>Method</b> Source, config, live database</span>
+    <span><b>Revision</b> 2 — post-remediation</span>
+  </div>
+</header>
+
+<div class="rule">
+  <p><strong>How to read this document.</strong> Nothing here is described from a filename, a dependency list, or an intention. Every capability was traced through its implementation and, wherever possible, checked against the platform's own production database — 181 recorded test runs, 34 saved scenarios, 9 projects.</p>
+  <p>Where a feature exists in code but has never been exercised, it says so. Where a feature was expected and is absent, it says so. <strong>Accuracy over completeness</strong> — a "not implemented" here is a finding, not a failure to look.</p>
+  <p><strong>Revision 2.</strong> Since the first revision, the security findings rated high and medium in Section 19 have been fixed and verified against a running server. Two findings elsewhere were corrected on closer inspection. Changes are marked in place.</p>
+</div>
+
+<!-- ══ 1 ══ -->
+<section>
+  <span class="num">Section 01</span>
+  <h2>Executive Summary</h2>
+
+  <p>This platform is an <strong>in-house test automation system for iOS mobile applications</strong>. It was built to test a connected suite of restaurant apps — a consumer-facing booking and ordering app, and a business-facing app used by waiting staff and kitchen staff.</p>
+
+  <p>Its central purpose is to take test procedures that a QA engineer would otherwise perform by hand on a phone — open the app, pick a restaurant, book a table, pre-order food, hand the order to the kitchen, confirm the kitchen sees it — and run them unattended against iOS simulators, on demand or when developers push code.</p>
+
+  <h3>Why it exists</h3>
+
+  <p>The applications under test span <strong>two separate apps used by three different roles</strong>. A single business transaction — a diner books a table and pre-orders a meal — passes from the consumer app to the waiter's screen to the kitchen's screen. Testing that by hand means one person juggling two devices and three logins, repeatedly, for every release. That is the specific pain this platform was built to remove.</p>
+
+  <h3>Who uses it</h3>
+
+  <ul>
+    <li><strong>QA engineers</strong> — author test scenarios in plain English, run them, read the results.</li>
+    <li><strong>Developers</strong> — get a test verdict on a pull request before merging.</li>
+    <li><strong>QA leads</strong> — see run history, pass/fail trends, and which tests are queued or running.</li>
+  </ul>
+
+  <h3>What it is designed to test</h3>
+
+  <p><strong>iOS applications built with React Native.</strong> All nine projects registered in the platform database are iOS. Verified via <code>SELECT platform, COUNT(*) FROM test_projects</code> → <code>[('ios', 9)]</code>.</p>
+
+  <h3>The value proposition, stated conservatively</h3>
+
+  <p>A repeatable cross-app journey that takes a person several minutes of careful two-device operation runs unattended and produces a screenshot-backed report. The platform's own history shows <strong>181 test runs executed</strong> to date. That is real, delivered automation — not a projection.</p>
+
+  <div class="note">
+    <span class="lbl">Set expectations here</span>
+    <p>This is a <strong>working internal tool</strong>, not a finished commercial product. It runs on one Mac, against simulators, with a single user account. Sections 17 and 19 are the honest counterweight to this summary and should be read alongside it.</p>
+  </div>
+</section>
+
+<!-- ══ 2 ══ -->
+<section>
+  <span class="num">Section 02</span>
+  <h2>The Problems It Actually Solves</h2>
+
+  <p>Only problems with a traced implementation are listed. Problems the platform does <em>not</em> address are absent by design.</p>
+
+  <h3>1 — Repetitive cross-app regression testing</h3>
+  <p><strong>Traditionally:</strong> a tester operates a phone and a tablet simultaneously, logging in and out of three roles, to confirm one booking reaches the kitchen.</p>
+  <p><strong>Here:</strong> the journey is defined once as an ordered set of role segments and replayed on command.</p>
+  <div class="ev"><b>Evidence</b> <code>automation/scenarios/cross_app_flows.py</code> — segment definitions and <code>_run_segment()</code>, which drives consumer → waiter → kitchen across two simulators.</div>
+
+  <h3>2 — Writing Appium code for every test</h3>
+  <p><strong>Traditionally:</strong> each test case becomes Python, with hand-picked selectors that break on redesign.</p>
+  <p><strong>Here:</strong> tests are written as English step lists — <code>click bookAppoitment</code>, <code>select the 2nd time slot</code>, <code>verify Confirmed</code> — and a resolver turns each step into Appium calls at runtime.</p>
+  <div class="ev"><b>Evidence</b> <code>automation/intelligence/scenario_runner.py</code> — <code>run_one()</code> plus a layered resolution strategy over <code>ACCESSIBILITY_ID</code>, <code>IOS_PREDICATE</code> and container-scoped <code>XPATH</code>.</div>
+
+  <h3>3 — Appium and simulator setup overhead</h3>
+  <p><strong>Traditionally:</strong> every engineer maintains their own Appium install, ports, and simulator state.</p>
+  <p><strong>Here:</strong> the platform starts an Appium server per run on a dynamically allocated port and manages simulator boot itself.</p>
+  <div class="ev"><b>Evidence</b> <code>automation/projects/builder.py</code> — <code>ensure_ios_booted()</code>; per-run Appium lifecycle in the appium service layer.</div>
+
+  <h3>4 — "Which build is even on this simulator?"</h3>
+  <p><strong>Traditionally:</strong> nobody is certain whether the device under test has the code being discussed.</p>
+  <p><strong>Here:</strong> the platform pulls, builds once, installs on every selected simulator, then <em>reads the version back off the device</em> and flags a mismatch.</p>
+  <div class="ev"><b>Evidence</b> <code>automation/api/v1/routers/builds.py:194-217</code> — <code>installed_version()</code> before and after install, with a <code>version_matches</code> flag comparing the artifact's version against what the device reports.</div>
+
+  <h3>5 — Testing a pull request before merge</h3>
+  <p><strong>Traditionally:</strong> a reviewer reads a diff and hopes.</p>
+  <p><strong>Here:</strong> a PR branch is checked out, built, installed and tested, with the verdict posted back to GitHub.</p>
+  <div class="ev"><b>Evidence</b> <code>automation/api/v1/routers/pull_requests.py</code>; <code>automation/integrations/pr_comment.py</code>. <span class="s s-part">Conditional</span> — write-back fires only on webhook-triggered runs. See Section 10.</div>
+
+  <h3>6 — No shared record of what was tested</h3>
+  <p><strong>Traditionally:</strong> results live in one person's terminal.</p>
+  <p><strong>Here:</strong> every run persists to a database with per-step results, screenshots and duration, and renders as an HTML report.</p>
+  <div class="ev"><b>Evidence</b> <code>test_runs</code> and <code>scenario_results</code> tables; <code>automation/api/v1/routers/reports.py</code> — <code>rich_report()</code>. <b>181 runs</b> recorded: 55 passed, 106 failed, 19 cancelled, 1 stopped.</div>
+
+  <h3>7 — Getting a fresh build onto every device</h3>
+  <p><strong>Traditionally:</strong> install manually, per device, per app.</p>
+  <p><strong>Here:</strong> a dashboard notification reports which projects have unpulled commits; one action pulls, builds once and fans the same artifact out to every selected simulator.</p>
+  <div class="ev"><b>Evidence</b> <code>automation/api/v1/routers/builds.py</code> — <code>GET /builds/updates</code>, <code>POST /builds/deploy</code>; UI in <code>BuildUpdateBell.tsx</code>.</div>
+</section>
+
+<!-- ══ 3 ══ -->
+<section>
+  <span class="num">Section 03</span>
+  <h2>Platform Purpose — and Its Boundaries</h2>
+
+  <p>The platform is a <strong>self-hosted execution and reporting system for iOS UI test scenarios</strong>, specialised for testing business journeys that cross between a consumer app and a staff app. It handles source checkout, app build, simulator preparation, installation, execution of English-language test steps through Appium, and the collection of results into a shared database and report.</p>
+
+  <h3>Stated in detail</h3>
+  <p>Three things distinguish it from a generic Appium test suite:</p>
+  <ol>
+    <li><strong>Scenarios are data, not code.</strong> A test is rows in the <code>saved_scenarios</code> table — a title, a project, an ordered step list — editable in the browser. 34 exist today.</li>
+    <li><strong>Cross-app journeys are first-class.</strong> A flow is a sequence of role segments, each with its own app, device and login, so one test spans the whole business transaction.</li>
+    <li><strong>It owns the environment.</strong> Repository, build, install, simulator boot and Appium lifecycle are all inside the platform, so a run starts from a known state.</li>
+  </ol>
+
+  <h3>What it is not intended to do</h3>
+  <ul>
+    <li><strong>Not a device farm.</strong> It drives local iOS simulators on the machine it runs on. No physical-device path exists.</li>
+    <li><strong>Not a load or performance testing tool.</strong> It records per-run metrics but generates no load.</li>
+    <li><strong>Not a unit or API test runner.</strong> It drives applications through their user interface.</li>
+    <li><strong>Not a hosted service.</strong> No container definition, no multi-tenancy, one user account in the database.</li>
+    <li><strong>Not an autonomous testing agent.</strong> It executes scenarios people wrote. See Section 16 (AI).</li>
+  </ul>
+</section>
+
+<!-- ══ 4 ══ -->
+<section>
+  <span class="num">Section 04</span>
+  <h2>Capability Matrix</h2>
+
+  <p>Every row was verified against the implementation. <span class="s s-ok">Implemented</span> means traced and exercised. <span class="s s-part">Partial</span> means it works within stated limits. <span class="s s-no">Not integrated</span> means the code exists but nothing reaches it. <span class="s s-unk">Not found</span> means absent.</p>
+
+  <h4>Mobile automation core</h4>
+  <div class="tw"><table>
+    <thead><tr><th>Capability</th><th>Status</th><th>What it does</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>iOS simulator automation</td><td><span class="s s-ok">Implemented</span></td><td>Drives iOS apps via Appium XCUITest</td><td class="path">scenario_runner.py; cross_app_flows.py; 181 runs in DB</td></tr>
+      <tr><td>Appium integration</td><td><span class="s s-ok">Implemented</span></td><td>Per-run server on a dynamic port; XCUITestOptions session</td><td class="path">appium service layer; plugins/appium_framework.py</td></tr>
+      <tr><td>Android automation</td><td><span class="s s-no">Not integrated</span></td><td>adb discovery and Gradle APK build exist; never used</td><td class="path">discovery/android.py; builder.py <code>build_android()</code>; 0 android projects in DB</td></tr>
+      <tr><td>Real physical devices</td><td><span class="s s-unk">Not found</span></td><td>No usbmux / devicectl / ios-deploy path anywhere</td><td class="path">Simulator UDIDs only, via <code>xcrun simctl</code></td></tr>
+      <tr><td>Simulator discovery</td><td><span class="s s-ok">Implemented</span></td><td>Enumerates simulators, booted or shut down</td><td class="path">device_manager/service.py <code>discover_local_simulators()</code></td></tr>
+      <tr><td>Simulator boot</td><td><span class="s s-ok">Implemented</span></td><td>Boots a shut-down simulator before install</td><td class="path">builder.py <code>ensure_ios_booted()</code></td></tr>
+      <tr><td>App build (iOS)</td><td><span class="s s-ok">Implemented</span></td><td>xcodebuild to a simulator <code>.app</code>, with artifact reuse</td><td class="path">builder.py <code>build()</code></td></tr>
+      <tr><td>Install / uninstall</td><td><span class="s s-ok">Implemented</span></td><td>Installs artifact; uninstalls for clean-slate PR runs</td><td class="path">builder.py <code>install()</code>, <code>uninstall()</code></td></tr>
+      <tr><td>Version verification</td><td><span class="s s-ok">Implemented</span></td><td>Reads installed version back off the device post-install</td><td class="path">builds.py:194-217 <code>version_matches</code></td></tr>
+      <tr><td>Multi-device fan-out</td><td><span class="s s-ok">Implemented</span></td><td>One build, installed onto every selected simulator</td><td class="path">builds.py <code>_Deploy._run()</code></td></tr>
+      <tr><td>Metro handling</td><td><span class="s s-part">Partial</span></td><td>Release builds bundle JS; LogBox overlay dismissal handled in-run</td><td class="path">scenario_runner.py <code>clear_blockers()</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>Test authoring and execution</h4>
+  <div class="tw"><table>
+    <thead><tr><th>Capability</th><th>Status</th><th>What it does</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>Scenario management</td><td><span class="s s-ok">Implemented</span></td><td>Create, read, update, delete English-step scenarios</td><td class="path">routers/scenarios.py; <code>saved_scenarios</code> — 34 rows</td></tr>
+      <tr><td>Browser-based editing</td><td><span class="s s-ok">Implemented</span></td><td>Edit steps, reorder, add — for scenarios and cross-app flows</td><td class="path">ScenarioEditorModal.tsx; FlowEditorModal.tsx</td></tr>
+      <tr><td>Step-recorder</td><td><span class="s s-ok">Implemented</span></td><td>Tap a live simulator frame; the tapped element becomes a step</td><td class="path">routers/recorder.py <code>_element_at()</code>, <code>_step_for()</code></td></tr>
+      <tr><td>Cross-app flows</td><td><span class="s s-ok">Implemented</span></td><td>Multi-role, multi-device journeys as ordered segments</td><td class="path">cross_app_flows.py; <code>cross_app_flow_edits</code></td></tr>
+      <tr><td>Assertions</td><td><span class="s s-ok">Implemented</span></td><td><code>verify</code>, <code>capture … as …</code>, arithmetic checks on captured values</td><td class="path">scenario_runner.py <code>_capture_number()</code>, <code>_verify_calculation()</code></td></tr>
+      <tr><td>pytest suite execution</td><td><span class="s s-ok">Implemented</span></td><td>Runs a repo's own pytest suite; parses JUnit XML for the verdict</td><td class="path">appium_framework.py <code>_parse_junit()</code>, <code>_verdict()</code></td></tr>
+      <tr><td>AI test generation</td><td><span class="s s-no">Not integrated</span></td><td>LLM test-writer class exists but no endpoint or UI reaches it</td><td class="path">ai/services/generator.py — no caller in <code>automation/api</code></td></tr>
+      <tr><td>Parallel execution</td><td><span class="s s-unk">Not found</span></td><td>No thread pool or async fan-out in the runner or agent</td><td class="path">No <code>ThreadPoolExecutor</code>/<code>gather</code> in plugins or agent</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>Orchestration and delivery</h4>
+  <div class="tw"><table>
+    <thead><tr><th>Capability</th><th>Status</th><th>What it does</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>Job queue</td><td><span class="s s-ok">Implemented</span></td><td>Runs queue as DB rows; agents claim atomically</td><td class="path">routers/jobs.py <code>poll_job</code>; <code>test_runs.job_state</code></td></tr>
+      <tr><td>Execution agent</td><td><span class="s s-ok">Implemented</span></td><td>Registers, heartbeats, polls, executes, reports back</td><td class="path">agent/main.py; <code>execution_agents</code> — 46 registrations, 4 hosts</td></tr>
+      <tr><td>Queue visibility</td><td><span class="s s-ok">Implemented</span></td><td>Queued / running / passed / failed as separate views</td><td class="path">JobQueuePage.tsx</td></tr>
+      <tr><td>Repository checkout</td><td><span class="s s-ok">Implemented</span></td><td>Clone, branch checkout, rebase-pull preserving local work</td><td class="path">projects/repository.py <code>pull()</code> with <code>rebase.autoStash</code></td></tr>
+      <tr><td>PR discovery</td><td><span class="s s-ok">Implemented</span></td><td>Lists open PRs from the GitHub API</td><td class="path">integrations/github.py; routers/pull_requests.py</td></tr>
+      <tr><td>PR test on demand</td><td><span class="s s-ok">Implemented</span></td><td>Select a PR and a device; branch is built and tested</td><td class="path">pull_requests.py; agent honours <code>job.branch</code></td></tr>
+      <tr><td>GitHub write-back</td><td><span class="s s-part">Partial</span></td><td>Comment + commit status — <em>webhook-triggered runs only</em></td><td class="path">runner/service.py:160 guards on <code>triggered_by</code> prefix</td></tr>
+      <tr><td>Webhook trigger</td><td><span class="s s-ok">Implemented</span></td><td>GitHub push/PR events queue a run; HMAC verification now mandatory in production</td><td class="path">routers/webhooks.py; <code>X-Hub-Signature-256</code></td></tr>
+      <tr><td>CI/CD pipeline</td><td><span class="s s-part">Template only</span></td><td>A workflow YAML to copy into an app repo; not installed anywhere</td><td class="path">ci_cd/github_actions.yml; no <code>.github/workflows</code> in this repo</td></tr>
+      <tr><td>Containerisation</td><td><span class="s s-unk">Not found</span></td><td>No Dockerfile or compose file</td><td class="path">Repository root</td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>Results, intelligence and platform services</h4>
+  <div class="tw"><table>
+    <thead><tr><th>Capability</th><th>Status</th><th>What it does</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>Result persistence</td><td><span class="s s-ok">Implemented</span></td><td>Run and per-scenario rows with status, duration, error</td><td class="path"><code>test_runs</code> (181), <code>scenario_results</code></td></tr>
+      <tr><td>Screenshots</td><td><span class="s s-ok">Implemented</span></td><td>Captured per step, embedded in the HTML report</td><td class="path">scenario_runner screenshot_dir; reports.py</td></tr>
+      <tr><td>HTML report</td><td><span class="s s-ok">Implemented</span></td><td>Step-by-step narrative with screenshots and verdict</td><td class="path">reports.py <code>rich_report()</code></td></tr>
+      <tr><td>Trends</td><td><span class="s s-ok">Implemented</span></td><td>Pass/fail over a rolling window</td><td class="path">reports.py <code>trends()</code></td></tr>
+      <tr><td>Performance metrics</td><td><span class="s s-ok">Implemented</span></td><td>Timing samples recorded per run — <b>1,076 rows</b></td><td class="path"><code>performance_metrics</code>, <code>performance_summaries</code></td></tr>
+      <tr><td>Root-cause reports</td><td><span class="s s-part">Partial</span></td><td>LLM failure analysis; <b>4 reports</b> from 106 failed runs</td><td class="path"><code>rca_reports</code>; runner/service.py <code>_trigger_rca()</code></td></tr>
+      <tr><td>Visual regression</td><td><span class="s s-part">Never produced output</span></td><td>OpenCV pixel-diff against a baseline is fully coded</td><td class="path">intelligence/visual_regression.py; <code>visual_regression_results</code> — <b>0 rows</b></td></tr>
+      <tr><td>Live screen streaming</td><td><span class="s s-ok">Implemented</span></td><td>Agent uploads PNG frames during a run</td><td class="path">agent/main.py <code>/jobs/{id}/stream/frame</code></td></tr>
+      <tr><td>Dependency graph</td><td><span class="s s-ok">Implemented</span></td><td>Maps cross-app API calls to scope test selection</td><td class="path">routers/dependency.py; <code>dependency_graphs</code></td></tr>
+      <tr><td>Self-healing on failure</td><td><span class="s s-no">Not integrated</span></td><td>LLM suggests a fix, stored as a recommendation — never retried</td><td class="path">ai/services/execution.py; only reached via <code>/jobs/{id}/stream</code>, which the agent never calls</td></tr>
+      <tr><td>Slack notifications</td><td><span class="s s-part">Unconfigured</span></td><td>Failure alert code present; <code>SLACK_WEBHOOK_URL</code> unset</td><td class="path">notifications/dispatch.py; realtime_alerts.py</td></tr>
+      <tr><td>Jira integration</td><td><span class="s s-part">Credentials failing</span></td><td>Ticket read/create coded; token rejected at present</td><td class="path">integrations/jira.py <code>check()</code>; <code>tickets</code> — 1 row</td></tr>
+      <tr><td>Authentication</td><td><span class="s s-ok">Implemented</span></td><td>JWT login with rolling refresh tokens; agent uses a shared token</td><td class="path">routers/auth.py; auth/security.py <code>require_agent</code></td></tr>
+      <tr><td>Role-based access</td><td><span class="s s-part">One endpoint</span></td><td><code>require_role</code> exists; guards a single route</td><td class="path">routers/automation.py:122 — the only usage</td></tr>
+      <tr><td>Secret redaction in logs</td><td><span class="s s-ok">Implemented</span></td><td>Masks tokens in log output, including from named child loggers</td><td class="path">utils/security.py <code>install_secret_filter()</code> — fixed in revision 2</td></tr>
+      <tr><td>Orphaned-run recovery</td><td><span class="s s-part">Startup only</span></td><td>Marks stuck <code>running</code> rows failed when the backend starts</td><td class="path">api/main.py <code>_reap_orphaned_runs()</code> — cross-app bot types only</td></tr>
+      <tr><td>Audit logging</td><td><span class="s s-part">Partial</span></td><td>Table and writes exist; coverage is not systematic</td><td class="path"><code>audit_logs</code>; ops.py <code>drain_agent</code></td></tr>
+      <tr><td>Dashboard</td><td><span class="s s-ok">Implemented</span></td><td>React + Vite SPA over the full REST API</td><td class="path">automation/dashboard/src/</td></tr>
+      <tr><td>Database</td><td><span class="s s-ok">Implemented</span></td><td>SQLite via SQLAlchemy, 23 tables</td><td class="path">database/models.py; test_automation_new.db</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ══ 5 ══ -->
+<section>
+  <span class="num">Section 05</span>
+  <h2>How Automation Works, End to End</h2>
+
+  <p>This is the actual path taken when a test runs through the agent, traced through the code.</p>
+
+  <div class="flow"><ol>
+    <li>
+      <span class="fh">A run is requested</span>
+      <span class="fm">routers/scenarios.py · routers/pull_requests.py · routers/webhooks.py</span>
+      <span class="fb">A person presses Run, or GitHub delivers a webhook. Either way a <code>test_runs</code> row is created with <code>job_state = "queued"</code>, carrying the project, the branch, the target device and — for PR tests — the PR number. <b>Input:</b> project + scenario/branch. <b>Output:</b> a queued job row.</span>
+      <span class="ff"><b>On failure</b> the request returns an HTTP error; nothing is queued.</span>
+    </li>
+    <li>
+      <span class="fh">An agent claims the job</span>
+      <span class="fm">agent/main.py polling loop → POST /jobs/poll</span>
+      <span class="fb">The agent polls on a loop, authenticating with its shared token. The claim is atomic in the endpoint, so two agents cannot take the same job. <b>Output:</b> a job payload — repo URL, branch, device id, scenario list.</span>
+      <span class="ff"><b>On failure</b> the poll returns empty and the agent sleeps and retries. A crashed agent leaves the job queued for another.</span>
+    </li>
+    <li>
+      <span class="fh">Source is fetched and put on the right commit</span>
+      <span class="fm">projects/repository.py — clone / checkout_branch / pull</span>
+      <span class="fb">Clone if absent, otherwise rebase-pull with autostash. <code>checkout_branch()</code> resets the worktree first so a previous run's artifacts cannot leak in. <b>Output:</b> a working tree at the requested branch.</span>
+      <span class="ff"><b>On failure</b> a failed rebase is aborted and the working tree left intact; the job is reported failed rather than force-reset. Local staging patches survive.</span>
+    </li>
+    <li>
+      <span class="fh">The app is built</span>
+      <span class="fm">projects/builder.py — build()</span>
+      <span class="fb">xcodebuild produces a simulator <code>.app</code>. Existing artifacts are reused unless a rebuild is forced. <b>Output:</b> artifact path, bundle id, version and build number.</span>
+      <span class="ff"><b>On failure</b> <code>BuildResult(ok=False, error=…)</code> ends the job; the error text is reported.</span>
+    </li>
+    <li>
+      <span class="fh">The simulator is prepared</span>
+      <span class="fm">builder.py — ensure_ios_booted() · agent/main.py — _wipe_app()</span>
+      <span class="fb">The target simulator is booted if shut down. When <code>FRESH_INSTALL_PER_JOB</code> is set — used for PR tests — the app is uninstalled first, so the PR build is tested rather than a leftover.</span>
+      <span class="ff"><b>On failure</b> the boot message is captured and the device is skipped.</span>
+    </li>
+    <li>
+      <span class="fh">The app is installed and the version confirmed</span>
+      <span class="fm">builder.py — install() then installed_version()</span>
+      <span class="fb">After installing, the version is read back <em>from the device</em>. If it differs from the artifact's version the install did not take, however green the step looked.</span>
+      <span class="ff"><b>On failure</b> the install is recorded <code>ok: false</code> with the reason.</span>
+    </li>
+    <li>
+      <span class="fh">A session is opened</span>
+      <span class="fm">Appium server on a per-run port → XCUITest driver</span>
+      <span class="fb">An Appium instance is started for this run on its own port, and a driver session is created against the simulator UDID and bundle id.</span>
+      <span class="ff"><b>On failure</b> session creation raises; the job is marked failed.</span>
+    </li>
+    <li>
+      <span class="fh">Steps are resolved and performed</span>
+      <span class="fm">intelligence/scenario_runner.py — run_one()</span>
+      <span class="fb">Each English step is matched to an intent (tap, type, select, scroll, verify, capture) and a target. The target is resolved through layered strategies — accessibility id first, then predicate matching, then container-scoped search. Obstacles that no step asked for — permission prompts, LogBox overlays, system alerts — are cleared by <code>clear_blockers()</code>, which verifies the screen actually changed before claiming success.</span>
+      <span class="ff"><b>On failure</b> the step is recorded failed and <em>the remaining steps in that segment are abandoned</em> — later steps would act on the wrong screen and manufacture a false verdict.</span>
+    </li>
+    <li>
+      <span class="fh">Cross-app segments hand over</span>
+      <span class="fm">scenarios/cross_app_flows.py — _run_segment()</span>
+      <span class="fb">For a cross-app flow, execution moves to the next role — a different app, device and login — carrying the identifier created upstream (a reservation, an order) so the next role verifies the <em>same</em> transaction.</span>
+      <span class="ff"><b>On failure</b> the segment aborts. A downstream role cannot report success on a booking that was never made.</span>
+    </li>
+    <li>
+      <span class="fh">Results are reported back</span>
+      <span class="fm">agent/main.py — report_status() → POST /jobs/{id}/status</span>
+      <span class="fb">Status, logs and a detail string are posted to the platform. A run with zero executed tests reports <code>no_tests</code> rather than passing — pytest exits 0 on an empty suite, which previously produced green runs that tested nothing.</span>
+      <span class="ff"><b>On failure</b> a network error loses the update; the job can be left in <code>running</code> until the next backend restart reaps it.</span>
+    </li>
+    <li>
+      <span class="fh">The platform finalises the run</span>
+      <span class="fm">runner/service.py — append_agent_logs → _persist_final_status</span>
+      <span class="fb">Terminal status, duration and error message are written to <code>test_runs</code>. RCA and visual-regression checks are triggered, and — for webhook-originated runs only — a verdict comment and commit status are posted to GitHub.</span>
+      <span class="ff"><b>On failure</b> finalisation depends on the run being present in the service's in-memory <code>active_runs</code> map. If the backend restarted mid-run, the update is dropped. See Section 13.</span>
+    </li>
+    <li>
+      <span class="fh">Results become readable</span>
+      <span class="fm">routers/reports.py — rich_report() · dashboard RunDetails</span>
+      <span class="fb">The run renders as an HTML report: each step, its verdict, its screenshot, and the failure detail where there is one.</span>
+    </li>
+  </ol></div>
+</section>
+
+<!-- ══ 6 ══ -->
+<section>
+  <span class="num">Section 06</span>
+  <h2>Architecture</h2>
+
+  <p>Five layers, all running on a single macOS host today.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Layer</th><th>Component</th><th>Responsibility</th></tr></thead>
+    <tbody>
+      <tr><td>Presentation</td><td class="path">automation/dashboard/ (React + Vite + TS)</td><td>Scenarios, runs, queue, PRs, reports, build deploy</td></tr>
+      <tr><td>API</td><td class="path">automation/api/main.py (FastAPI), 20+ routers, 139 live paths</td><td>REST surface under <code>/api/v1</code>; JWT auth</td></tr>
+      <tr><td>Domain</td><td class="path">runner/, projects/, device_manager/, intelligence/, scenarios/</td><td>Build, install, resolve steps, drive Appium, analyse</td></tr>
+      <tr><td>Execution</td><td class="path">automation/agent/main.py</td><td>Independent process: polls, executes, reports</td></tr>
+      <tr><td>Persistence</td><td class="path">SQLAlchemy → SQLite (test_automation_new.db)</td><td>23 tables: runs, scenarios, projects, agents, metrics</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>How the parts talk</h3>
+  <ul>
+    <li><strong>Dashboard → API</strong> — REST over HTTP with a bearer token. The base URL derives from <code>window.location.hostname</code>, so colleagues on the LAN reach the same backend.</li>
+    <li><strong>Agent → API</strong> — HTTP polling with a shared agent token. The agent pulls work; the platform never pushes to it. This is why an agent can sit behind a firewall.</li>
+    <li><strong>Domain → device</strong> — Appium HTTP on a per-run port, plus direct <code>xcrun simctl</code> and <code>idb</code> subprocess calls.</li>
+    <li><strong>GitHub → API</strong> — inbound webhooks at <code>/api/v1/webhooks/…</code>, HMAC-verified.</li>
+    <li><strong>Domain → LLM</strong> — HTTPS to an OpenAI-compatible endpoint (Groq in practice).</li>
+  </ul>
+
+  <pre class="mermaid">
+graph TD
+  U["QA engineer<br/>(browser)"] -->|REST + JWT| API
+  GH["GitHub"] -->|webhook, HMAC| API
+  API["FastAPI backend<br/>automation/api"] --> DB[("SQLite<br/>23 tables")]
+  API --> DOM["Domain services<br/>build · repo · devices"]
+  AG["Execution agent<br/>agent/main.py"] -->|poll / claim<br/>X-Agent-Token| API
+  AG -->|status · logs · frames| API
+  AG --> DOM
+  DOM --> APP["Appium server<br/>per-run port"]
+  APP --> SIM["iOS simulators<br/>xcrun simctl"]
+  DOM --> GIT["Git repositories<br/>clone · rebase · build"]
+  DOM --> LLM["LLM<br/>Groq / OpenAI-compatible"]
+  API -->|comment + status<br/>webhook runs only| GH
+  </pre>
+
+  <div class="note">
+    <span class="lbl">Architectural note</span>
+    <p>There are <strong>two execution paths</strong>, not one: saved scenarios run through <code>ScenarioRunner</code>, cross-app flows run through <code>cross_app_flows.py</code>. They share the step resolver but not the orchestration. A fix in one does not automatically apply to the other — worth knowing before estimating any change.</p>
+  </div>
+</section>
+
+<!-- ══ 7 ══ -->
+<section>
+  <span class="num">Section 07</span>
+  <h2>Technology Stack</h2>
+
+  <p>The right-hand column is the point: presence in a manifest is not usage.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Technology</th><th>Where</th><th>Actually used?</th></tr></thead>
+    <tbody>
+      <tr><td>Python 3</td><td>Backend, agent, automation</td><td><span class="s s-ok">Yes</span> — the whole backend</td></tr>
+      <tr><td>FastAPI</td><td>automation/api</td><td><span class="s s-ok">Yes</span> — 139 live paths</td></tr>
+      <tr><td>SQLAlchemy</td><td>automation/database</td><td><span class="s s-ok">Yes</span> — 23 models</td></tr>
+      <tr><td>SQLite</td><td>test_automation_new.db</td><td><span class="s s-ok">Yes</span> — 181 runs stored</td></tr>
+      <tr><td>Appium (Python client)</td><td>scenario_runner, cross_app_flows</td><td><span class="s s-ok">Yes</span> — the automation core</td></tr>
+      <tr><td>XCUITest driver</td><td>XCUITestOptions capabilities</td><td><span class="s s-ok">Yes</span> — the only driver used</td></tr>
+      <tr><td>xcrun simctl</td><td>Discovery, boot, install</td><td><span class="s s-ok">Yes</span></td></tr>
+      <tr><td>idb</td><td>Accessibility tree dumps</td><td><span class="s s-ok">Yes</span> — sees elements Appium misses</td></tr>
+      <tr><td>xcodebuild</td><td>builder.py</td><td><span class="s s-ok">Yes</span></td></tr>
+      <tr><td>pytest</td><td>appium_framework.py</td><td><span class="s s-ok">Yes</span> — repo suites, JUnit XML parsed</td></tr>
+      <tr><td>React 18 + TypeScript</td><td>automation/dashboard</td><td><span class="s s-ok">Yes</span></td></tr>
+      <tr><td>Vite</td><td>Dashboard build</td><td><span class="s s-ok">Yes</span> — builds clean</td></tr>
+      <tr><td>python-jose / JWT</td><td>auth/security.py</td><td><span class="s s-ok">Yes</span> — access + refresh</td></tr>
+      <tr><td>OpenCV (cv2)</td><td>visual_regression.py</td><td><span class="s s-part">Coded, 0 results</span></td></tr>
+      <tr><td>Groq LLM API</td><td>ai/provider.py</td><td><span class="s s-part">Narrow</span> — blocker unblocking, PR planning, RCA</td></tr>
+      <tr><td>OpenAI provider</td><td>ai/provider.py</td><td><span class="s s-part">Selectable</span> — Groq is what runs</td></tr>
+      <tr><td>Ollama provider</td><td>ai/provider.py</td><td><span class="s s-unk">Code only</span></td></tr>
+      <tr><td>GitHub REST API</td><td>integrations/github.py, pr_comment.py</td><td><span class="s s-ok">Yes</span> — PR list, comment, status</td></tr>
+      <tr><td>Jira REST API</td><td>integrations/jira.py</td><td><span class="s s-part">Credentials failing</span></td></tr>
+      <tr><td>Slack webhooks</td><td>notifications/dispatch.py</td><td><span class="s s-no">Unconfigured</span></td></tr>
+      <tr><td>ngrok</td><td>Webhook tunnelling</td><td><span class="s s-part">Operational</span> — external, not in code</td></tr>
+      <tr><td>Docker</td><td>—</td><td><span class="s s-unk">Not found</span></td></tr>
+      <tr><td>Redis / Celery / RabbitMQ</td><td>—</td><td><span class="s s-unk">Not found</span> — the queue is DB rows</td></tr>
+      <tr><td>Gradle (Android)</td><td>builder.py <code>build_android()</code></td><td><span class="s s-no">Never exercised</span></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ══ 8 ══ -->
+<section>
+  <span class="num">Section 08</span>
+  <h2>Working With the Platform</h2>
+
+  <h3>Starting it</h3>
+  <p>Two processes. The backend is supervised; the agent runs separately.</p>
+  <div class="ev">./start-backend.sh <span style="color:var(--faint)">— or scripts/supervise_backend.sh</span><br>.venv/bin/python -m automation.agent.main</div>
+  <p class="path" style="font-size:13px;margin-top:-8px">Console scripts in <code>.venv/bin/</code> carry stale shebangs since the project moved; invoke through <code>python -m</code>.</p>
+
+  <h3>Connecting an application</h3>
+  <p>Register a project with its Git URL and default branch; the platform clones it. Nine projects are registered. <span class="path">routers/projects.py → <code>clone_repository</code></span></p>
+
+  <h3>Choosing a device</h3>
+  <p>Simulators are enumerated live, booted or not, and chosen per action — a PR test targets one device, a build deploy targets several. Nothing is hardcoded; add a simulator and the next action sees it. <span class="path">device_manager/service.py</span></p>
+
+  <h3>Creating a test</h3>
+  <p>Three routes, all supported:</p>
+  <ul>
+    <li><strong>Type the steps.</strong> Plain English, one per line, in the scenario editor.</li>
+    <li><strong>Record them.</strong> Open the recorder, tap the live simulator frame, and each tap becomes a step keyed to the real element under your finger.</li>
+    <li><strong>Compose a cross-app flow.</strong> Chain role segments into one journey.</li>
+  </ul>
+
+  <h3>Running</h3>
+  <p>Press Run. The run is queued, an agent claims it, and the Job Queue page shows it move from queued to running to a verdict.</p>
+
+  <h3>When it fails</h3>
+  <p>The step that failed is named, with the reason and the screenshot at the moment of failure. Remaining steps in that segment are skipped rather than run against the wrong screen. There is <strong>no automatic retry</strong> — you read the report and act.</p>
+
+  <h3>Reading results</h3>
+  <p>The rich HTML report gives the step-by-step narrative with screenshots. Trends give pass/fail over time. <span class="path">reports.py</span></p>
+</section>
+
+<!-- ══ 9 ══ -->
+<section>
+  <span class="num">Section 09</span>
+  <h2>Element Identification — the Central Constraint</h2>
+
+  <p>Everything else depends on this. If the platform cannot find a button, no amount of orchestration helps.</p>
+
+  <h3>What is implemented</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Strategy</th><th>Status</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Accessibility id</td><td><span class="s s-ok">Primary</span></td><td><code>AppiumBy.ACCESSIBILITY_ID</code> — React Native <code>testID</code> surfaces here</td></tr>
+      <tr><td>iOS predicate</td><td><span class="s s-ok">Implemented</span></td><td>Matches on <code>label</code> / <code>name</code> for visible text</td></tr>
+      <tr><td>Container-scoped XPath</td><td><span class="s s-ok">Implemented</span></td><td>Find a known container, then search within it — for list rows and cards</td></tr>
+      <tr><td>Positional selection</td><td><span class="s s-ok">Implemented</span></td><td>"the 2nd time slot" — index within a resolved container</td></tr>
+      <tr><td>idb accessibility dump</td><td><span class="s s-ok">Implemented</span></td><td>Reads the full tree where Appium's <code>page_source</code> collapses</td></tr>
+      <tr><td>Pixel-offset tapping</td><td><span class="s s-part">Narrow</span></td><td>A scan for the real checkbox square, used for the T&amp;C control</td></tr>
+      <tr><td>Class chain</td><td><span class="s s-unk">Not found</span></td><td><code>IOS_CLASS_CHAIN</code> is not used</td></tr>
+      <tr><td>OCR</td><td><span class="s s-unk">Not found</span></td><td>No tesseract or OCR library</td></tr>
+      <tr><td>Vision-based identification</td><td><span class="s s-unk">Not found</span></td><td>No screenshot is ever sent to a model to locate an element</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The deliberate guard against guessing</h3>
+  <p>Multi-word targets must be <em>fully</em> covered by a candidate before it is accepted. A step reading <code>click book now</code> will not resolve to an element called <code>preOrderBooking</code> — the resolver records the ambiguity and fails the step instead.</p>
+  <div class="ev"><b>Evidence</b> <code>scenario_runner.py</code> — multi-word coverage requirement across resolution strategies, with <code>_last_ambiguous</code> carrying the explanation into the report.</div>
+  <p>This is a considered trade: <strong>more failed steps, fewer false passes.</strong> A test that silently books the wrong thing and reports green is worse than one that stops and says it could not find the button.</p>
+
+  <h3>When an element has no accessibility id</h3>
+  <p>The platform tries visible-text matching and container-scoped search. Where neither works — an unlabelled icon, a custom-drawn control, a canvas — <strong>it cannot reliably find the element, and developer instrumentation is required.</strong> The application team adds a <code>testID</code>; there is no platform-side workaround.</p>
+
+  <div class="note">
+    <span class="lbl">Distinguish clearly</span>
+    <p><strong>Platform does today:</strong> id, text, container and positional resolution, with an idb fallback for trees Appium under-reports.</p>
+    <p><strong>Application developers must do:</strong> add <code>testID</code> to controls that expose neither a stable id nor stable text.</p>
+    <p><strong>Proposed only, not built:</strong> vision or OCR element location. No such code exists.</p>
+  </div>
+</section>
+
+<!-- ══ 10 ══ -->
+<section>
+  <span class="num">Section 10</span>
+  <h2>Pull Request Testing</h2>
+
+  <div class="tw"><table>
+    <thead><tr><th>Question</th><th>Answer</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>Are PRs discovered?</td><td><span class="s s-ok">Yes</span></td><td class="path">integrations/github.py; routers/pull_requests.py</td></tr>
+      <tr><td>Can a specific PR be chosen?</td><td><span class="s s-ok">Yes</span> — with a target device</td><td class="path">PullRequestsPage.tsx; <code>testPullRequest(…, deviceId)</code></td></tr>
+      <tr><td>Is the branch checked out?</td><td><span class="s s-ok">Yes</span> — worktree reset first</td><td class="path">repository.py <code>checkout_branch()</code></td></tr>
+      <tr><td>Is the PR branch built?</td><td><span class="s s-ok">Yes</span> — the job's branch, not the default</td><td class="path">jobs.py sends <code>job.branch</code></td></tr>
+      <tr><td>Clean install per PR?</td><td><span class="s s-ok">Yes</span> — uninstall then install</td><td class="path">agent/main.py <code>_wipe_app()</code>, <code>FRESH_INSTALL_PER_JOB</code></td></tr>
+      <tr><td>Are tests run?</td><td><span class="s s-ok">Yes</span> — planned scenarios or repo suite</td><td class="path">agent/main.py <code>_run_planned_scenarios()</code></td></tr>
+      <tr><td>Automatic on PR open?</td><td><span class="s s-ok">Yes</span> — via webhook</td><td class="path">routers/webhooks.py</td></tr>
+      <tr><td>Comment posted to GitHub?</td><td><span class="s s-part">Webhook runs only</span></td><td class="path">runner/service.py:164 — requires <code>triggered_by</code> to start <code>github_webhook:</code></td></tr>
+      <tr><td>Commit status set?</td><td><span class="s s-part">Same condition</span></td><td class="path">pr_comment.py <code>update_pr_status()</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note crit">
+    <span class="lbl">Important asymmetry</span>
+    <p>A PR tested from the <strong>dashboard</strong> stamps <code>triggered_by = "pr_test:owner/repo#N"</code>. The write-back guard requires the prefix <code>github_webhook:</code>. So <strong>manually triggered PR tests produce results in the platform but post nothing to GitHub.</strong> Only webhook-triggered runs comment back. This is a one-line condition, not a design limit — but today it is the behaviour.</p>
+  </div>
+
+  <h3>Permissions and tokens</h3>
+  <ul>
+    <li><code>GITHUB_TOKEN</code> — needs repo read for clone and PR listing; write on issues and statuses to comment and set commit status.</li>
+    <li><code>GITHUB_WEBHOOK_SECRET</code> — <strong>now mandatory in production.</strong> With <code>APP_ENV</code> set to production and no secret configured, the webhook endpoint returns 503 rather than accepting unverified deliveries.</li>
+    <li><code>GITHUB_REPO_OWNER</code> — default owner for API calls.</li>
+  </ul>
+</section>
+
+<!-- ══ 11 ══ -->
+<section>
+  <span class="num">Section 11</span>
+  <h2>Problems the Platform Has Actually Surfaced</h2>
+
+  <p>These are drawn from this platform's own execution history and code — not illustrative examples.</p>
+
+  <h3>Functional</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Problem</th><th>How detected</th><th>Automated?</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>Cross-app desynchronisation — an order not reaching the kitchen</td><td>Downstream segment cannot open the upstream order</td><td>Yes — <code>_open_reservation</code> / <code>@open_order</code> with explicit status filters</td><td>Detection working</td></tr>
+      <tr><td>Kitchen "mark ready" not verified</td><td><code>_kitchen_ready</code> returned true when the order was merely closed</td><td>Yes, since the guard was tightened to <code>readied</code> only</td><td>Fixed; a demo can still pass on the Close branch alone</td></tr>
+      <tr><td>Arithmetic errors in totals</td><td><code>capture … as …</code> then a calculation assertion</td><td>Yes — where a scenario declares the check</td><td>Implemented, thinly used</td></tr>
+      <tr><td>Booking not confirmed</td><td>Status assertion after save, with retry</td><td>Yes — <code>_save_appointment</code> polls for form close, retries 3×</td><td>Working</td></tr>
+      <tr><td>Wrong role logged in</td><td>Role checked after login; logs out and retries if wrong</td><td>Yes — <code>_login_business</code>, <code>_ensure_business_account</code></td><td>Working</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>UI and visual</h3>
+  <p>Pixel-diff regression detection is fully coded — screen-level percentage diff, severity bands at 2 / 5 / 10 %, a passing run never flipped to failed but flagged with a warning. <strong>It has produced zero results: <code>visual_regression_results</code> is empty.</strong> No baseline has been captured, so no comparison has ever run.</p>
+  <p><strong>Misalignment, truncated text, overlapping elements and toast orientation are not individually detected.</strong> A pixel diff reports that a screen changed, not what is wrong with it. Interpretation is human.</p>
+
+  <h3>Automation-infrastructure issues</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Problem</th><th>How detected</th><th>Automated handling?</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>Missing accessibility ids</td><td>Step fails with the ambiguity recorded</td><td>Detected, not solved — needs a <code>testID</code></td><td>Open, app-side</td></tr>
+      <tr><td>LogBox overlay hiding a control</td><td>Blocker sweep before interaction</td><td>Yes — <code>clear_blockers()</code>, screen-change verified</td><td>Working</td></tr>
+      <tr><td>OS permission prompts</td><td>System alert accepted, then labelled buttons</td><td>Yes — <code>d.switch_to.alert.accept()</code> first</td><td>Working</td></tr>
+      <tr><td>Modal left open, later steps on wrong screen</td><td>Modal state checked before returning success</td><td>Yes — <code>_assign_table</code> fails and dismisses</td><td>Working</td></tr>
+      <tr><td>Zero-test run reported green</td><td>pytest exits 0 on an empty suite</td><td>Yes — a distinct <code>no_tests</code> status</td><td>Fixed</td></tr>
+      <tr><td>Collapsed accessibility tree</td><td>Appium reported 4 elements where 75 existed</td><td>Partly — idb dump is the workaround</td><td>Mitigated</td></tr>
+      <tr><td>Device-specific control geometry</td><td>T&amp;C checkbox at differing offsets per device</td><td>Partly — pixel scan for the square</td><td>Fragile</td></tr>
+      <tr><td>Secrets appearing in log files</td><td>Redaction filter never saw child-logger records</td><td>Yes — filter moved onto the root handlers</td><td>Fixed in revision 2</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note">
+    <span class="lbl">The recurring theme</span>
+    <p>Most defects fixed in this platform were the same class: <strong>a step announcing success without verifying it achieved anything.</strong> A tap was sent, so the step passed — even though the modal never closed, the checkbox never ticked, the login landed on the wrong role. The countermeasure now built in throughout is verify-after-act: check the screen changed, read the version back off the device, confirm the role, abort the segment rather than continue against the wrong screen.</p>
+    <p>The log-redaction bug found in revision 2 is the same shape at the infrastructure level: a filter was installed, the code looked protected, and no one checked that it caught anything. It did not.</p>
+  </div>
+</section>
+
+<!-- ══ 12 ══ -->
+<section>
+  <span class="num">Section 12</span>
+  <h2>Cross-Application Testing</h2>
+
+  <p><span class="s s-ok">Implemented</span> — and it is the platform's most distinctive capability. Eleven flows are defined.</p>
+
+  <h3>The journey</h3>
+  <p>Consumer app: browse, book a table, pre-order. → Business app as <strong>waiter</strong>: open the reservation, assign a table, take the order. → Business app as <strong>kitchen</strong>: see the order, mark it ready. Each role is a segment with its own app, device and credentials.</p>
+
+  <h3>How state carries across</h3>
+  <ul>
+    <li><strong>Shared backend.</strong> The apps talk to the same server, so a booking made by the consumer is genuinely visible to staff. The platform verifies real propagation, not a mock.</li>
+    <li><strong>Identifier hand-off.</strong> The reservation or order created upstream is opened by name downstream — <code>_open_reservation</code> and <code>@open_order</code> filter on the expected status (<code>reserved</code>, <code>confirmationpending</code>, <code>inprogress</code>), so a downstream role cannot pick up an unrelated record and report success.</li>
+    <li><strong>Two simulators.</strong> Consumer runs on a phone, business on a tablet, each with its own Appium session.</li>
+  </ul>
+
+  <h3>What synchronisation verification actually is</h3>
+  <p>It is an existence-and-status check: the downstream role must find the specific record in the expected state. If the booking never propagated, the segment fails. <strong>What is not verified</strong> is field-level fidelity — that guest count, notes and timing arrived intact — unless a scenario adds explicit assertions for them.</p>
+
+  <h3>What remains manual</h3>
+  <ul>
+    <li>Test-data state — an existing reservation in the right status is often a precondition, not something the flow creates.</li>
+    <li>Interpreting a failed segment: platform bug, app bug, or stale data.</li>
+    <li>Payment settlement beyond order status.</li>
+  </ul>
+</section>
+
+<!-- ══ 13 ══ -->
+<section>
+  <span class="num">Section 13</span>
+  <h2>Failure Handling and Recovery</h2>
+
+  <p>The distinction enforced here: <em>logging</em> an error is not <em>recovering</em> from it.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Failure</th><th>Current handling</th><th>Auto-recovery?</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>Element not found</td><td>Step fails; segment aborts</td><td><span class="s s-no">No</span> — deliberate</td><td class="path">scenario_runner.py; <code>break</code> in <code>_run_segment</code></td></tr>
+      <tr><td>Blocker overlay / permission prompt</td><td>Swept and dismissed, then screen-change verified</td><td><span class="s s-ok">Yes</span></td><td class="path"><code>clear_blockers()</code>, <code>_screen_signature</code></td></tr>
+      <tr><td>Login bounce (Firebase token)</td><td>Retried up to 3 times</td><td><span class="s s-ok">Yes</span></td><td class="path"><code>_login_business</code></td></tr>
+      <tr><td>Wrong role after login</td><td>Logs out, retries</td><td><span class="s s-ok">Yes</span></td><td class="path"><code>_ensure_business_account</code></td></tr>
+      <tr><td>Save didn't take</td><td>Polls for form close, retries 3×</td><td><span class="s s-ok">Yes</span></td><td class="path"><code>_save_appointment</code></td></tr>
+      <tr><td>Git pull divergence</td><td><code>rebase --abort</code>; job fails; worktree preserved</td><td><span class="s s-part">Safe fail</span></td><td class="path">repository.py <code>pull()</code></td></tr>
+      <tr><td>Build failure</td><td>Error captured; job ends</td><td><span class="s s-no">No</span></td><td class="path">builder.py <code>BuildResult</code></td></tr>
+      <tr><td>Simulator shut down</td><td>Booted automatically before install</td><td><span class="s s-ok">Yes</span></td><td class="path"><code>ensure_ios_booted()</code></td></tr>
+      <tr><td>Install silently failed</td><td>Version read back; mismatch flagged</td><td><span class="s s-part">Detected</span></td><td class="path">builds.py <code>version_matches</code></td></tr>
+      <tr><td>Stale app from a previous run</td><td>Uninstalled first when configured</td><td><span class="s s-ok">Yes</span> (PR jobs)</td><td class="path"><code>_wipe_app()</code></td></tr>
+      <tr><td>Whole test failed</td><td>Recorded and reported</td><td><span class="s s-no">No retry</span></td><td class="path">No re-queue path in agent or jobs</td></tr>
+      <tr><td>Agent dies mid-job</td><td>Stuck rows reaped on the next backend startup</td><td><span class="s s-part">Partial</span></td><td class="path">api/main.py <code>_reap_orphaned_runs()</code> — startup only, and only for <code>ios-crossapp</code> bot types; nothing reaps while the backend stays up</td></tr>
+      <tr><td>Backend restarts mid-run</td><td>Final status may be dropped</td><td><span class="s s-no">No</span></td><td class="path"><code>append_agent_logs</code> requires the run in the in-memory <code>active_runs</code> map</td></tr>
+      <tr><td>Appium unhealthy</td><td>Session creation raises; job fails</td><td><span class="s s-no">No</span></td><td class="path">No health-check-and-restart loop</td></tr>
+      <tr><td>Backend process dies</td><td>Supervisor script restarts it</td><td><span class="s s-ok">Yes</span></td><td class="path">scripts/supervise_backend.sh</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note crit">
+    <span class="lbl">Two gaps worth naming</span>
+    <p><strong>Orphan recovery is startup-only and partial.</strong> <code>_reap_orphaned_runs()</code> marks stuck <code>running</code> rows as failed when the backend starts — but only for the two cross-app bot types, and only at startup. A job orphaned while the backend keeps running stays <code>running</code> indefinitely, and other job types are never reaped. There is no lease expiry.</p>
+    <p><strong>Run finalisation depends on in-memory state.</strong> Terminal status flows through <code>runner_service.active_runs</code>. A backend restart between an agent claiming a job and reporting its verdict loses that verdict.</p>
+  </div>
+</section>
+
+<!-- ══ 14 ══ -->
+<section>
+  <span class="num">Section 14</span>
+  <h2>Reporting</h2>
+
+  <div class="tw"><table>
+    <thead><tr><th>Reported</th><th>Status</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>Overall verdict</td><td><span class="s s-ok">Yes</span></td><td>passed / failed / cancelled / stopped / no_tests</td></tr>
+      <tr><td>Per-step results</td><td><span class="s s-ok">Yes</span></td><td><code>scenario_results</code> rows per step</td></tr>
+      <tr><td>Screenshots</td><td><span class="s s-ok">Yes</span></td><td>Captured per step, embedded in the report</td></tr>
+      <tr><td>Failure detail</td><td><span class="s s-ok">Yes</span></td><td>Includes the ambiguity note when a target was rejected</td></tr>
+      <tr><td>Execution logs</td><td><span class="s s-ok">Yes</span></td><td>Streamed from the agent during the run</td></tr>
+      <tr><td>Duration</td><td><span class="s s-ok">Yes</span></td><td><code>duration_ms</code> per run</td></tr>
+      <tr><td>Device information</td><td><span class="s s-ok">Yes</span></td><td>Device id and name on the run</td></tr>
+      <tr><td>Version / commit</td><td><span class="s s-ok">Yes</span></td><td>Deploy log records version, build and commit</td></tr>
+      <tr><td>PR context</td><td><span class="s s-ok">Yes</span></td><td>Carried in <code>triggered_by</code> and <code>commit_sha</code></td></tr>
+      <tr><td>Trends</td><td><span class="s s-ok">Yes</span></td><td>Pass/fail over a rolling window</td></tr>
+      <tr><td>Performance metrics</td><td><span class="s s-ok">Yes</span></td><td>1,076 rows recorded</td></tr>
+      <tr><td>Root-cause narrative</td><td><span class="s s-part">Sparse</span></td><td>4 RCA reports against 106 failed runs</td></tr>
+      <tr><td>Element resolution detail</td><td><span class="s s-part">Failures only</span></td><td>Reported when resolution fails, not on success</td></tr>
+      <tr><td>Visual diff report</td><td><span class="s s-no">Never generated</span></td><td>Coded; zero results stored</td></tr>
+      <tr><td>Live screen view</td><td><span class="s s-ok">Yes</span></td><td>Frames uploaded during execution</td></tr>
+      <tr><td>Scheduled email / digest</td><td><span class="s s-unk">Not found</span></td><td>No scheduler, no email</td></tr>
+      <tr><td>Slack failure alert</td><td><span class="s s-no">Unconfigured</span></td><td>Code present, webhook URL unset</td></tr>
+      <tr><td>PDF export</td><td><span class="s s-unk">Not found</span></td><td>HTML only</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ══ 15 ══ -->
+<section>
+  <span class="num">Section 15</span>
+  <h2>Business Value</h2>
+
+  <p>Each benefit below follows from a capability verified above. <strong>No percentage claims are made</strong> — the platform holds no before/after measurement of manual effort, so any figure would be invented.</p>
+
+  <h3>Cross-app journeys become repeatable</h3>
+  <p>The highest-effort manual test — one transaction across two apps and three roles — is defined once and replayed. This is where the labour saving is concentrated, because it is the test people most dislike running by hand.</p>
+
+  <h3>Test authoring opens beyond programmers</h3>
+  <p>Scenarios are English steps stored as data and edited in a browser. A QA engineer who does not write Python can author, edit and run tests. 34 scenarios exist without anyone maintaining a Python file per test.</p>
+
+  <h3>Code changes get a verdict before merge</h3>
+  <p>A PR branch is built, cleanly installed and tested on a simulator. Where the trigger is a webhook, the verdict lands on the PR itself.</p>
+
+  <h3>Results are shared, not personal</h3>
+  <p>181 runs with screenshots and per-step detail are in one queryable place. A failure conversation starts from the same evidence rather than from someone's recollection.</p>
+
+  <h3>Build provenance is certain</h3>
+  <p>The version installed is read back from the device and compared against what was built. "Are we testing the right build?" becomes a fact rather than an assumption.</p>
+
+  <h3>Consistency, and honest verdicts</h3>
+  <p>Automated steps do not vary with fatigue. More importantly, the platform is engineered to fail loudly rather than pass optimistically — an unresolvable step stops the segment instead of guessing. <strong>A green run means more here than in a system tuned to look green.</strong></p>
+
+  <div class="note">
+    <span class="lbl">Where value is not yet realised</span>
+    <p>Regression <em>coverage</em> is still narrow — 34 scenarios, and by the team's own tracking only a fraction of the intended consumer catalogue is written, with fewer proven against the app. The execution machinery outpaces the scenario library. The next unit of value comes from writing scenarios, not from building features.</p>
+  </div>
+</section>
+
+<!-- ══ 16 ══ -->
+<section>
+  <span class="num">Section 16</span>
+  <h2>Client Questions, Answered From the Code</h2>
+
+  <h4>General</h4>
+  <div class="faqset">
+    <details><summary>What is this platform?</summary><div class="ans"><p>A self-hosted system that runs iOS app tests automatically on simulators and records the results. It handles source checkout, build, install, execution and reporting.</p></div></details>
+    <details><summary>What problem does it solve?</summary><div class="ans"><p>Chiefly, the manual effort of testing a business journey that crosses two apps and three staff roles — plus the setup burden of Appium and simulator management.</p></div></details>
+    <details><summary>Who will use it?</summary><div class="ans"><p>QA engineers author and run tests; developers get PR verdicts; leads read run history. Today there is <strong>one user account</strong> in the database.</p></div></details>
+    <details><summary>What applications can it test?</summary><div class="ans"><p>iOS applications, React Native in practice. Nine projects registered, all iOS.</p></div></details>
+  </div>
+
+  <h4>Automation</h4>
+  <div class="faqset">
+    <details><summary>Can it test complete end-to-end workflows?</summary><div class="ans"><p>Yes — including workflows spanning two apps and three roles. Eleven cross-app flows are defined.</p></div></details>
+    <details><summary>Can it test Android?</summary><div class="ans"><p><strong>Not today.</strong> adb device discovery and a Gradle APK build exist in code, but no Android project is registered and no Android run has occurred. Treat Android as unproven work, not a feature.</p></div></details>
+    <details><summary>Can it use real physical devices?</summary><div class="ans"><p><strong>No.</strong> Simulators only. No real-device tooling is present anywhere in the codebase.</p></div></details>
+    <details><summary>How does it identify UI elements?</summary><div class="ans"><p>Accessibility id first, then visible-text predicate matching, then container-scoped search, with positional selection for lists. An idb accessibility dump is used where Appium under-reports the tree.</p></div></details>
+    <details><summary>What if an element has no accessibility ID?</summary><div class="ans"><p>Text and container strategies are tried. If those fail, the step fails and <strong>the app developers must add a <code>testID</code></strong>. There is no vision or OCR fallback.</p></div></details>
+    <details><summary>Can multiple tests run at once?</summary><div class="ans"><p>Not within one run — there is no parallel execution. Multiple agents can each hold one job, so concurrency is bounded by agent count and available simulators.</p></div></details>
+  </div>
+
+  <h4>AI</h4>
+  <div class="faqset">
+    <details><summary>Where is AI actually used?</summary><div class="ans"><p>Three narrow places: suggesting how to clear an unexpected blocking screen during a run; planning which scenarios a PR should exercise; and drafting root-cause narratives after a failure. <strong>The LLM does not drive the test.</strong></p></div></details>
+    <details><summary>Is the AI autonomous?</summary><div class="ans"><p><strong>No.</strong> It executes scenarios people wrote. Its runtime authority is limited to suggesting a control to tap when a screen blocks progress — and that suggestion is verified against a screen-change signature before being reported as successful, precisely because it has been wrong before.</p></div></details>
+    <details><summary>Can AI generate tests?</summary><div class="ans"><p><strong>Not in practice.</strong> An LLM test-generator class exists in <code>ai/services/generator.py</code> but no API endpoint or UI reaches it. It is unreachable code.</p></div></details>
+    <details><summary>Can AI recover from failures?</summary><div class="ans"><p><strong>No.</strong> A self-healing engine exists, but the only route to it is an endpoint the agent never calls — and even then it stores a suggestion for human review rather than retrying. No test has ever been healed automatically.</p></div></details>
+    <details><summary>What if AI cannot identify an element?</summary><div class="ans"><p>The step fails with the ambiguity recorded, and the rest of the segment is skipped. It does not guess.</p></div></details>
+  </div>
+
+  <h4>PR testing</h4>
+  <div class="faqset">
+    <details><summary>Can we test every PR automatically?</summary><div class="ans"><p>Yes, via GitHub webhooks — subject to the webhook endpoint being reachable, which today means a tunnel such as ngrok.</p></div></details>
+    <details><summary>Can results be sent back to GitHub?</summary><div class="ans"><p>Yes for webhook-triggered runs — a comment and a commit status. <strong>No for PR tests started from the dashboard</strong>, which carry a different trigger prefix and skip the write-back. Section 10 has the detail.</p></div></details>
+    <details><summary>Is the PR build isolated from previous runs?</summary><div class="ans"><p>Yes. The worktree is reset before checkout and the app uninstalled before install, so a PR is tested rather than a leftover.</p></div></details>
+  </div>
+
+  <h4>Infrastructure</h4>
+  <div class="faqset">
+    <details><summary>What is required to run it?</summary><div class="ans"><p>A macOS machine with Xcode and simulators, Node.js with Appium and the XCUITest driver, <code>idb</code>, Python 3 with the project venv, and Git. macOS is mandatory — iOS simulators exist nowhere else.</p></div></details>
+    <details><summary>Can it run in CI/CD?</summary><div class="ans"><p>A GitHub Actions workflow template exists and would require a <strong>self-hosted macOS runner</strong>. It is not installed in any repository today, and this repository has no <code>.github/workflows</code> directory.</p></div></details>
+    <details><summary>Is it containerised?</summary><div class="ans"><p>No. No Dockerfile or compose file exists — and iOS simulators cannot run in Linux containers, so this is a platform constraint, not an oversight.</p></div></details>
+  </div>
+
+  <h4>Security</h4>
+  <div class="faqset">
+    <details><summary>How are GitHub tokens handled?</summary><div class="ans"><p>Read from environment variables via a <code>.env</code> file, which was untracked from Git with a sanitised <code>.env.example</code> left in place. Tokens are masked in log output by a redaction filter — which was repaired in revision 2 after it was found not to cover named child loggers.</p></div></details>
+    <details><summary>How does the execution agent authenticate?</summary><div class="ans"><p>With a shared <code>AGENT_TOKEN</code> presented as an <code>X-Agent-Token</code> header and compared using a constant-time comparison. Before revision 2 the agent endpoints were unauthenticated.</p></div></details>
+    <details><summary>Does it need access to source code?</summary><div class="ans"><p>Yes. It clones repositories and builds them, so it requires repository read access.</p></div></details>
+    <details><summary>What application data does it store?</summary><div class="ans"><p>Run results, logs and screenshots of app screens. Screenshots of authenticated sessions may contain whatever test data was on screen. Test-account credentials for the business app are held in <code>.env</code>.</p></div></details>
+  </div>
+
+  <h4>Scalability</h4>
+  <div class="faqset">
+    <details><summary>Can multiple devices be used at once?</summary><div class="ans"><p>For build deployment, yes — one build fans out to every selected simulator. For test execution, a cross-app flow uses two simulators in sequence. Independent tests do not run in parallel.</p></div></details>
+    <details><summary>Is there a job queue and are agents supported?</summary><div class="ans"><p>Yes to both. The queue is database rows with atomic claiming; agents register, heartbeat and poll. 46 agent registrations across 4 hostnames are recorded — though all currently show offline.</p></div></details>
+    <details><summary>Can it scale horizontally?</summary><div class="ans"><p><strong>Partly, and not yet proven.</strong> The pull-based agent model is the right shape for it, and additional Macs could run agents. But the backend is a single process over SQLite with in-memory run state, and orphan recovery only runs at startup. Horizontal scale needs those addressed first.</p></div></details>
+  </div>
+</section>
+
+<!-- ══ 17 ══ -->
+<section>
+  <span class="num">Section 17</span>
+  <h2>Current Limitations</h2>
+
+  <h3>Platform and device</h3>
+  <ul>
+    <li><strong>iOS simulators only.</strong> No physical device support of any kind.</li>
+    <li><strong>macOS only.</strong> Xcode, <code>simctl</code> and <code>idb</code> are hard requirements.</li>
+    <li><strong>Android unproven.</strong> Code exists; no Android project, no Android run.</li>
+    <li><strong>Single host.</strong> Everything runs on one machine today.</li>
+  </ul>
+
+  <h3>Application-side dependencies</h3>
+  <ul>
+    <li><strong>Accessibility identifiers are required</strong> for controls without stable text. No workaround exists platform-side.</li>
+    <li><strong>Appium under-reports some React Native trees</strong> — one screen returned 4 elements where 75 existed. Mitigated by idb, not eliminated.</li>
+    <li><strong>Some controls need pixel-offset tapping</strong>, which is device-geometry-specific and fragile.</li>
+  </ul>
+
+  <h3>Coverage</h3>
+  <ul>
+    <li><strong>34 scenarios</strong> total; by the team's own tracking a substantial part of the intended consumer catalogue is unwritten and much of what exists is unproven against the app.</li>
+    <li><strong>106 of 181 runs failed.</strong> Some are genuine defects, some infrastructure, some scenario bugs — the platform does not classify them automatically.</li>
+    <li><strong>PR tests target a production app build</strong> with no test data at the pinned coordinates, so they cannot currently pass.</li>
+  </ul>
+
+  <h3>Execution and recovery</h3>
+  <ul>
+    <li><strong>No test retry</strong> — a flaky failure is a failure.</li>
+    <li><strong>Orphan recovery runs only at startup</strong> and only for cross-app bot types; a job orphaned while the backend stays up is never reclaimed.</li>
+    <li><strong>Finalisation depends on in-memory state</strong> — a backend restart mid-run can lose the verdict.</li>
+    <li><strong>No parallel execution</strong> within a run.</li>
+    <li><strong>No Appium health-check-and-restart</strong> loop.</li>
+  </ul>
+
+  <h3>Features that exist but do not function</h3>
+  <ul>
+    <li><strong>Visual regression</strong> — fully coded, zero results ever produced.</li>
+    <li><strong>Self-healing</strong> — unreachable from the agent's execution path.</li>
+    <li><strong>AI test generation</strong> — no endpoint or UI reaches it.</li>
+    <li><strong>Slack alerts</strong> — no webhook URL configured.</li>
+    <li><strong>Jira</strong> — credentials currently rejected; 1 ticket in the database.</li>
+    <li><strong>CI/CD</strong> — a template, not an installed pipeline.</li>
+  </ul>
+
+  <h3>Reporting</h3>
+  <ul>
+    <li>No PDF export, no scheduled digest, no email.</li>
+    <li>RCA narratives cover 4 of 106 failures.</li>
+    <li>Specific UI defect classes — truncation, overlap, misalignment — are not detected as such.</li>
+  </ul>
+</section>
+
+<!-- ══ 18 ══ -->
+<section>
+  <span class="num">Section 18</span>
+  <h2>Implemented vs Planned</h2>
+
+  <h3>Currently working</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Feature</th><th>Evidence</th><th>Next step</th></tr></thead>
+    <tbody>
+      <tr><td>iOS scenario execution</td><td class="path">scenario_runner.py; 181 runs</td><td>Grow the scenario library</td></tr>
+      <tr><td>Cross-app flows</td><td class="path">cross_app_flows.py; 11 flows</td><td>Add field-level assertions</td></tr>
+      <tr><td>Build → install → verify</td><td class="path">builder.py; builds.py</td><td>—</td></tr>
+      <tr><td>Job queue + agent</td><td class="path">jobs.py; agent/main.py</td><td>Add lease expiry</td></tr>
+      <tr><td>Scenario CRUD + editor</td><td class="path">scenarios.py; editor modals</td><td>—</td></tr>
+      <tr><td>Step recorder</td><td class="path">recorder.py</td><td>Use it for the unwritten catalogue</td></tr>
+      <tr><td>Reports + trends</td><td class="path">reports.py</td><td>—</td></tr>
+      <tr><td>PR discovery + on-demand test</td><td class="path">pull_requests.py</td><td>Point at a staging build</td></tr>
+      <tr><td>Auth with refresh tokens</td><td class="path">auth.py</td><td>Add users; enforce roles</td></tr>
+      <tr><td>Agent authentication</td><td class="path">security.py <code>require_agent</code></td><td>—</td></tr>
+      <tr><td>Multi-device deploy</td><td class="path">builds.py</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Partially working</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Feature</th><th>Gap</th><th>Next step</th></tr></thead>
+    <tbody>
+      <tr><td>GitHub write-back</td><td>Webhook-triggered runs only</td><td>Widen the <code>triggered_by</code> guard</td></tr>
+      <tr><td>RCA reports</td><td>4 of 106 failures</td><td>Diagnose why generation is skipped</td></tr>
+      <tr><td>Role-based access</td><td>One guarded endpoint</td><td>Apply <code>require_role</code> to mutating routes</td></tr>
+      <tr><td>Orphan-run recovery</td><td>Startup only; cross-app types only</td><td>Add a lease-expiry sweeper covering all job types</td></tr>
+      <tr><td>Jira</td><td>Credentials rejected</td><td>Issue a valid token</td></tr>
+      <tr><td>Audit logging</td><td>Not systematic</td><td>Cover destructive actions</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Prototype / unreachable</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Feature</th><th>State</th><th>Next step</th></tr></thead>
+    <tbody>
+      <tr><td>Visual regression</td><td>Complete code, zero output</td><td>Capture a baseline and prove one comparison</td></tr>
+      <tr><td>Self-healing</td><td>Unreachable from the agent path</td><td>Decide: wire it, or delete it</td></tr>
+      <tr><td>AI test generation</td><td>No caller</td><td>Same decision</td></tr>
+      <tr><td>Android</td><td>Discovery + build, never run</td><td>Register one Android project and try</td></tr>
+      <tr><td>Ollama provider</td><td>Code only</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Not implemented</h3>
+  <ul>
+    <li>Physical device execution · Parallel execution · Containerisation · OCR or vision element identification · Test retry · Lease-based job recovery · Email or scheduled reporting · PDF export · Multi-tenancy · An installed CI pipeline</li>
+  </ul>
+
+  <div class="note">
+    <span class="lbl">On roadmap language</span>
+    <p>The repository contains <code>docs/AUTOMATION_ROADMAP.md</code>, <code>docs/IMPLEMENTATION_PLAN.md</code> and <code>docs/REMAINING_WORK_AND_SETUP.md</code>. <strong>Nothing in those documents is treated as a capability in this audit.</strong> Where documentation describes a feature that code does not implement, this document follows the code.</p>
+  </div>
+</section>
+
+<!-- ══ 19 ══ -->
+<section>
+  <span class="num">Section 19</span>
+  <h2>Security and Production Readiness</h2>
+
+  <p>Findings from revision 1, with their current state. Items marked <span class="s s-ok">Fixed</span> were remediated and verified against a running server.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Finding</th><th>State</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>Hardcoded JWT signing key fallback</td><td><span class="s s-ok">Fixed</span></td><td class="path">Constant removed. <code>APP_ENV</code> now gates it: production raises at import if <code>JWT_SECRET_KEY</code> is unset, and any unrecognised <code>APP_ENV</code> value is treated as production so a typo fails safe. A real key was generated into <code>.env</code>.</td></tr>
+      <tr><td>Webhook signature optional</td><td><span class="s s-ok">Fixed</span></td><td class="path">webhooks.py returns 503 rather than accepting an unverified delivery when <code>GITHUB_WEBHOOK_SECRET</code> is unset in production. The dev-mode skip remains only for non-production <code>APP_ENV</code>.</td></tr>
+      <tr><td>Unauthenticated report endpoints</td><td><span class="s s-ok">Fixed</span></td><td class="path"><code>rich_report()</code> and <code>golden_run()</code> now require a login. Verified live: both return <b>401</b> without a token.</td></tr>
+      <tr><td>Agent endpoints unauthenticated</td><td><span class="s s-ok">Fixed</span></td><td class="path">A <code>require_agent</code> dependency guards all six agent routes, compared with <code>secrets.compare_digest</code> against <code>AGENT_TOKEN</code>. The agent sends it through one shared <code>requests.Session</code>, so a future call site cannot forget the header. Verified live: <b>401</b> without, accepted with.</td></tr>
+      <tr><td>Secrets reaching log files</td><td><span class="s s-ok">Fixed</span></td><td class="path">The redaction filter was installed on the root <em>logger</em>, which never sees records propagated from named child loggers — and every module logs through one. Tokens were reaching the logs. The filter now sits on the root handlers. Regression test included.</td></tr>
+      <tr><td>Auth applied per-endpoint on most routers</td><td><span class="s s-part">Open</span></td><td class="path">Six routers carry a router-level dependency; the rest declare it per route, so a newly added endpoint is unguarded by default.</td></tr>
+      <tr><td>Role checks essentially absent</td><td><span class="s s-part">Open</span></td><td class="path"><code>require_role</code> guards exactly one endpoint. Any authenticated user can delete projects and scenarios.</td></tr>
+      <tr><td>Application credentials in <code>.env</code></td><td><span class="s s-part">Open</span></td><td class="path">Waiter and kitchen usernames and passwords as plaintext env vars. Untracked from Git, but present on disk.</td></tr>
+      <tr><td>SQLite as the production store</td><td><span class="s s-part">Open</span></td><td class="path">File-based, no auth, no network isolation. Four <code>.db</code> files exist; only one is live.</td></tr>
+      <tr><td>Screenshots retain app data</td><td><span class="s s-part">Open</span></td><td class="path">Authenticated-session screens are stored indefinitely; no retention policy.</td></tr>
+      <tr><td>Single user account</td><td><span class="s s-unk">Open, low</span></td><td class="path">One row in <code>users</code>; a seed endpoint creates <code>admin</code>.</td></tr>
+      <tr><td>Password hashing</td><td><span class="s s-ok">OK</span></td><td class="path">bcrypt; not stored in plaintext.</td></tr>
+      <tr><td>Token expiry + refresh</td><td><span class="s s-ok">OK</span></td><td class="path">30-minute access token with rolling refresh.</td></tr>
+      <tr><td>Secrets removed from Git</td><td><span class="s s-ok">OK</span></td><td class="path">Commit da49069 untracked <code>.env</code> and <code>.db</code>; sanitised example added.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Production readiness verdict</h3>
+  <p><strong>The two high-severity items and three medium ones are now fixed and verified against a running server.</strong> The platform no longer depends on network position for its authentication.</p>
+  <p><strong>What remains before production exposure:</strong></p>
+  <ul>
+    <li><strong>Set <code>APP_ENV=production</code> on the production host.</strong> Every fail-closed check keys off it, and it currently reads <code>dev</code>. This is the single most important deployment step — without it the guards stay in permissive mode.</li>
+    <li><strong>Set <code>GITHUB_WEBHOOK_SECRET</code></strong> to match the value configured on the GitHub webhook, or webhook delivery will 503 in production.</li>
+    <li><strong>Role enforcement is still absent.</strong> Any authenticated user can delete projects and scenarios.</li>
+    <li><strong>Move off SQLite</strong> if more than one backend process will ever run.</li>
+    <li><strong>Rotate the GitHub and LLM tokens</strong> that were in the working tree before <code>.env</code> was untracked, and adopt a retention policy for run screenshots.</li>
+  </ul>
+
+  <div class="note good">
+    <span class="lbl">Deployment checklist</span>
+    <p>On the production host, before first start: <code>APP_ENV=production</code>, <code>JWT_SECRET_KEY</code>, <code>AGENT_TOKEN</code> (same value in the agent's environment), <code>GITHUB_WEBHOOK_SECRET</code>. The backend refuses to start without the signing key, which is the intended behaviour — a server that will not boot is safer than one signing tokens with a public constant.</p>
+  </div>
+</section>
+
+<!-- ══ 20 ══ -->
+<section>
+  <span class="num">Section 20</span>
+  <h2>Deployment and Setup</h2>
+
+  <h3>Prerequisites</h3>
+  <ul>
+    <li><strong>macOS</strong> with Xcode and iOS simulators — mandatory.</li>
+    <li><strong>Node.js</strong> with Appium and the XCUITest driver.</li>
+    <li><strong><code>idb</code></strong> (Facebook iOS Debug Bridge) for accessibility tree dumps.</li>
+    <li><strong>Python 3</strong> with the project virtualenv at <code>.venv/</code>.</li>
+    <li><strong>Git</strong>, and repository access for the apps under test.</li>
+  </ul>
+
+  <h3>Environment variables</h3>
+  <p>From <code>.env.example</code> in the repository:</p>
+  <div class="ev">APP_ENV                 <span style="color:var(--faint)">— dev | production; anything unrecognised = production</span><br>JWT_SECRET_KEY          <span style="color:var(--faint)">— REQUIRED in production; server refuses to start without it</span><br>AGENT_TOKEN             <span style="color:var(--faint)">— shared with the agent as X-Agent-Token</span><br>GITHUB_WEBHOOK_SECRET   <span style="color:var(--faint)">— REQUIRED in production; webhooks 503 without it</span><br>GITHUB_TOKEN            <span style="color:var(--faint)">— clone, PR list, comment, status</span><br>GITHUB_REPO_OWNER<br>VYA_BUSINESS_WAITER_USER / _PASSWORD<br>VYA_BUSINESS_KITCHEN_USER / _PASSWORD<br>PR_TEST_IOS_DEVICE      <span style="color:var(--faint)">— default simulator for PR runs</span><br>FRESH_INSTALL_PER_JOB   <span style="color:var(--faint)">— clean install before PR tests</span></div>
+  <p>Generate the two secrets with:</p>
+  <div class="ev">python3 -c 'import secrets; print(secrets.token_hex(32))'</div>
+  <p>Also set the LLM API key and base URL, and <code>DATABASE_URL</code> if not using the default SQLite path.</p>
+
+  <h3>Backend</h3>
+  <div class="ev">./start-backend.sh<br>scripts/supervise_backend.sh   <span style="color:var(--faint)"># restarts on crash</span></div>
+  <p>Both invoke uvicorn as <code>.venv/bin/python -m uvicorn automation.api.main:app</code>. The direct console scripts in <code>.venv/bin/</code> carry stale interpreter paths since the project moved and will fail.</p>
+
+  <h3>Frontend</h3>
+  <div class="ev">cd automation/dashboard<br>npm install<br>npm run build     <span style="color:var(--faint)"># or: npm run dev</span></div>
+  <p>The API base URL is derived from <code>window.location.hostname</code>, so colleagues on the same network reach the backend without configuration.</p>
+
+  <h3>Agent</h3>
+  <div class="ev">.venv/bin/python -m automation.agent.main</div>
+  <p>Registers itself, heartbeats, and polls for work, authenticating with <code>AGENT_TOKEN</code>. Loads <code>.env</code> from the project root, so a co-located agent picks the token up automatically. An agent on another machine needs the value set in its own environment.</p>
+
+  <h3>Verify the security guards</h3>
+  <div class="ev">.venv/bin/python -m pytest automation/auth/test_production_guards.py -q</div>
+  <p>Seven tests covering: production refusing to start without a signing key, an unrecognised <code>APP_ENV</code> being treated as production, agent-token mismatch rejection, and secret redaction reaching child-logger output.</p>
+
+  <h3>Database</h3>
+  <p>SQLite, created automatically from the SQLAlchemy models on first run. Live file: <code>test_automation_new.db</code>. <strong>Three other <code>.db</code> files exist in the tree</strong> — historical, and worth removing to avoid connecting to the wrong one.</p>
+
+  <h3>GitHub setup</h3>
+  <ol>
+    <li>Issue a token with repo read plus issues and statuses write.</li>
+    <li>Expose the backend — ngrok is what has been used.</li>
+    <li>Add a webhook on the app repository pointing at <code>/api/v1/webhooks/…</code>, with a secret, and set the same value as <code>GITHUB_WEBHOOK_SECRET</code>.</li>
+    <li>For a CI pipeline, copy <code>automation/ci_cd/github_actions.yml</code> into the app repo as <code>.github/workflows/pr-ios-qa.yml</code> and register a self-hosted macOS runner. <strong>Not currently done.</strong></li>
+  </ol>
+</section>
+
+<!-- ══ 21 ══ -->
+<section>
+  <span class="num">Section 21</span>
+  <h2>Evidence-Based Feature Inventory</h2>
+
+  <p>This section is the source of truth. Where it and any other document disagree, this one holds.</p>
+
+  <div class="inv">
+    <h3><span class="s s-ok">Confirmed implemented</span></h3>
+    <ul>
+      <li>iOS simulator automation via Appium XCUITest — <span class="path">181 runs, 55 passed</span></li>
+      <li>Cross-app multi-role flows — <span class="path">cross_app_flows.py, 11 flows</span></li>
+      <li>English-step scenario execution with layered element resolution — <span class="path">scenario_runner.py</span></li>
+      <li>Scenario CRUD and browser editing — <span class="path">34 saved scenarios</span></li>
+      <li>Tap-to-record step capture on a live simulator — <span class="path">recorder.py</span></li>
+      <li>Repository clone, branch checkout, rebase-pull preserving local work — <span class="path">repository.py</span></li>
+      <li>iOS build, install, uninstall, and post-install version read-back — <span class="path">builder.py, builds.py</span></li>
+      <li>Multi-simulator deploy from a single build — <span class="path">builds.py</span></li>
+      <li>Simulator discovery and boot — <span class="path">device_manager/</span></li>
+      <li>Database-backed job queue with atomic claiming — <span class="path">jobs.py</span></li>
+      <li>Execution agent: register, heartbeat, poll, execute, report — <span class="path">agent/main.py, 46 registrations</span></li>
+      <li>Live screen frame streaming during a run</li>
+      <li>PR discovery and on-demand PR testing with device selection</li>
+      <li>GitHub webhook ingestion with mandatory HMAC verification in production</li>
+      <li>HTML reports with per-step screenshots; pass/fail trends</li>
+      <li>Performance metric collection — <span class="path">1,076 rows</span></li>
+      <li>JWT authentication with rolling refresh tokens, fail-closed in production</li>
+      <li>Shared-token authentication for the execution agent — <span class="path">require_agent</span></li>
+      <li>Secret redaction across all loggers — <span class="path">utils/security.py</span></li>
+      <li>React + Vite dashboard over the full API — <span class="path">139 live paths</span></li>
+      <li>Cross-app dependency graph for scoping test selection</li>
+      <li>pytest suite execution with JUnit XML verdict parsing, including a distinct <code>no_tests</code> outcome</li>
+    </ul>
+  </div>
+
+  <div class="inv">
+    <h3><span class="s s-part">Partially implemented</span></h3>
+    <ul>
+      <li><strong>GitHub write-back</strong> — webhook-triggered runs only; dashboard-triggered PR tests post nothing</li>
+      <li><strong>RCA reports</strong> — 4 generated from 106 failures</li>
+      <li><strong>Role-based access</strong> — <code>require_role</code> guards one endpoint</li>
+      <li><strong>Orphaned-run recovery</strong> — startup only, cross-app bot types only</li>
+      <li><strong>Jira</strong> — integration coded, credentials rejected</li>
+      <li><strong>Audit logging</strong> — table and some writes, not systematic</li>
+      <li><strong>Blocker recovery</strong> — permission prompts and overlays handled; other failure classes are not</li>
+      <li><strong>Metro/LogBox handling</strong> — dismissal in-run; no bundler lifecycle management</li>
+    </ul>
+  </div>
+
+  <div class="inv">
+    <h3><span class="s s-part">Blocked on application changes</span></h3>
+    <ul>
+      <li><strong>Reliable element identification</strong> — controls without a stable id or stable text need a <code>testID</code> from the app team</li>
+      <li><strong>PR tests reaching a pass</strong> — they target a production build with no test data at the pinned coordinates; a staging build with seeded data is required</li>
+      <li><strong>Consumer onboarding coverage</strong> — the carousel is not reachable in the current build state</li>
+      <li><strong>Full accessibility tree visibility</strong> — Appium under-reports some React Native screens; idb mitigates but does not fix it</li>
+    </ul>
+  </div>
+
+  <div class="inv">
+    <h3><span class="s s-no">Coded but not integrated</span></h3>
+    <ul>
+      <li><strong>Visual regression</strong> — complete OpenCV pixel-diff implementation, zero results ever produced</li>
+      <li><strong>Self-healing</strong> — reachable only via an endpoint the agent never calls; produces a stored suggestion, never a retry</li>
+      <li><strong>AI test generation</strong> and page-object generation — no endpoint, no UI, no caller</li>
+      <li><strong>Android</strong> — adb discovery and Gradle build present; no Android project, no Android run</li>
+      <li><strong>Slack alerts</strong> — no webhook URL configured</li>
+      <li><strong>CI/CD workflow</strong> — a template requiring a self-hosted macOS runner, installed nowhere</li>
+      <li><strong>Ollama LLM provider</strong> — code only</li>
+    </ul>
+  </div>
+
+  <div class="inv">
+    <h3><span class="s s-unk">Not implemented</span></h3>
+    <ul>
+      <li>Physical device execution · Parallel test execution · Horizontal scale beyond additional agents · Containerisation · OCR or vision-based element identification · Automatic test retry · Lease expiry for claimed jobs · Appium health-check-and-restart · Email, scheduled digests, or PDF export · Multi-tenancy or team accounts · Specific UI-defect detection (truncation, overlap, misalignment)</li>
+    </ul>
+  </div>
+
+  <div class="inv">
+    <h3><span class="s s-unk">Cannot be verified from the code</span></h3>
+    <ul>
+      <li><strong>Real-world reliability rate</strong> — 106 of 181 runs failed, but the mix of genuine defects, infrastructure faults and scenario bugs is not classified anywhere</li>
+      <li><strong>Time actually saved</strong> — no before/after measurement of manual effort exists</li>
+      <li><strong>Whether the 46 agent registrations represent 4 distinct machines or repeated restarts</strong> on fewer — all currently show offline</li>
+      <li><strong>ngrok tunnel configuration</strong> — operational, outside the repository</li>
+      <li><strong>How much of the 34-scenario library currently passes</strong> — not tracked as a suite-level state</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ══ 22 ══ -->
+<section>
+  <span class="num">Section 22</span>
+  <h2>Client Presentation</h2>
+
+  <h3>What the platform is</h3>
+  <p>It is an in-house test automation system for iOS applications, built specifically for a connected pair of restaurant apps — one for diners, one for staff. It takes test procedures a person would otherwise perform by hand on a phone and a tablet, and runs them unattended against iOS simulators.</p>
+  <p>Its distinguishing capability is testing a business transaction <em>across</em> applications. A diner books a table and pre-orders; a waiter opens that reservation and assigns a table; the kitchen receives that order and marks it ready. The platform runs all three roles as one test, on two devices, verifying that the same transaction genuinely propagates through the system rather than that each app works alone.</p>
+  <p>It is a working internal tool with real usage behind it — 181 recorded runs, 34 scenarios, 11 cross-app flows — running today on a single Mac. It is not a commercial product and not a hosted service.</p>
+
+  <h3>What it currently does</h3>
+  <ul>
+    <li>Runs iOS UI tests written as plain-English steps on iOS simulators</li>
+    <li>Executes multi-app, multi-role journeys across two devices</li>
+    <li>Pulls source, builds an app, installs it, and confirms the version on the device</li>
+    <li>Deploys one build to several simulators at once</li>
+    <li>Discovers pull requests and tests a chosen PR branch on a chosen device</li>
+    <li>Queues runs and executes them through a polling agent</li>
+    <li>Records every run with per-step results, screenshots, logs and duration</li>
+    <li>Renders a screenshot-backed HTML report and pass/fail trends</li>
+    <li>Lets a QA engineer author tests by typing steps or by tapping a live simulator</li>
+  </ul>
+
+  <h3>What problems it solves</h3>
+  <ul>
+    <li>The manual effort of testing one transaction across two apps and three staff roles</li>
+    <li>Needing to write Appium code for every test case</li>
+    <li>Per-engineer Appium and simulator setup</li>
+    <li>Uncertainty about which build is on a device</li>
+    <li>Getting a test verdict on a code change before it merges</li>
+    <li>Test results living in one person's terminal</li>
+  </ul>
+
+  <h3>How it improves automation practice</h3>
+  <ul>
+    <li>Tests are data, not code — authored and edited in a browser</li>
+    <li>Element resolution is layered, so tests survive some UI change without editing</li>
+    <li><strong>It refuses to guess.</strong> An ambiguous target fails the step rather than substituting something plausible</li>
+    <li><strong>It verifies after acting.</strong> Screen changed, version installed, role correct — checked rather than assumed</li>
+    <li>A failed step aborts its segment, so later steps cannot produce a false verdict from the wrong screen</li>
+  </ul>
+
+  <h3>What makes it valuable</h3>
+  <ul>
+    <li>It automates the specific test people most dislike doing by hand</li>
+    <li>Non-programmers can author and maintain tests</li>
+    <li>Its green results are trustworthy, because it is engineered to fail loudly rather than pass optimistically</li>
+    <li>The evidence trail — screenshots, per-step detail, versions — makes failures discussable</li>
+    <li>Its architecture is the right shape for growth: a job queue and pull-based agents</li>
+  </ul>
+
+  <h3>Current limitations, stated plainly</h3>
+  <ul>
+    <li>iOS simulators only — no physical devices, and Android is unproven code</li>
+    <li>Requires a Mac with Xcode; cannot be containerised</li>
+    <li>Coverage is thin — 34 scenarios, much of the intended catalogue unwritten</li>
+    <li>No parallel execution, no test retry, and orphaned jobs are only reclaimed at backend startup</li>
+    <li>Visual regression, self-healing and AI test generation exist in code but have never functioned</li>
+    <li>PR results post to GitHub only for webhook-triggered runs</li>
+    <li>Role enforcement is absent — any authenticated user can delete projects and scenarios</li>
+    <li>Controls without accessibility identifiers cannot be automated until developers add them</li>
+  </ul>
+
+  <h3>What can be demonstrated today</h3>
+  <ul>
+    <li><strong>A cross-app journey end to end</strong> — booking on the consumer app appearing on the waiter's screen and reaching the kitchen, on two simulators</li>
+    <li><strong>Authoring a test by tapping</strong> — open the recorder, tap through a flow, save it as a scenario, run it</li>
+    <li><strong>Editing a scenario in the browser</strong> and re-running it immediately</li>
+    <li><strong>One-click deploy</strong> — pull, build, install to several simulators, with the version confirmed from each device</li>
+    <li><strong>The queue in motion</strong> — a run moving from queued to running to a verdict, with live screen frames</li>
+    <li><strong>A rich report</strong> from any of 181 historical runs, with per-step screenshots</li>
+    <li><strong>Selecting a pull request</strong> and starting a test against its branch on a chosen device</li>
+    <li><strong>A refusal to guess</strong> — a deliberately ambiguous step failing with its reason recorded, rather than silently doing the wrong thing</li>
+  </ul>
+
+  <div class="rule" style="margin-top:40px">
+    <p><strong>The honest one-sentence summary.</strong> A working iOS test automation platform with a genuinely distinctive cross-app capability and unusually disciplined verification, whose authentication has now been closed off properly, currently limited by scenario coverage rather than by its machinery.</p>
+  </div>
+</section>
+
+</div>

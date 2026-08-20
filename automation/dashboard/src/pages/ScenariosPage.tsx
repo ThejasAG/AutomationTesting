@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Plus, Play, Pencil, Trash2, X, GripVertical, ArrowUp, ArrowDown, Loader2,
+  Plus, Play, Pencil, Trash2, X, Loader2,
   Smartphone, CheckCircle2, AlertTriangle, ListChecks, PlayCircle,
 } from 'lucide-react';
 import {
   getScenarios, createScenario, updateScenario, deleteScenario, getScenarioDevices,
-  getProjects, runScenarioStream, runScenariosBatch,
+  getProjects, runScenarioStream, runScenariosBatch, getEngineStatus,
+  listCrossAppFlows, runCrossAppFlow,
 } from '../api';
-import type { SavedScenario, ScenarioInput, SimDevice, Project, ScenarioEvent } from '../api';
+import type { SavedScenario, ScenarioInput, SimDevice, Project, ScenarioEvent, EngineStatus, CrossAppFlow } from '../api';
 import ModalPortal from '../components/ModalPortal';
+import ScenarioEditorModal from '../components/ScenarioEditorModal';
 import RecorderModal from '../components/RecorderModal';
 import { Circle } from 'lucide-react';
 
@@ -17,22 +19,46 @@ const inputStyle: React.CSSProperties = {
   border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)',
   color: 'var(--text-primary)', padding: '9px 11px', fontSize: '0.88rem', fontFamily: 'inherit',
 };
-const labelStyle: React.CSSProperties = {
-  display: 'block', fontSize: '0.68rem', color: 'var(--text-muted)', textTransform: 'uppercase',
-  letterSpacing: '0.06em', marginBottom: 5, fontWeight: 600,
+
+/** Which app a scenario drives — read from its project, so it follows the data
+ *  rather than a naming convention. Cross-app SUITES are a separate concept: they
+ *  orchestrate several apps at once and live in cross_app_flows, not here. */
+type AppGroup = 'consumer' | 'business' | 'other';
+const groupOf = (projectName: string): AppGroup => {
+  const n = (projectName || '').toLowerCase();
+  if (n.includes('consumer')) return 'consumer';
+  if (n.includes('business') || n.includes('buisness')) return 'business';
+  return 'other';
+};
+const GROUP_META: Record<AppGroup, { label: string; hint: string; color: string }> = {
+  consumer: { label: 'Consumer app', hint: 'Diner journeys — booking, pre-order, wallet', color: '#34d399' },
+  business: { label: 'Business app', hint: 'Waiter and kitchen journeys on the iPad', color: '#60a5fa' },
+  other:    { label: 'Unassigned',   hint: 'No project set — pick one so it lands in a section', color: '#94a3b8' },
 };
 
-const empty = (): ScenarioInput => ({ name: '', description: '', project_id: '', device_id: '', steps: [] });
+const empty = (): ScenarioInput => ({ name: '', description: '', project_id: '', device_id: '', steps: [], covers: [] });
 
 export default function ScenariosPage() {
   const [scenarios, setScenarios] = useState<SavedScenario[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [sims, setSims] = useState<SimDevice[]>([]);
+  // Cross-app SUITES orchestrate consumer + waiter + kitchen together. They are not
+  // saved scenarios, so they get their own section rather than being invisible here.
+  const [flows, setFlows] = useState<CrossAppFlow[]>([]);
+  const [flowBusy, setFlowBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<{ id: string | null; data: ScenarioInput } | null>(null);
   const [running, setRunning] = useState<SavedScenario | null>(null);
   const [runAll, setRunAll] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [engine, setEngine] = useState<EngineStatus | null>(null);
+
+  useEffect(() => {
+    const tick = () => getEngineStatus().then(setEngine).catch(() => {});
+    tick();
+    const t = setInterval(tick, 8000);
+    return () => clearInterval(t);
+  }, []);
 
   // Scenarios that are fully configured and therefore runnable.
   const runnable = scenarios.filter(s => s.project_id && s.device_id && s.steps.length > 0);
@@ -44,6 +70,8 @@ export default function ScenariosPage() {
       try {
         const [s, p, d] = await Promise.all([getScenarios(), getProjects(), getScenarioDevices()]);
         setScenarios(s); setProjects(p); setSims(d.simulators);
+        // Suites are fetched separately so a flow-listing hiccup never blanks the page.
+        listCrossAppFlows().then(r => setFlows(r.flows)).catch(() => {});
       } catch { /* surfaced by empty state */ }
       setLoading(false);
     })();
@@ -64,6 +92,17 @@ export default function ScenariosPage() {
         <div>
           <h1 className="page-title">Scenarios</h1>
           <p className="page-subtitle">Build reusable step-by-step scenarios, pick a device, and run them on demand.</p>
+          {engine && (
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 14, marginTop: 8, fontSize: '0.78rem' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: engine.appium.healthy ? 'var(--success)' : '#fbbf24' }}>
+                <span style={{ width: 8, height: 8, borderRadius: 99, background: engine.appium.healthy ? 'var(--success)' : '#fbbf24', display: 'inline-block' }} />
+                Automation engine: {engine.appium.healthy ? 'ready' : 'will auto-start on run'}
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                {engine.booted_simulators.length ? `${engine.booted_simulators.length} sim booted` : 'no sim booted (auto-boots on run)'}
+              </span>
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
           {runnable.length > 1 && (
@@ -92,8 +131,22 @@ export default function ScenariosPage() {
           <div style={{ fontSize: '0.85rem' }}>Click <strong>New Scenario</strong> to build your first step-by-step flow.</div>
         </div>
       ) : (
+        <>
+        {(['consumer', 'business', 'other'] as AppGroup[]).map(gk => {
+          const meta = GROUP_META[gk];
+          const inGroup = scenarios.filter(s => groupOf(projName(s.project_id)) === gk);
+          if (inGroup.length === 0) return null;
+          return (
+          <section key={gk} style={{ marginBottom: 30 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12,
+                          borderLeft: `3px solid ${meta.color}`, paddingLeft: 10 }}>
+              <h2 style={{ margin: 0, fontSize: '1.02rem' }}>{meta.label}</h2>
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                {inGroup.length} scenario{inGroup.length === 1 ? '' : 's'} · {meta.hint}
+              </span>
+            </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
-          {scenarios.map(s => (
+          {inGroup.map(s => (
             <div key={s.id} className="card" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
                 <div>
@@ -114,17 +167,58 @@ export default function ScenariosPage() {
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', fontSize: '0.82rem', flex: 1, justifyContent: 'center' }}>
                   <Play size={13} /> Run
                 </button>
-                <button onClick={() => setEditing({ id: s.id, data: { name: s.name, description: s.description || '', project_id: s.project_id || '', bundle_id: s.bundle_id || '', device_id: s.device_id || '', steps: s.steps } })}
+                <button onClick={() => setEditing({ id: s.id, data: { name: s.name, description: s.description || '', project_id: s.project_id || '', bundle_id: s.bundle_id || '', device_id: s.device_id || '', steps: s.steps, covers: s.covers || [] } })}
                   title="Edit" style={iconBtn}><Pencil size={14} /></button>
                 <button onClick={() => onDelete(s)} title="Delete" style={{ ...iconBtn, color: 'var(--danger)' }}><Trash2 size={14} /></button>
               </div>
             </div>
           ))}
         </div>
+          </section>);
+        })}
+
+        {flows.length > 0 && (
+          <section style={{ marginBottom: 30 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 12,
+                          borderLeft: '3px solid #a78bfa', paddingLeft: 10 }}>
+              <h2 style={{ margin: 0, fontSize: '1.02rem' }}>Cross-app suites</h2>
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                {flows.length} suites · one journey across consumer, waiter and kitchen
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
+              {flows.map(f => (
+                <div key={f.id} className="card" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ fontWeight: 600, fontSize: '1rem' }}>
+                    {f.name}
+                    {f.edited && (
+                      <span style={{ marginLeft: 8, fontSize: '0.62rem', padding: '2px 7px', borderRadius: 20,
+                                     background: 'rgba(251,191,36,0.15)', color: '#fbbf24' }}>edited</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                    {f.segments.length} segment{f.segments.length === 1 ? '' : 's'} ·{' '}
+                    {f.segments.map(sg => sg.role).join(' → ')}
+                  </div>
+                  <button className="btn" disabled={!!flowBusy}
+                    onClick={async () => {
+                      setFlowBusy(f.id);
+                      try { await runCrossAppFlow(f.id, 'staging', 'tablet'); }
+                      finally { setFlowBusy(null); }
+                    }}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 14px', alignSelf: 'flex-start' }}>
+                    {flowBusy === f.id ? <Loader2 size={13} className="spin" /> : <Play size={13} />} Run suite
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        </>
       )}
 
       {editing && (
-        <ScenarioEditor
+        <ScenarioEditorModal
           initial={editing.data} isNew={editing.id === null} projects={projects} sims={sims}
           onClose={() => setEditing(null)}
           onSave={async (data) => {
@@ -155,100 +249,6 @@ const iconBtn: React.CSSProperties = {
 };
 
 // ── Editor ───────────────────────────────────────────────────────────────────
-function ScenarioEditor({ initial, isNew, projects, sims, onClose, onSave }: {
-  initial: ScenarioInput; isNew: boolean; projects: Project[]; sims: SimDevice[];
-  onClose: () => void; onSave: (d: ScenarioInput) => Promise<void>;
-}) {
-  const [data, setData] = useState<ScenarioInput>(initial);
-  const [newStep, setNewStep] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const set = (patch: Partial<ScenarioInput>) => setData(d => ({ ...d, ...patch }));
-  const addStep = () => { const s = newStep.trim(); if (!s) return; set({ steps: [...data.steps, s] }); setNewStep(''); };
-  const removeStep = (i: number) => set({ steps: data.steps.filter((_, idx) => idx !== i) });
-  const move = (i: number, dir: -1 | 1) => {
-    const j = i + dir; if (j < 0 || j >= data.steps.length) return;
-    const arr = [...data.steps]; [arr[i], arr[j]] = [arr[j], arr[i]]; set({ steps: arr });
-  };
-  const editStep = (i: number, v: string) => set({ steps: data.steps.map((s, idx) => idx === i ? v : s) });
-
-  const save = async () => {
-    if (!data.name.trim()) { setError('Give the scenario a name.'); return; }
-    setSaving(true); setError(null);
-    try { await onSave({ ...data, steps: data.steps.filter(s => s.trim()) }); }
-    catch (e: any) { setError(e?.message || 'Could not save.'); setSaving(false); }
-  };
-
-  return (
-    <ModalPortal onClose={onClose}>
-      <div style={overlay} onClick={onClose}>
-        <div className="card modal-pop" style={{ width: 640, maxWidth: '94vw', maxHeight: '90vh', overflowY: 'auto', padding: 28, position: 'relative' }} onClick={e => e.stopPropagation()}>
-          <button onClick={onClose} style={closeBtn}><X size={18} /></button>
-          <h3 style={{ margin: '0 0 18px' }}>{isNew ? 'New Scenario' : 'Edit Scenario'}</h3>
-
-          <div style={{ display: 'grid', gap: 14 }}>
-            <div>
-              <label style={labelStyle}>Name</label>
-              <input value={data.name} onChange={e => set({ name: e.target.value })} placeholder="e.g. Book table then cancel" style={inputStyle} />
-            </div>
-            <div>
-              <label style={labelStyle}>Description (optional)</label>
-              <input value={data.description || ''} onChange={e => set({ description: e.target.value })} placeholder="What this scenario checks" style={inputStyle} />
-            </div>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <div style={{ flex: 1 }}>
-                <label style={labelStyle}>App (project)</label>
-                <select value={data.project_id || ''} onChange={e => set({ project_id: e.target.value })} style={{ ...inputStyle, cursor: 'pointer' }}>
-                  <option value="">— select —</option>
-                  {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-              <div style={{ flex: 1 }}>
-                <label style={labelStyle}>Device (simulator)</label>
-                <select value={data.device_id || ''} onChange={e => set({ device_id: e.target.value })} style={{ ...inputStyle, cursor: 'pointer' }}>
-                  <option value="">— select —</option>
-                  {sims.map(s => <option key={s.udid} value={s.udid}>{s.name}{s.state === 'Booted' ? ' ● booted' : ''}</option>)}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label style={labelStyle}>Steps</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
-                {data.steps.length === 0 && <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>No steps yet — add plain-language steps below (e.g. “tap Book Table”, “select date”, “confirm”).</div>}
-                {data.steps.map((step, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <GripVertical size={14} color="var(--text-muted)" />
-                    <span style={{ width: 20, fontSize: '0.75rem', color: 'var(--text-muted)' }}>{i + 1}.</span>
-                    <input value={step} onChange={e => editStep(i, e.target.value)} style={{ ...inputStyle, flex: 1 }} />
-                    <button onClick={() => move(i, -1)} disabled={i === 0} style={stepBtn} title="Up"><ArrowUp size={13} /></button>
-                    <button onClick={() => move(i, 1)} disabled={i === data.steps.length - 1} style={stepBtn} title="Down"><ArrowDown size={13} /></button>
-                    <button onClick={() => removeStep(i)} style={{ ...stepBtn, color: 'var(--danger)' }} title="Remove"><X size={13} /></button>
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <input value={newStep} onChange={e => setNewStep(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addStep(); } }}
-                  placeholder="Add a step and press Enter" style={{ ...inputStyle, flex: 1 }} />
-                <button className="btn" onClick={addStep} style={{ padding: '9px 14px', display: 'inline-flex', alignItems: 'center', gap: 5 }}><Plus size={14} /> Add</button>
-              </div>
-            </div>
-
-            {error && <p style={{ color: 'var(--danger)', fontSize: '0.82rem', margin: 0 }}>{error}</p>}
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 4 }}>
-              <button onClick={onClose} style={{ ...iconBtn, width: 'auto', padding: '0 16px' }}>Cancel</button>
-              <button className="btn" onClick={save} disabled={saving} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 20px' }}>
-                {saving ? <Loader2 size={14} className="spin" /> : null} {isNew ? 'Create' : 'Save'}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </ModalPortal>
-  );
-}
-
 // ── Live run ─────────────────────────────────────────────────────────────────
 function RunModal({ scenario, projects, onClose }: { scenario: SavedScenario; projects: Project[]; onClose: () => void }) {
   const [envId, setEnvId] = useState(scenario.project_id || '');
@@ -423,8 +423,4 @@ const overlay: React.CSSProperties = {
 };
 const closeBtn: React.CSSProperties = {
   position: 'absolute', top: 16, right: 16, background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex',
-};
-const stepBtn: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 32,
-  background: 'transparent', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-secondary)', cursor: 'pointer',
 };

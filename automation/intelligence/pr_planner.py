@@ -30,17 +30,15 @@ def _changed_files(diff: str) -> List[str]:
 
 
 def _ollama_json(system: str, user: str) -> Dict[str, Any]:
-    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.getenv("LLM_MODEL_NAME", "llama3.2")
-    resp = httpx.post(
-        f"{base}/api/generate",
-        json={"model": model, "system": system, "prompt": user, "stream": False,
-              "format": "json", "options": {"temperature": 0.2, "num_predict": 1536}},
-        timeout=300,
-    )
-    resp.raise_for_status()
+    """PR-planning JSON via the configured provider (Groq by default) — same fast,
+    free path the rest of the platform uses, instead of a local Ollama."""
+    from automation.ai.provider import create_provider, default_config
     try:
-        return json.loads(resp.json().get("response", "{}"))
+        resp = create_provider(default_config).generate(
+            system, user, json_schema={}, max_tokens=1536, temperature=0.2)
+        raw = resp.content or "{}"
+        m = raw[raw.find("{"): raw.rfind("}") + 1] if "{" in raw else raw
+        return json.loads(m)
     except Exception:
         return {}
 
@@ -61,8 +59,30 @@ _SYSTEM = (
 )
 
 
+def _role_of(name: str, steps: List[str]) -> str:
+    """Classify a scenario into the cross-app role / app it runs on:
+    'consumer' (the diner app) vs the Business iPad app, split into 'kitchen' (marks orders
+    ready) and 'waiter' (books/assigns/serves/pays). NOTE: the restaurant is literally named
+    'NylaiKitchen2', so a bare 'kitchen' match would mis-tag every consumer scenario — match
+    the kitchen FLOW (mark-ready ids / 'kitchen mark' in the name) and Business-only ids."""
+    low_name = name.lower()
+    step_text = " ".join(steps or [])
+    KITCHEN_IDS = ("inProgressOrderCard", "orderReadyBtn", "orderCloseBtn", "completedOrderCard")
+    WAITER_IDS = ("AssignTableBtn", "T0AssignAnyBtn", "sendItemsBtn", "serveItemsBtn",
+                  "closeTableBtn", "notifyPaymentBtn", "modifyTable", "addItemsBtn",
+                  "signInBtn", "addNewEvent")
+    is_kitchen_flow = ("kitchen mark" in low_name or "kitchen:" in low_name
+                       or any(k in step_text for k in KITCHEN_IDS))
+    is_business = (low_name.startswith("business:") or "waiter" in low_name
+                   or is_kitchen_flow or any(k in step_text for k in WAITER_IDS))
+    if not is_business:
+        return "consumer"
+    return "kitchen" if is_kitchen_flow else "waiter"
+
+
 def plan_pr_tests(gh, owner: str, repo: str, pr_number: int,
-                  scenarios: List[Dict[str, Any]]) -> Dict[str, Any]:
+                  scenarios: List[Dict[str, Any]], project_id: str = None,
+                  ticket: Dict[str, Any] = None) -> Dict[str, Any]:
     """Build a test plan for a PR. `gh` is a GitHubIntegration; `scenarios` is a
     list of {id, name, description, steps} for the project."""
     meta = gh.fetch_pr_metadata(owner, repo, pr_number)
@@ -78,8 +98,21 @@ def plan_pr_tests(gh, owner: str, repo: str, pr_number: int,
         for s in scenarios
     ) or "(no saved scenarios yet)"
 
+    # The linked ticket is the clearest statement of INTENT available — a human wrote
+    # what the change is meant to achieve. Without it the planner had to infer intent
+    # from a title, an often-empty PR body and a file diff, while the ticket text sat
+    # unused on the PR page. Acceptance criteria decide what is worth verifying.
+    ticket_block = ""
+    if ticket and (ticket.get("description") or ticket.get("title")):
+        ticket_block = (
+            f"Linked ticket {ticket.get('key') or ''}: {ticket.get('title') or ''}\n"
+            f"{(ticket.get('description') or '')[:2000]}\n\n"
+            "Treat the ticket as the intended behaviour: prefer scenarios that verify it.\n\n"
+        )
+
     user = (
         f"PR #{pr_number}: {title}\n\n"
+        f"{ticket_block}"
         f"Description:\n{body or '(none)'}\n\n"
         f"Changed files ({len(files)}):\n" + "\n".join(files[:40]) + "\n\n"
         f"Available saved scenarios:\n{catalog}\n\n"
@@ -92,22 +125,53 @@ def plan_pr_tests(gh, owner: str, repo: str, pr_number: int,
         raise RuntimeError(f"Could not reach the local model ({e}). Start Ollama "
                            f"('ollama serve') and pull a model.")
 
-    # Keep only selections that reference real scenarios; attach the steps so the
-    # caller can run them without another lookup.
+    # Keep only AI selections that reference real scenarios.
     by_id = {s["id"]: s for s in scenarios}
-    selected = []
+    ai_selected = []
     for sel in (plan.get("selected_scenarios") or []):
         sc = by_id.get(sel.get("id"))
         if sc:
-            selected.append({"id": sc["id"], "name": sc["name"],
-                             "reason": sel.get("reason", ""), "steps": sc.get("steps", [])})
+            ai_selected.append({"id": sc["id"], "name": sc["name"],
+                                "reason": sel.get("reason", ""), "steps": sc.get("steps", [])})
+
+    # FORMAL graph-driven selection: affected files/modules from the dependency
+    # graph, then scenarios whose coverage touches them. This is deterministic; the
+    # AI is used for the narrative. Prefer the formal selection when we have a graph.
+    formal: Dict[str, Any] = {}
+    if project_id:
+        try:
+            from automation.intelligence.impact_selection import plan_impact
+            formal = plan_impact(project_id, files, scenarios)
+        except Exception as e:
+            logger.warning("formal impact selection failed: %s", e)
+
+    graph_driven = bool(formal.get("affected_modules"))
+    selected = formal.get("selected") if graph_driven else ai_selected
+    if not selected:
+        selected = ai_selected
+
+    # Cross-app verification is three DISTINCT roles — consumer, waiter, kitchen. Tag each
+    # selected path with its role and group them, so the plan reads as three separate paths
+    # (the app under test switches per role) instead of one lumped list.
+    for s in selected:
+        s["role"] = _role_of(s.get("name", ""), s.get("steps", []))
+    by_role: Dict[str, List[Dict[str, Any]]] = {"consumer": [], "waiter": [], "kitchen": []}
+    for s in selected:
+        by_role[s["role"]].append(s)
 
     return {
         "pr_number": pr_number, "title": title, "commit_sha": sha,
         "changed_files": files,
         "affected_areas": plan.get("affected_areas") or [],
+        "affected_modules": formal.get("affected_modules") or [],
+        "affected_files": formal.get("affected_files") or [],
+        "graph_driven": graph_driven,
         "summary": plan.get("summary") or "",
         "path_explanation": plan.get("path_explanation") or "",
         "missing_coverage": plan.get("missing_coverage") or "",
         "selected_scenarios": selected,
+        "by_role": by_role,   # cross-app verification split into consumer / waiter / kitchen
+        "skipped_scenarios": formal.get("skipped") or [],
+        "reduction_pct": formal.get("reduction_pct", 0.0),
+        "untagged_count": formal.get("untagged_count", 0),
     }

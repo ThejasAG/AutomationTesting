@@ -53,6 +53,13 @@ RN_KNOWN_FIXES: Dict[str, Dict[str, str]] = {
         "react-native-simple-toast": "1.1.1",
         # 2.32 compiles against a Yoga API that RN 0.68 does not ship.
         "react-native-gesture-handler": "2.9.0",
+        # 6.2+ imports `react-native-svg/css` (LocalSvg), which only exists in
+        # react-native-svg >= 13.7. Vya pins react-native-svg 12.5.1, so the JS
+        # bundle fails to resolve. 6.1.2 is the last release whose peer is
+        # react-native-svg ^12.1.0. NOTE: this conflict is a peer on
+        # react-native-svg, not on react-native, so the registry pass (which only
+        # reads the `react-native` peer range) can't see it — hence a curated pin.
+        "react-native-qrcode-svg": "6.1.2",
     },
 }
 
@@ -79,8 +86,13 @@ def _build_env() -> dict:
     not cosmetic.
     """
     env = os.environ.copy()
-    env.setdefault("LANG", "en_US.UTF-8")
-    env["LC_ALL"] = env.get("LC_ALL") or "en_US.UTF-8"
+    # setdefault is not enough: a daemon often passes LANG through as an EMPTY
+    # string rather than omitting it, and setdefault keeps the empty value.
+    # Treat empty as unset for all three — LC_ALL alone is enough for Ruby, but
+    # leaving the others blank makes this fragile to reorder later.
+    for var in ("LC_ALL", "LANG", "LC_CTYPE"):
+        if not env.get(var):
+            env[var] = "en_US.UTF-8"
     return env
 
 
@@ -812,6 +824,10 @@ class AppBuilder:
         compat = self.fix_rn_compatibility(repo_path)
         if compat.get("fixed"):
             logger.info(f"RN compatibility fixes applied: {compat['fixed']}")
+            # The on-disk fix is invisible to a Metro that is already running against
+            # the old module graph — kill it so ensure_metro cold-starts fresh and the
+            # app no longer red-boxes the module the fix just removed.
+            self._kill_metro_for_repo(repo_path)
         if not compat.get("ready_to_build", True):
             return BuildResult(
                 ok=False,
@@ -834,15 +850,29 @@ class AppBuilder:
             return BuildResult(ok=False, error=msg)
 
         derived = os.path.join(repo_path, "build", "ios")
+        head_file = os.path.join(derived, ".built_head")
+        cur_head = self._git_head(repo_path)
 
-        # Reuse a previous build unless a rebuild was explicitly requested.
+        # Reuse a previous build ONLY if the checkout hasn't changed since it was
+        # built. Reusing blindly (the old behaviour) silently shipped the stale
+        # binary after a `git pull` or a code edit — a re-prepare looked done but
+        # ran the previous version. Comparing the built commit to HEAD fixes that.
         if not force:
             existing = self._find_built_app(derived)
-            if existing:
-                logger.info(f"Reusing existing iOS build: {existing}")
+            built_head = None
+            try:
+                if os.path.exists(head_file):
+                    built_head = open(head_file).read().strip()
+            except Exception:
+                pass
+            if existing and cur_head and built_head == cur_head:
+                logger.info(f"Reusing iOS build (HEAD unchanged @ {cur_head[:8]})")
                 return BuildResult(
                     ok=True, artifact_path=existing, bundle_id=self._bundle_id(existing)
                 )
+            if existing:
+                logger.info(f"Rebuilding: checkout changed since last build "
+                            f"(built {str(built_head)[:8]} → now {str(cur_head)[:8]})")
 
         flag = "-workspace" if is_workspace else "-project"
 
@@ -892,7 +922,25 @@ class AppBuilder:
                 error="xcodebuild reported success but no .app was produced under "
                       f"{derived}/Build/Products/Debug-iphonesimulator.",
             )
+        # Record the commit this build was made from, so the next prepare can tell
+        # whether a rebuild is needed (see the reuse check above).
+        try:
+            if cur_head:
+                with open(head_file, "w") as f:
+                    f.write(cur_head)
+        except Exception:
+            pass
         return BuildResult(ok=True, artifact_path=app, bundle_id=self._bundle_id(app))
+
+    def _git_head(self, repo_path: str) -> Optional[str]:
+        """Current git commit SHA of the checkout, or None if not a git repo."""
+        try:
+            import subprocess
+            r = subprocess.run(["git", "-C", repo_path, "rev-parse", "HEAD"],
+                               capture_output=True, text=True, timeout=10)
+            return (r.stdout or "").strip() or None
+        except Exception:
+            return None
 
     def _is_complete_app(self, app: str) -> bool:
         """True only if *app* is installable — has an Info.plist with a bundle id
@@ -994,13 +1042,53 @@ class AppBuilder:
     # which serves the Consumer bundle. Each is pointed at its packager via the
     # RCT_jsLocation user-default. Extend as more RN apps are onboarded.
     _APP_METRO_PORTS = {
-        "org.vyapy.sarls.vyabusinessipad": 8082,   # Business app (iPad)
+        "org.vyapy.sarls.vyabusinessipad": 8082,          # Business app (iPad, prod)
+        "org.vyapy.sarls.vyabusinessipadstaging": 8083,   # Business app (iPad, staging)
+        "org.vyapy.sarls.vyaconsumerstaging": 8084,       # Consumer app (staging) — its
+        # own port so it never collides with the prod Consumer on 8081. Without this both
+        # resolve to 8081 and the Metro watchdog serves whichever it reaches first, so the
+        # staging app could load the prod bundle (and vice versa).
     }
 
     @classmethod
     def metro_port_for(cls, bundle_id: Optional[str]) -> int:
         """The Metro port an app's Debug build expects (8081 unless it runs its own)."""
         return cls._APP_METRO_PORTS.get(bundle_id or "", cls.METRO_PORT)
+
+    def _kill_metro_for_repo(self, repo_path: str) -> int:
+        """Kill any Metro bundler running out of *repo_path*.
+
+        Metro is a long-lived dev server that caches the module graph in memory. When
+        a build downgrades a dependency (e.g. react-native-qrcode-svg 6.3.x → 6.1.2 to
+        drop the `react-native-svg/css` import), a Metro started against the OLD tree
+        keeps resolving the removed module and the app red-boxes 'Unable to resolve
+        module react-native-svg/css' — the fix is applied on disk but the running
+        packager never sees it. Killing it forces the next ensure_metro() to cold-start
+        against the corrected node_modules. Returns how many processes were killed.
+        """
+        import signal as _signal
+        repo_path = os.path.abspath(repo_path)
+        killed = 0
+        try:
+            pids = subprocess.run(
+                ["pgrep", "-f", "react-native start"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.split()
+        except Exception:
+            return 0
+        for pid in pids:
+            try:
+                cwd = subprocess.run(
+                    ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                    capture_output=True, text=True, timeout=10,
+                ).stdout
+                if repo_path in cwd:
+                    os.kill(int(pid), _signal.SIGTERM)
+                    killed += 1
+                    logger.info(f"Reset Metro (pid {pid}) for {repo_path} after a dependency fix")
+            except Exception:
+                continue
+        return killed
 
     def _metro_running(self, port: int = METRO_PORT) -> bool:
         """True only once Metro on *port* can actually SERVE, not merely once it has
@@ -1048,6 +1136,7 @@ class AppBuilder:
                 logger.warning("Could not set RCT_jsLocation for %s: %s", bundle_id, e)
 
         if self._metro_running(port):
+            self._warm_metro_bundle(port)   # ensure the JS bundle is actually servable
             return True, f"Metro already running on :{port}."
 
         logger.info(f"Starting Metro bundler in {repo_path} on :{port}")
@@ -1058,7 +1147,11 @@ class AppBuilder:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
-                env=dict(_build_env(), RCT_METRO_PORT=str(port)),
+                # Vya's JS bundle is ~18MB; Metro's default ~2GB Node heap OOMs while
+                # building it ("FATAL ERROR: Reached heap limit"), leaving the port up
+                # but serving 0 bytes → the app red-screens. Give Node a bigger heap.
+                env=dict(_build_env(), RCT_METRO_PORT=str(port),
+                         NODE_OPTIONS="--max-old-space-size=8192"),
                 start_new_session=True,  # survive the request/agent that spawned it
             )
         except FileNotFoundError:
@@ -1070,6 +1163,11 @@ class AppBuilder:
         import time as _time
         for _ in range(60):
             if self._metro_running(port):
+                # Port is up, but a DEBUG build fetches the JS bundle on launch —
+                # if we launch the app before Metro has BUILT the bundle it shows
+                # the red "Could not connect to development server" screen. Wait
+                # for (and warm) the bundle so the app loads the real UI first try.
+                self._warm_metro_bundle(port)
                 return True, f"Metro started on :{port}."
             _time.sleep(1)
 
@@ -1077,6 +1175,26 @@ class AppBuilder:
             f"Metro did not come up on :{port} within 60s. A Debug build "
             f"cannot load its JS bundle without it."
         )
+
+    def _warm_metro_bundle(self, port: int, timeout: int = 120) -> bool:
+        """Block until Metro can actually serve the JS bundle (HTTP 200), building
+        it if needed. Prevents the app from launching before the bundle is ready
+        (the red 'Could not connect to development server' screen)."""
+        import time as _time
+        import urllib.request
+        url = (f"http://localhost:{port}/index.bundle"
+               f"?platform=ios&dev=true&minify=false")
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=timeout) as r:
+                    if r.status == 200:
+                        logger.info("Metro bundle is servable on :%s", port)
+                        return True
+            except Exception:
+                _time.sleep(2)
+        logger.warning("Metro bundle not confirmed servable on :%s within %ss", port, timeout)
+        return False
 
     # ── Install / launch ─────────────────────────────────────────────────────
 
@@ -1164,6 +1282,66 @@ class AppBuilder:
             f"falling back to {pick['name']}"
         )
 
+    APPIUM_URL = "http://127.0.0.1:4723"
+
+    def _appium_healthy(self, url: Optional[str] = None, timeout: int = 4) -> bool:
+        """True only if Appium answers /status promptly. A wedged WebDriverAgent
+        leaves the server unresponsive, which is what makes 'the device stop
+        working' — so a plain timeout here is the signal to recover."""
+        from urllib.request import urlopen
+        try:
+            with urlopen(f"{(url or self.APPIUM_URL).rstrip('/')}/status", timeout=timeout) as r:
+                return r.status == 200
+        except Exception:
+            return False
+
+    def _clear_stuck_appium(self) -> None:
+        """Kill a wedged Appium + its WebDriverAgent so a fresh one can start."""
+        try:
+            subprocess.run(["pkill", "-9", "-f", "appium"], timeout=10)
+        except Exception:
+            pass
+        # WDA runs xcodebuild + serves on 8100; clear both.
+        for cmd in (["pkill", "-9", "-f", "WebDriverAgent"],
+                    ["pkill", "-9", "-f", "xcodebuild.*WebDriverAgent"]):
+            try:
+                subprocess.run(cmd, timeout=10)
+            except Exception:
+                pass
+
+    def ensure_appium(self, url: Optional[str] = None) -> Tuple[bool, str]:
+        """Make sure a healthy Appium is running — restarting a wedged one.
+
+        If Appium already answers, use it (no-op). If it is unresponsive (a stuck
+        WDA), clear it and start a fresh server, then wait for it. This is what
+        makes runs self-heal instead of hanging on 'device not working'.
+        """
+        url = url or self.APPIUM_URL
+        if self._appium_healthy(url):
+            return True, "Appium is running."
+
+        logger.warning("Appium unresponsive at %s — clearing the stuck server/WDA and restarting.", url)
+        self._clear_stuck_appium()
+        import time as _t
+        _t.sleep(2)
+        try:
+            subprocess.Popen(["appium"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, start_new_session=True, env=_build_env())
+        except FileNotFoundError:
+            try:
+                subprocess.Popen(["npx", "appium"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 stdin=subprocess.DEVNULL, start_new_session=True, env=_build_env())
+            except Exception:
+                return False, "Appium is not installed / not on PATH — run 'npm i -g appium'."
+        except Exception as e:
+            return False, f"Could not start Appium: {e}"
+
+        for _ in range(60):
+            if self._appium_healthy(url):
+                return True, "Appium was stuck — restarted it, now healthy."
+            _t.sleep(1)
+        return False, "Appium did not come back up within 60s."
+
     def ensure_ios_booted(self, device_id: str) -> Tuple[bool, str]:
         """Boot the simulator if it is shut down.
 
@@ -1192,6 +1370,58 @@ class AppBuilder:
         except Exception:
             pass
 
+    def app_version(self, app_path: str) -> Dict[str, Optional[str]]:
+        """Version as the ARTIFACT declares it — read from its own Info.plist.
+
+        Reported so a deploy states what it actually put on the device, rather than
+        leaving you to trust that "installed" meant the build you expected.
+        """
+        out: Dict[str, Optional[str]] = {"version": None, "build": None, "name": None}
+        try:
+            with open(os.path.join(app_path, "Info.plist"), "rb") as f:
+                p = plistlib.load(f)
+            out["version"] = p.get("CFBundleShortVersionString")
+            out["build"] = p.get("CFBundleVersion")
+            out["name"] = p.get("CFBundleDisplayName") or p.get("CFBundleName")
+        except Exception as e:
+            logger.warning("Could not read version from %s: %s", app_path, e)
+        return out
+
+    def installed_version(self, device_id: str, bundle_id: str) -> Dict[str, Optional[str]]:
+        """Version currently ON the device, so a deploy can report old -> new."""
+        try:
+            ok, out = _run(["xcrun", "simctl", "get_app_container",
+                            device_id, bundle_id, "app"], timeout=30)
+            path = (out or "").strip().splitlines()[-1] if ok and out else ""
+            if path and os.path.exists(path):
+                return self.app_version(path)
+        except Exception as e:
+            logger.debug("installed_version(%s): %s", bundle_id, e)
+        return {"version": None, "build": None, "name": None}
+
+    def uninstall(self, device_id: str, bundle_id: str, platform: str = "ios") -> Tuple[bool, str]:
+        """Remove the app (and ALL its data) from the device.
+
+        Used to isolate one test run from the next: without it every run inherits the
+        previous run's login, cache and half-finished screens — which is how a leftover
+        'Select A Table' modal silently broke every later run for hours.
+
+        NOTE the trade-off: a wiped app comes back at FIRST-RUN — onboarding carousel,
+        signed out. Scenarios that assume a signed-in app cannot pass after this, so it
+        is opt-in (see FRESH_INSTALL_PER_JOB) until a first-run preamble exists.
+        """
+        if not bundle_id:
+            return False, "No bundle id — nothing to uninstall."
+        if platform == "ios":
+            ok, out = _run(["xcrun", "simctl", "uninstall", device_id, bundle_id], timeout=120)
+        else:
+            ok, out = _run(["adb", "-s", device_id, "uninstall", bundle_id], timeout=120)
+        # Uninstalling something that is not installed is success, not an error.
+        if not ok and ("not installed" in (out or "").lower()
+                       or "unknown package" in (out or "").lower()):
+            return True, f"{bundle_id} was not installed"
+        return ok, (out if not ok else f"Uninstalled {bundle_id}")
+
     def install(self, device_id: str, artifact: str, platform: str) -> Tuple[bool, str]:
         """Install the built artifact onto the simulator/device."""
         if not artifact or not os.path.exists(artifact):
@@ -1212,11 +1442,37 @@ class AppBuilder:
             return False, out
         return ok, out if not ok else f"Installed {os.path.basename(artifact)}"
 
+    def _configure_ios_location(self, device_id: str, bundle_id: str) -> None:
+        """Grant location permission + pin a fixed simulator location before launch.
+
+        The Vya apps gate their home list on device GPS (restaurants are shown by
+        distance). A fresh install with no location permission — or a sim set to a
+        moving 'City Run' route — yields empty coordinates, so the app sends a null
+        location and the backend returns ZERO restaurants (looks broken but isn't).
+        Pinning coordinates near the test data (Bangalore by default; override with
+        VYA_SIM_LAT / VYA_SIM_LON) makes location-gated screens populate. Best-effort
+        and never fatal to the launch.
+        """
+        lat = os.getenv("VYA_SIM_LAT", "12.9987")   # Bangalore Palace — where the
+        lon = os.getenv("VYA_SIM_LON", "77.5920")   # Vya test restaurants live
+        try:
+            _run(["xcrun", "simctl", "privacy", device_id, "grant", "location", bundle_id],
+                 timeout=20)
+        except Exception as e:
+            logger.debug(f"grant location failed (non-fatal): {e}")
+        try:
+            _run(["xcrun", "simctl", "location", device_id, "set", f"{lat},{lon}"], timeout=20)
+            logger.info(f"Pinned sim {device_id[:8]} location to {lat},{lon} for {bundle_id}")
+        except Exception as e:
+            logger.debug(f"set location failed (non-fatal): {e}")
+
     def launch(self, device_id: str, bundle_id: str, platform: str) -> Tuple[bool, str]:
         """Launch the installed app so it is visible on screen / in the stream."""
         if not bundle_id:
             return False, "No bundle id available to launch."
         if platform == "ios":
+            # Ensure location-gated screens (restaurant lists) have real coordinates.
+            self._configure_ios_location(device_id, bundle_id)
             ok, out = _run(
                 ["xcrun", "simctl", "launch", device_id, bundle_id], timeout=INSTALL_TIMEOUT
             )
@@ -1230,3 +1486,45 @@ class AppBuilder:
 
 
 app_builder = AppBuilder()
+
+
+def start_metro_watchdog(interval: int = 25) -> None:
+    """Keep each RN app's Metro packager alive so the app never shows the red
+    'No bundle URL present' / 'Could not connect' screen after Metro dies.
+
+    Every *interval* seconds it checks every cloned JS project's Metro port and
+    restarts it if down — so the user never has to start Metro by hand.
+    """
+    import threading
+    import time as _time
+
+    def _loop():
+        # Small delay so the DB / repos are ready after startup.
+        _time.sleep(8)
+        while True:
+            try:
+                from automation.database.config import SessionLocal
+                from automation.database.models import TestProject
+                from automation.projects.repository import repository_manager
+                with SessionLocal() as db:
+                    projects = db.query(TestProject).all()
+                for p in projects:
+                    try:
+                        repo = repository_manager.get_repo_path(p.id)
+                        if not repo or not os.path.exists(os.path.join(repo, "package.json")):
+                            continue
+                        # Only manage RN apps we actually test (a bundle id set).
+                        if not p.app_bundle_id:
+                            continue
+                        port = app_builder.metro_port_for(p.app_bundle_id)
+                        if not app_builder._metro_running(port):
+                            logger.info("Metro watchdog: :%s down for '%s' — restarting", port, p.name)
+                            app_builder.ensure_metro(repo, bundle_id=p.app_bundle_id)
+                    except Exception as e:
+                        logger.debug("metro watchdog (project %s): %s", getattr(p, "id", "?"), e)
+            except Exception as e:
+                logger.debug("metro watchdog cycle failed: %s", e)
+            _time.sleep(interval)
+
+    threading.Thread(target=_loop, daemon=True).start()
+    logger.info("Metro watchdog started — keeps RN packagers alive every %ss.", interval)

@@ -1,0 +1,20 @@
+RUN_ID 04439afa-0890-407d-9378-644523412727
+prewarm session DA24A392-FF1B-4283-A5CE-CDDE0D000D21 failed (will create lazily): Message: An unknown server-side error occurred while processing the command. Original error: Could not proxy command to the remote server. Original error: socket hang up
+Stacktrace:
+UnknownError: An unknown server-side error occurred while processing the command. Original error: Could not proxy command to the remote server. Original error: socket hang up
+    at JWProxy.command (/Users/roops/.appium/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/jsonwp-proxy/proxy.js:359:13)
+    at processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at XCUITestDriver.proxyCommand (/Users/roops/.appium/node_modules/appium-xcuitest-driver/lib/commands/proxy-helper.js:100:35)
+    at XCUITestDriver.mobileActivateApp (/Users/roops/.appium/node_modules/appium-xcuitest-driver/lib/commands/app-management.js:147:5)
+    at XCUITestDriver.executeMethod (/Users/roops/.nvm/versions/node/v20.19.0/lib/node_modules/appium/node_modules/@appium/base-driver/lib/basedriver/commands/execute.ts:53:12)
+    at XCUITestDriver.execute (/Users/roops/.appium/node_modules/appium-xcuitest-driver/lib/commands/execute.js:117:14)
+    at runCommandPromise (/Users/roops/.nvm/versions/node/v20.19.0/lib/node_modules/appium/node_modules/@appium/base-driver/lib/basedriver/driver.ts:127:16)
+[553s] «C-App: book a table (Any · 1 hr)» ▶ open app
+[559s] «C-App: book a table (Any · 1 hr)» ▶ @consumer_home
+[571s] «C-App: book a table (Any · 1 hr)» ▶ click NylaiKitchen2
+[709s] «C-App: book a table (Any · 1 hr)» ▶ select Any
+[715s] «C-App: book a table (Any · 1 hr)» ▶ select 1 hr
+[721s] «C-App: book a table (Any · 1 hr)» ▶ @first_time_slot
+[733s] «C-App: book a table (Any · 1 hr)» [ok] @first_time_slot — no time chip visible; booking proceeds without a slot
+[733s] «C-App: book a table (Any · 1 hr)» ▶ click bookAppoitment
+DONE status=passed after 739s

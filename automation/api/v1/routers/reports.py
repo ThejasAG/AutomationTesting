@@ -9,12 +9,11 @@ use). Reports are stored on the run and can be regenerated or exported.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from automation.auth.security import get_current_user
@@ -31,6 +30,64 @@ def _scenarios(db: Session, run_id: str) -> List[ScenarioResult]:
             .order_by(ScenarioResult.scenario_num).all())
 
 
+def _fmt_duration(ms: Optional[int]) -> str:
+    """Human duration like the sample report ('32m', '1h 04m', '45s')."""
+    if not ms or ms <= 0:
+        return "—"
+    secs = int(ms / 1000)
+    if secs < 60:
+        return f"{secs}s"
+    mins, s = divmod(secs, 60)
+    if mins < 60:
+        return f"{mins}m" if s < 10 else f"{mins}m {s:02d}s"
+    hrs, m = divmod(mins, 60)
+    return f"{hrs}h {m:02d}m"
+
+
+@router.get("/{run_id}/rich", response_class=HTMLResponse)
+def rich_report(run_id: str, screenshots: int = 1, db: Session = Depends(get_db),
+                current_user=Depends(get_current_user)):
+    """Standalone, styled HTML report for a run — summary cards, per-scenario
+    rows, and the pre/post-payment VAT tables parsed from each scenario's
+    validation reasons. Print-to-PDF from the browser (matches the sample).
+
+    screenshots=1 (default) embeds failure screenshots for the on-screen view;
+    pass screenshots=0 for an image-free copy (used when downloading/exporting)."""
+    from automation.reporting.scenario_report import records_from_rows, render_run_report
+    r = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+    rows = _scenarios(db, run_id)
+    records = records_from_rows(rows)
+
+    device = r.device_name or "—"
+    platform = r.platform or "—"
+    duration = _fmt_duration(r.duration_ms)
+    subtitle_bits = [f"Device: {device}", f"Platform: {platform}", f"Duration: {duration}"]
+    if r.branch:
+        subtitle_bits.append(f"Branch: {r.branch}")
+    title = f"Vya Mobile Automation — {r.test_name or 'Test Report'}"
+    html = render_run_report(
+        records, title=title, subtitle="  ·  ".join(subtitle_bits),
+        duration=duration, validation_header="Bill &amp; VAT Validation",
+        include_screenshots=bool(screenshots))
+    return HTMLResponse(content=html)
+
+
+def _verdict(status: str, scenarios_total: int) -> str:
+    """Honest verdict. A run that executed ZERO scenarios verified nothing — it is
+    NOT a pass, no matter what the run row says. That distinction stops a build-only
+    run from masquerading as a validated pass."""
+    s = (status or "").lower()
+    if s in ("failed", "error"):
+        return "failed"
+    if scenarios_total == 0:
+        return "no-tests"          # built/ran but nothing was actually tested
+    if s in ("passed", "completed"):
+        return "passed"
+    return s or "unknown"
+
+
 def _run_summary(db: Session, r: TestRun) -> Dict[str, Any]:
     scs = _scenarios(db, r.id)
     passed = sum(1 for s in scs if (s.status or "").upper() in ("PASS", "PASSED"))
@@ -39,6 +96,7 @@ def _run_summary(db: Session, r: TestRun) -> Dict[str, Any]:
         "test_name": r.test_name,
         "test_suite": r.test_suite,
         "status": r.status,
+        "verdict": _verdict(r.status, len(scs)),
         "device_name": r.device_name,
         "platform": r.platform,
         "branch": r.branch,
@@ -123,6 +181,37 @@ def trends(days: int = 30, db: Session = Depends(get_db),
     }
 
 
+@router.get("/config")
+def report_config(current_user=Depends(get_current_user)):
+    """Which integrations are configured (so the UI shows the right buttons)."""
+    from automation.notifications import dispatch
+    return dispatch.status()
+
+
+@router.get("/golden-run")
+def golden_run(db: Session = Depends(get_db),
+               current_user=Depends(get_current_user)):
+    """Demo mode: the pinned known-GREEN run to fall back to if a live run blips.
+    Reads logs/golden_run.txt (written after a clean run); if that's missing/stale it
+    falls back to the most recent passed run. Public so a demo screen can hit it."""
+    import os
+    rid = None
+    try:
+        p = os.path.join("logs", "golden_run.txt")
+        if os.path.isfile(p):
+            rid = (open(p, encoding="utf-8").read().strip() or None)
+    except Exception:
+        pass
+    if rid and not db.query(TestRun).filter(TestRun.id == rid).first():
+        rid = None                     # stale pin — the run was deleted
+    if not rid:
+        r = (db.query(TestRun).filter(TestRun.status == "passed")
+             .order_by(TestRun.created_at.desc()).first())
+        rid = r.id if r else None
+    return {"run_id": rid,
+            "report_url": (f"/api/v1/reports/{rid}/rich" if rid else None)}
+
+
 @router.get("/{run_id}")
 def get_report(run_id: str, db: Session = Depends(get_db),
                current_user=Depends(get_current_user)):
@@ -150,27 +239,57 @@ def get_report(run_id: str, db: Session = Depends(get_db),
     }
 
 
-def _ollama_prose(system: str, user: str) -> str:
-    """Local Ollama call for a prose narrative (no JSON formatting)."""
-    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.getenv("LLM_MODEL_NAME", "llama3.2")
-    resp = httpx.post(
-        f"{base}/api/generate",
-        json={"model": model, "system": system, "prompt": user, "stream": False,
-              "options": {"temperature": 0.3, "num_predict": 1024}},
-        timeout=300,
-    )
-    resp.raise_for_status()
-    return resp.json().get("response", "").strip()
+def _prose(system: str, user: str) -> str:
+    """Generate a prose narrative via the configured provider (Groq by default).
+
+    Routes through the same fast/free provider the rest of the platform uses,
+    so cross-app and single-app reports no longer depend on a local Ollama.
+    """
+    from automation.ai.provider import create_provider, default_config
+    resp = create_provider(default_config).generate(
+        system, user, max_tokens=1024, temperature=0.3)
+    return (resp.content or "").strip()
 
 
 _SYSTEM = (
     "You are a senior QA engineer writing a concise, professional test report. "
     "Write in clear plain English for a mixed technical/non-technical audience. "
     "Use short paragraphs and, where useful, bullet points. Do not invent facts — "
-    "use only the data given. Structure: 1) Outcome summary, 2) What was tested, "
-    "3) What passed/failed and why, 4) Recommended next steps."
+    "use only the data given. CRITICAL HONESTY RULE: if ZERO scenarios ran, the run "
+    "verified NOTHING — you must state plainly that this is NOT a validated pass and "
+    "that no functionality was actually tested (the app may have only been built). "
+    "Never imply a fix works, or a feature is fine, when no scenarios ran. "
+    "Structure: 1) Outcome summary, 2) What was tested, 3) What passed/failed and why, "
+    "4) Recommended next steps."
 )
+
+
+@router.post("/{run_id}/jira")
+def file_jira(run_id: str, db: Session = Depends(get_db),
+              current_user=Depends(get_current_user)):
+    """File a Jira bug for a failed run, with the RCA in the description."""
+    from automation.notifications import dispatch
+    if not dispatch.jira_enabled():
+        raise HTTPException(status_code=400, detail="Jira is not configured (set JIRA_URL/EMAIL/TOKEN/PROJECT_KEY).")
+    r = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Run not found")
+    rca = db.query(RCAReport).filter(RCAReport.run_id == run_id).first()
+    desc = [f"Run: {r.test_name}", f"Suite: {r.test_suite}", f"Status: {r.status}",
+            f"Device: {r.device_name} ({r.platform})"]
+    if r.error_message:
+        desc.append(f"Error: {r.error_message}")
+    if rca and rca.root_cause:
+        desc.append(f"Root cause: {rca.root_cause}")
+        if rca.suggested_fix:
+            desc.append(f"Suggested fix: {rca.suggested_fix}")
+    if r.report_summary:
+        desc.append(f"\n{r.report_summary}")
+    key = dispatch.create_jira_ticket(
+        summary=f"[QA] {r.test_name} — {r.status}"[:200], description="\n".join(desc))
+    if not key:
+        raise HTTPException(status_code=502, detail="Could not create the Jira ticket (check Jira config/credentials).")
+    return {"key": key, "url": dispatch.jira_browse_url(key)}
 
 
 @router.post("/{run_id}/generate")
@@ -189,7 +308,9 @@ def generate_report(run_id: str, db: Session = Depends(get_db),
         f"Device: {r.device_name} ({r.platform})",
         f"Branch: {r.branch or '-'}  Commit: {(r.commit_sha or '-')[:10]}",
         f"Duration: {round((r.duration_ms or 0)/1000, 1)}s",
-        f"Scenarios: {passed}/{len(scs)} passed" if scs else "Scenarios: (none recorded)",
+        (f"Scenarios executed: {passed}/{len(scs)} passed" if scs else
+         "Scenarios executed: 0 — NOTHING WAS ACTUALLY TESTED. The run may have only "
+         "built the app. This is NOT a validated pass; report it as such."),
     ]
     if r.error_message:
         lines.append(f"Error: {r.error_message[:500]}")
@@ -204,12 +325,12 @@ def generate_report(run_id: str, db: Session = Depends(get_db),
             lines.append(f"Suggested fix: {rca.suggested_fix}")
 
     try:
-        narrative = _ollama_prose(_SYSTEM, "Write the test report from this data:\n\n" + "\n".join(lines))
+        narrative = _prose(_SYSTEM, "Write the test report from this data:\n\n" + "\n".join(lines))
     except Exception as e:
         raise HTTPException(
             status_code=502,
-            detail=f"Could not reach the local Ollama model ({e}). Start it with 'ollama serve' "
-                   f"and pull a model (e.g. 'ollama pull llama3.2').",
+            detail=f"Could not generate the report narrative ({e}). "
+                   f"Check the AI provider config (LLM_API_BASE / OPENAI_API_KEY).",
         )
     if not narrative:
         raise HTTPException(status_code=502, detail="The model returned an empty report.")

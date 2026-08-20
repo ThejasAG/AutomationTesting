@@ -33,7 +33,9 @@ export const LoginPage: React.FC = () => {
       }
 
       const data = await response.json();
-      setAuthToken(data.access_token);
+      // Keep the refresh token too — it is what lets the session outlive the
+      // 30-minute access token instead of dumping you back here mid-task.
+      setAuthToken(data.access_token, data.refresh_token);
       localStorage.setItem('role', data.role);
       
       navigate('/');

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { X, Play, Loader2, Smartphone, Users, Info } from 'lucide-react';
-import { getCrossAppConfig, runCrossAppSuite } from '../api';
-import type { CrossAppConfig } from '../api';
+import { X, Play, Loader2, Smartphone, Users, Info, GitBranch, ChevronDown, ChevronRight, Pencil, Plus } from 'lucide-react';
+import FlowEditorModal from './FlowEditorModal';
+import { getCrossAppConfig, runCrossAppSuite, listCrossAppFlows, runCrossAppFlow, runAllCrossAppFlows } from '../api';
+import type { CrossAppConfig, CrossAppFlow, FlowEnv, BusinessDevice } from '../api';
 import ModalPortal from './ModalPortal';
 
 type Role = 'consumer' | 'waiter' | 'kitchen';
@@ -25,6 +26,13 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
   const [hasPw, setHasPw] = useState<Record<Role, boolean>>({ consumer: false, waiter: false, kitchen: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [flows, setFlows] = useState<CrossAppFlow[]>([]);
+  // null = closed; {flow: null} = create a new flow; {flow: f} = edit f
+  const [editing, setEditing] = useState<{ flow: CrossAppFlow | null } | null>(null);
+  const [flowBusy, setFlowBusy] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [env, setEnv] = useState<FlowEnv>('staging');
+  const [bizDevice, setBizDevice] = useState<BusinessDevice>('tablet');
 
   useEffect(() => {
     getCrossAppConfig()
@@ -35,7 +43,36 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
         setHasPw({ consumer: c.credentials.consumer.has_password, waiter: c.credentials.waiter.has_password, kitchen: c.credentials.kitchen.has_password });
       })
       .catch(e => setError(e?.message || 'Could not load config'));
+    reloadFlows();
   }, []);
+
+  const reloadFlows = () => { listCrossAppFlows().then(r => setFlows(r.flows)).catch(() => {}); };
+
+  const startFlow = async (id: string) => {
+    setFlowBusy(id); setError(null);
+    try {
+      const r = await runCrossAppFlow(id, env, bizDevice);
+      onStarted(r.run_id);
+    } catch (e: any) {
+      setError(e?.message || 'Could not start the flow');
+    } finally {
+      // Always clear busy — otherwise EVERY Run button stays disabled (disabled={!!flowBusy})
+      // after a start, so the modal's Run buttons become unclickable until it's reopened.
+      setFlowBusy(null);
+    }
+  };
+  const startAll = async () => {
+    setFlowBusy('__all__'); setError(null);
+    try {
+      await runAllCrossAppFlows(env);
+      onClose();   // runs stream into the dashboard; close the dialog
+    } catch (e: any) {
+      setError(e?.message || 'Could not start all flows');
+      setFlowBusy(null);
+    }
+  };
+  const roleColor = (role: string) =>
+    role === 'consumer' ? '#3182ce' : role === 'kitchen' ? '#dd6b20' : '#805ad5';
 
   const sameWK = devices.waiter && devices.waiter === devices.kitchen;
 
@@ -78,6 +115,102 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
           Assign each role to a simulator and set the logins. Waiter and kitchen on the <strong>same</strong> device
           switch accounts on that device; on <strong>different</strong> devices they run as two Business instances.
         </p>
+
+        {flows.length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+              <GitBranch size={16} color="var(--accent-primary)" />
+              <strong style={{ fontSize: '0.9rem' }}>Major flows</strong>
+              {/* Environment selector: New Staging (STG-* apps) vs Old Vya (prod) */}
+              <div style={{ display: 'inline-flex', border: '1px solid var(--border-color)', borderRadius: 20, overflow: 'hidden', marginLeft: 4 }}>
+                {(['staging', 'prod'] as FlowEnv[]).map(e => (
+                  <button key={e} onClick={() => setEnv(e)}
+                    style={{
+                      padding: '4px 12px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', border: 'none',
+                      background: env === e ? 'var(--accent-primary)' : 'transparent',
+                      color: env === e ? '#fff' : 'var(--text-secondary)',
+                    }}>
+                    {e === 'staging' ? 'New Staging' : 'Old Vya'}
+                  </button>
+                ))}
+              </div>
+              {/* B-app device: run the waiter + kitchen roles on the iPad (tablet) or iPhone (phone) */}
+              <div title="Which device runs the B-app (waiter + kitchen)" style={{ display: 'inline-flex', border: '1px solid var(--border-color)', borderRadius: 20, overflow: 'hidden', marginLeft: 4 }}>
+                {(['tablet', 'phone'] as BusinessDevice[]).map(dv => (
+                  <button key={dv} onClick={() => setBizDevice(dv)}
+                    style={{
+                      padding: '4px 12px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', border: 'none',
+                      background: bizDevice === dv ? 'var(--accent-primary)' : 'transparent',
+                      color: bizDevice === dv ? '#fff' : 'var(--text-secondary)',
+                    }}>
+                    {dv === 'tablet' ? '🖥️ Tablet' : '📱 Phone'}
+                  </button>
+                ))}
+              </div>
+              <button className="btn" onClick={() => setEditing({ flow: null })}
+                title="Build a new cross-app flow from scratch"
+                style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 12px', fontSize: '0.76rem' }}>
+                <Plus size={13} /> New flow
+              </button>
+              <button className="btn" onClick={startAll} disabled={!!flowBusy}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 12px', fontSize: '0.76rem' }}>
+                {flowBusy === '__all__' ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={13} />} Run all
+              </button>
+            </div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: 10 }}>
+              Target: <strong style={{ color: 'var(--text-secondary)' }}>{env === 'staging' ? 'STG-VyaConsumer + STG-VyaBusiness (staging)' : 'Vya Consumer + Vya Business (prod)'}</strong>
+              {' · '}B-app on <strong style={{ color: 'var(--text-secondary)' }}>{bizDevice === 'tablet' ? '🖥️ iPad' : '📱 iPhone 16'}</strong>
+            </div>
+            {flows.map(f => (
+              <div key={f.id} style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: '10px 12px', marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <button onClick={() => setExpanded(expanded === f.id ? null : f.id)}
+                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex', padding: 0 }}>
+                    {expanded === f.id ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                  </button>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '0.86rem', fontWeight: 600 }}>{f.name}</div>
+                    <div style={{ display: 'flex', gap: 4, marginTop: 5, flexWrap: 'wrap' }}>
+                      {f.segments.map(s => (
+                        <span key={s.num} title={s.name}
+                          style={{ fontSize: '0.62rem', padding: '2px 7px', borderRadius: 20, color: '#fff', background: roleColor(s.role) }}>
+                          {s.num}. {s.role}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  {f.edited && (
+                    <span title="A saved edit is overriding the built-in definition"
+                      style={{ fontSize: '0.62rem', padding: '2px 7px', borderRadius: 20, background: 'rgba(251,191,36,0.15)', color: '#fbbf24' }}>
+                      edited
+                    </span>
+                  )}
+                  <button className="btn" onClick={() => setEditing({ flow: f })} title="Edit this flow's segments and steps"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 12px', fontSize: '0.8rem' }}>
+                    <Pencil size={13} /> Edit
+                  </button>
+                  <button className="btn" onClick={() => startFlow(f.id)} disabled={!!flowBusy}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', fontSize: '0.8rem' }}>
+                    {flowBusy === f.id ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={13} />} Run
+                  </button>
+                </div>
+                {expanded === f.id && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border-color)' }}>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginBottom: 10 }}>{f.description}</div>
+                    {f.segments.map(s => (
+                      <div key={s.num} style={{ marginBottom: 8 }}>
+                        <div style={{ fontSize: '0.76rem', fontWeight: 600, color: roleColor(s.role) }}>{s.num}. {s.name}</div>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'monospace', lineHeight: 1.6, marginTop: 2 }}>
+                          {s.steps.join(' → ')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         {!cfg ? (
           <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)' }}>
@@ -130,6 +263,13 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
         )}
       </div>
     </div>
+    {editing && (
+      <FlowEditorModal
+        flow={editing.flow}
+        onClose={() => setEditing(null)}
+        onSaved={reloadFlows}
+      />
+    )}
     </ModalPortal>
   );
 }

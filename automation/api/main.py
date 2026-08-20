@@ -42,11 +42,15 @@ from automation.api.v1.routers.scenarios import router as scenarios_router
 from automation.api.v1.routers.recorder import router as recorder_router
 from automation.api.v1.routers.reports import router as reports_router
 from automation.api.v1.routers.pr_poller_api import router as pr_poller_router
+from automation.api.v1.routers.ci import router as ci_router
 from automation.appium_service.router import router as appium_router
 from automation.api.v1.routers.intelligence import router as intelligence_router
+from automation.api.v1.routers.tickets import router as tickets_router
+from automation.api.v1.routers.workflow import router as workflow_router
 from automation.api.v1.routers.agents import router as agents_router
 from automation.api.v1.routers.jobs import router as jobs_router, runs_router
 from automation.api.v1.routers.ops import router as ops_router
+from automation.api.v1.routers.builds import router as builds_router
 from automation.api.v1.routers import webhooks
 from automation.utils.security import install_secret_filter
 from automation.streaming.ws_manager import stream_manager
@@ -60,9 +64,18 @@ app = FastAPI(
 )
 
 # Setup CORS for dashboard
+# Origins allowed to call the API. The hardcoded localhost-only list blocked every
+# request from a COWORKER's browser (their origin is http://<this-mac-ip>:5173), so
+# the dashboard looked broken on the LAN. Private-LAN origins are allowed by regex;
+# set CORS_ORIGINS (comma-separated) to pin an exact list when hosting publicly.
+_cors_env = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=_cors_env or ["http://localhost:5173", "http://localhost:3000"],
+    # 10.x, 192.168.x, 172.16-31.x on any port — LAN only, never the public internet.
+    allow_origin_regex=None if _cors_env else
+    r"http://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|"
+    r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -163,13 +176,17 @@ v1_router.include_router(scenarios_router)
 v1_router.include_router(recorder_router)
 v1_router.include_router(reports_router)
 v1_router.include_router(pr_poller_router)
+v1_router.include_router(ci_router)
 v1_router.include_router(intelligence_router)
+v1_router.include_router(tickets_router)
+v1_router.include_router(workflow_router)
 v1_router.include_router(agents_router)
 v1_router.include_router(jobs_router)
 # Mounted WITHOUT a blanket JWT dep: /runs/{id}/scenario-result is called by the
 # Android bot (X-Bot-Secret), while the other two routes enforce JWT per-route.
 v1_router.include_router(runs_router)
 v1_router.include_router(ops_router)
+v1_router.include_router(builds_router, dependencies=[Depends(get_current_user)])
 
 # Mount external routers
 app.include_router(appium_router)
@@ -373,13 +390,43 @@ def health_check():
 app.include_router(v1_router)
 
 
+def _reap_orphaned_runs():
+    """Mark in-flight iOS runs as failed on startup. A backend restart (or a
+    killed run) leaves their processes dead but the row stuck at 'running', which
+    is what made a pile of ghost 'RUNNING' rows appear on the dashboard."""
+    _log = logging.getLogger("api")
+    try:
+        from datetime import datetime
+        from automation.database.config import SessionLocal
+        from automation.database.models import TestRun
+        with SessionLocal() as db:
+            stuck = db.query(TestRun).filter(
+                TestRun.status == "running",
+                TestRun.bot_type.in_(["ios-crossapp-flow", "ios-crossapp", "ios-pr-qa"]),
+            ).all()
+            for r in stuck:
+                r.status = "failed"
+                r.job_state = "cancelled"
+                if not r.completed_at:
+                    r.completed_at = datetime.utcnow()
+            if stuck:
+                db.commit()
+                _log.info("Reaped %d orphaned running run(s) on startup", len(stuck))
+    except Exception as e:
+        _log.warning("orphaned-run reap failed: %s", e)
+
+
 @app.on_event("startup")
 async def startup_event():
     install_secret_filter()  # Redact tokens/keys from all logs
     initialize_database()
+    _reap_orphaned_runs()    # any run still 'running' after a restart is dead
     ops_monitor.start()
     from automation.ci_cd import pr_poller
     pr_poller.start()  # auto-queue runs for new PR commits (PR_POLL_ENABLED)
+    # Keep RN Metro packagers alive so the app never shows "No bundle URL present".
+    from automation.projects.builder import start_metro_watchdog
+    start_metro_watchdog()
 
 
 @app.on_event("shutdown")

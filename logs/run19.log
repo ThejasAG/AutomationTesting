@@ -1,0 +1,27 @@
+Vya Staging connsumer: 19 scenarios, bundle=org.vyapy.sarls.vyaconsumerstaging, device=DA24A392
+
+=== [1/19] 1.0 Home smoke — real ids (7 steps)
+Traceback (most recent call last):
+  File "/Users/roops/Desktop/AutomationTestining/AutomationTesting/scripts/run_project_scenarios.py", line 76, in <module>
+    driver.activate_app(bundle)
+  File "/Users/roops/Desktop/AutomationTestining/AutomationTesting/.venv/lib/python3.12/site-packages/appium/webdriver/extensions/applications.py", line 187, in activate_app
+    self.assert_extension_exists(ext_name).execute_script(
+  File "/Users/roops/Desktop/AutomationTestining/AutomationTesting/.venv/lib/python3.12/site-packages/selenium/webdriver/remote/webdriver.py", line 602, in execute_script
+    return self.execute(command, {"script": script, "args": converted_args})["value"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/roops/Desktop/AutomationTestining/AutomationTesting/.venv/lib/python3.12/site-packages/selenium/webdriver/remote/webdriver.py", line 492, in execute
+    self.error_handler.check_response(response)
+  File "/Users/roops/Desktop/AutomationTestining/AutomationTesting/.venv/lib/python3.12/site-packages/appium/webdriver/errorhandler.py", line 125, in check_response
+    raise exception_class(msg=message, stacktrace=format_stacktrace(stacktrace))
+selenium.common.exceptions.InvalidSessionIdException: Message: Session does not exist; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#invalidsessionidexception
+Stacktrace:
+NoSuchDriverError: Session does not exist
+    at errorFromW3CJsonCode (/Users/roops/.appium/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/protocol/errors.js:1110:25)
+    at ProxyRequestError.getActualError (/Users/roops/.appium/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/protocol/errors.js:979:14)
+    at JWProxy.command (/Users/roops/.appium/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/jsonwp-proxy/proxy.js:357:19)
+    at processTicksAndRejections (node:internal/process/task_queues:95:5)
+    at XCUITestDriver.proxyCommand (/Users/roops/.appium/node_modules/appium-xcuitest-driver/lib/commands/proxy-helper.js:100:35)
+    at XCUITestDriver.mobileActivateApp (/Users/roops/.appium/node_modules/appium-xcuitest-driver/lib/commands/app-management.js:147:5)
+    at XCUITestDriver.executeMethod (/Users/roops/.nvm/versions/node/v20.19.0/lib/node_modules/appium/node_modules/@appium/base-driver/lib/basedriver/commands/execute.ts:53:12)
+    at XCUITestDriver.execute (/Users/roops/.appium/node_modules/appium-xcuitest-driver/lib/commands/execute.js:117:14)
+    at runCommandPromise (/Users/roops/.nvm/versions/node/v20.19.0/lib/node_modules/appium/node_modules/@appium/base-driver/lib/basedriver/driver.ts:127:16)

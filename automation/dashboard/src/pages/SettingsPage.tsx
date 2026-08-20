@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Settings, User, Shield, ScrollText, LogOut, Loader2 } from 'lucide-react';
 import { getMe, getAuditLogs, setAuthToken, API_BASE } from '../api';
+import { parseServerDate } from '../time';
 
 interface Me { id: string; username: string; role: string; }
 interface AuditLog {
@@ -109,7 +110,7 @@ export default function SettingsPage() {
               <tbody>
                 {logs.map(l => (
                   <tr key={l.id} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                    <td style={{ ...td, color: 'var(--text-muted)' }}>{new Date(l.timestamp).toLocaleString()}</td>
+                    <td style={{ ...td, color: 'var(--text-muted)' }}>{parseServerDate(l.timestamp).toLocaleString()}</td>
                     <td style={{ ...td, fontFamily: "'Fira Code', monospace", color: 'var(--accent-primary)' }}>{l.user_id || 'system'}</td>
                     <td style={{ ...td, color: 'var(--text-primary)' }}>{l.action}</td>
                     <td style={{ ...td, color: 'var(--text-secondary)' }}>{[l.resource_type, l.resource_id].filter(Boolean).join(' ') || '—'}</td>

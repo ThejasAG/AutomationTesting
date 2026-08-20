@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { GitPullRequest, Loader2, Play, ChevronDown, ExternalLink, AlertTriangle } from 'lucide-react';
-import { getProjects, getPullRequests, testPullRequest, planPullRequest, autotestPullRequest } from '../api';
+import { GitPullRequest, Loader2, Play, ChevronDown, ExternalLink, AlertTriangle, Search } from 'lucide-react';
+import { getProjects, getPullRequests, testPullRequest, planPullRequest, autotestPullRequest, getScenarioDevices } from '../api';
 import type { PRTestPlan } from '../api';
 import ModalPortal from '../components/ModalPortal';
-import { Sparkles, X, CheckCircle2, ListChecks } from 'lucide-react';
-import type { Project, PullRequest } from '../api';
+import { Sparkles, X, CheckCircle2, ListChecks, Pencil } from 'lucide-react';
+import type { Project, PullRequest, SimDevice } from '../api';
 import ScenarioPanel from '../components/ScenarioPanel';
+import ScenarioEditorModal from '../components/ScenarioEditorModal';
+import type { ScenarioInput } from '../api';
 
 export default function PullRequestsPage() {
   const navigate = useNavigate();
@@ -19,7 +21,22 @@ export default function PullRequestsPage() {
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState<number | null>(null);
   const [planning, setPlanning] = useState<number | null>(null);
+  // Scenario opened for editing from inside the PR plan.
+  const [editingScenario, setEditingScenario] = useState<(ScenarioInput & { id?: string }) | null>(null);
   const [plan, setPlan] = useState<PRTestPlan | null>(null);
+  const [query, setQuery] = useState('');
+  // Which simulator PR tests run on. A run once landed on a brand-new simulator stuck
+  // on first-run onboarding and cycled for 10 minutes, so this is an explicit choice.
+  const [sims, setSims] = useState<SimDevice[]>([]);
+  const [deviceId, setDeviceId] = useState<string>(() => localStorage.getItem('pr_test_device') || '');
+
+  // Search by PR number, title, author, or branch (the branch carries the ticket,
+  // e.g. "NEWVYA-1134-1-5"). Space-separated terms must all match (AND).
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const filtered = terms.length === 0 ? prs : prs.filter(pr => {
+    const hay = `#${pr.number} ${pr.title} ${pr.author} ${pr.branch} ${pr.base}`.toLowerCase();
+    return terms.every(t => hay.includes(t));
+  });
 
   const handlePlan = async (number: number) => {
     setPlanning(number); setError(null);
@@ -34,6 +51,10 @@ export default function PullRequestsPage() {
     try { const r = await autotestPullRequest(projectId, number); setAutoMsg(r.message); }
     catch (e: any) { setAutoMsg(e?.message || 'Could not start'); }
   };
+
+  useEffect(() => {
+    getScenarioDevices().then(r => setSims(r.simulators)).catch(() => {});
+  }, []);
 
   // Only GitHub projects can list PRs.
   useEffect(() => {
@@ -60,7 +81,7 @@ export default function PullRequestsPage() {
   const handleTest = async (pr: PullRequest) => {
     setTesting(pr.number);
     try {
-      const { run_id } = await testPullRequest(projectId, pr.number);
+      const { run_id } = await testPullRequest(projectId, pr.number, deviceId || undefined);
       navigate(`/run/${run_id}`);
     } catch (e: any) {
       setError(e.message);
@@ -103,12 +124,62 @@ export default function PullRequestsPage() {
           <ChevronDown size={14} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
         </div>
         {repo && <code style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{repo}</code>}
+        <label style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 600, marginLeft: 'auto' }}>
+          Run on
+        </label>
+        <select
+          value={deviceId}
+          onChange={e => { setDeviceId(e.target.value); localStorage.setItem('pr_test_device', e.target.value); }}
+          title="Which simulator PR tests run on. A freshly-created simulator sits on the first-run onboarding screen and no scenario can pass on it."
+          style={{
+            background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)',
+            borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
+            padding: '9px 12px', fontSize: '0.85rem', cursor: 'pointer', fontFamily: 'inherit', minWidth: 230,
+          }}
+        >
+          <option value="">Auto (PR_TEST_IOS_DEVICE, else any online)</option>
+          {sims.map(s => (
+            <option key={s.udid} value={s.udid}>
+              {s.name}{s.state === 'Booted' ? ' ● booted' : ' (shut down)'}
+            </option>
+          ))}
+        </select>
       </div>
 
       {error && (
         <div className="card" style={{ marginBottom: '20px', border: '1px solid var(--danger)', background: 'rgba(239,68,68,0.08)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--danger)' }}>
             <AlertTriangle size={16} /> {error}
+          </div>
+        </div>
+      )}
+
+      {/* Search / ticket filter */}
+      {!loading && prs.length > 0 && (
+        <div style={{ position: 'relative', marginBottom: '16px' }}>
+          <Search size={16} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search by ticket, PR #, title, author or branch (e.g. NEWVYA-1134, #540, payment)…"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-color)',
+              borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
+              padding: '11px 38px 11px 40px', fontSize: '0.9rem', fontFamily: 'inherit',
+            }}
+          />
+          {query && (
+            <button
+              onClick={() => setQuery('')}
+              title="Clear"
+              style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex' }}
+            >
+              <X size={15} />
+            </button>
+          )}
+          <div style={{ marginTop: 6, fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+            {query ? `${filtered.length} of ${prs.length} match` : `${prs.length} pull request${prs.length === 1 ? '' : 's'}`}
           </div>
         </div>
       )}
@@ -123,15 +194,23 @@ export default function PullRequestsPage() {
           <GitPullRequest size={40} style={{ opacity: 0.25, marginBottom: 12 }} />
           <p>No open pull requests on this repository.</p>
         </div>
+      ) : !error && filtered.length === 0 && prs.length > 0 ? (
+        <div className="card" style={{ color: 'var(--text-muted)', textAlign: 'center', padding: '40px' }}>
+          <Search size={40} style={{ opacity: 0.25, marginBottom: 12 }} />
+          <p>No pull request matches <strong style={{ color: 'var(--text-secondary)' }}>{query}</strong>.</p>
+        </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {prs.map(pr => (
+          {filtered.map(pr => (
             <div key={pr.number} className="card" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
                   <span style={{ color: 'var(--text-muted)', fontFamily: "'Fira Code', monospace", fontSize: '0.85rem' }}>#{pr.number}</span>
                   <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{pr.title}</span>
                   {pr.draft && <span className="badge" style={{ background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)' }}>draft</span>}
+                  {pr.state === 'merged'
+                    ? <span className="badge" style={{ background: 'rgba(139,92,246,0.18)', color: '#a78bfa' }}>merged</span>
+                    : <span className="badge" style={{ background: 'rgba(52,211,153,0.15)', color: 'var(--success, #34d399)' }}>open</span>}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '14px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                   <span>by {pr.author}</span>
@@ -140,6 +219,24 @@ export default function PullRequestsPage() {
                     <ExternalLink size={12} /> GitHub
                   </a>
                 </div>
+                {pr.ticket_key && (
+                  <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6,
+                                background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.18)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.78rem', flexWrap: 'wrap' }}>
+                      <span style={{ color: '#60a5fa', fontWeight: 600, fontFamily: "'Fira Code', monospace" }}>📋 {pr.ticket_key}</span>
+                      {pr.ticket_status && <span className="badge" style={{ background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)' }}>{pr.ticket_status}</span>}
+                      {pr.ticket_source === 'jira' && <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>live from Jira</span>}
+                      {pr.ticket_title && <span style={{ color: 'var(--text-primary)' }}>{pr.ticket_title}</span>}
+                      {pr.ticket_url && <a href={pr.ticket_url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-primary)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 3 }}><ExternalLink size={11} /> open</a>}
+                    </div>
+                    {pr.ticket_description && (
+                      <details style={{ marginTop: 6 }}>
+                        <summary style={{ cursor: 'pointer', fontSize: '0.72rem', color: 'var(--text-muted)' }}>Description</summary>
+                        <div style={{ marginTop: 4, fontSize: '0.76rem', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto' }}>{pr.ticket_description}</div>
+                      </details>
+                    )}
+                  </div>
+                )}
               </div>
               <button
                 onClick={() => handlePlan(pr.number)}
@@ -169,7 +266,7 @@ export default function PullRequestsPage() {
               >
                 {testing === pr.number
                   ? <><Loader2 size={13} style={{ animation: 'sp 1s linear infinite' }} /> Queuing…</>
-                  : <><Play size={13} /> Test this PR</>}
+                  : <><Play size={13} /> {pr.state === 'merged' ? 'Test merge' : 'Test this PR'}</>}
               </button>
             </div>
           ))}
@@ -193,6 +290,29 @@ export default function PullRequestsPage() {
                 </div>
               )}
 
+              {plan.graph_driven && (
+                <div style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: 12, margin: '12px 0', fontSize: '0.83rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <span style={{ fontWeight: 600 }}>Smart selection (from dependency graph)</span>
+                    {typeof plan.reduction_pct === 'number' && (
+                      <span className="badge" style={{ background: 'var(--success-bg, rgba(52,211,153,0.15))', color: 'var(--success)' }}>
+                        {plan.reduction_pct}% fewer tests
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)', marginBottom: 6 }}>
+                    Affected modules: {(plan.affected_modules || []).slice(0, 10).map(m => (
+                      <code key={m} style={{ background: 'rgba(255,255,255,0.05)', padding: '1px 5px', borderRadius: 4, marginRight: 4 }}>{m}</code>
+                    ))}
+                  </div>
+                  {plan.skipped_scenarios && plan.skipped_scenarios.length > 0 && (
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                      Skipped (not affected): {plan.skipped_scenarios.map(s => s.name).join(', ')}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {plan.path_explanation && (
                 <div style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: 12, margin: '12px 0', fontSize: '0.85rem', lineHeight: 1.5 }}>
                   <div style={{ fontWeight: 600, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}><ListChecks size={14} /> How to reach it</div>
@@ -207,13 +327,51 @@ export default function PullRequestsPage() {
                   <div><strong>No saved scenario covers this yet.</strong><br />{plan.missing_coverage || 'Record a scenario that reaches this feature, then re-plan.'}</div>
                 </div>
               ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {plan.selected_scenarios.map(s => (
-                    <div key={s.id} style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: 12 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: '0.88rem' }}><CheckCircle2 size={14} color="var(--success)" /> {s.name}</div>
-                      <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: 4 }}>{s.reason}</div>
-                    </div>
-                  ))}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  {/* Cross-app verification split into the three roles — each runs on its own app. */}
+                  {([
+                    { key: 'consumer', label: '🧑 Consumer', app: 'diner app', color: '#34d399' },
+                    { key: 'waiter', label: '🧑‍🍳 Waiter', app: 'Business iPad', color: '#60a5fa' },
+                    { key: 'kitchen', label: '🍳 Kitchen', app: 'Business iPad', color: '#fbbf24' },
+                  ] as const).map(role => {
+                    const items = plan.by_role
+                      ? plan.by_role[role.key]
+                      : (role.key === 'consumer' ? plan.selected_scenarios : []);
+                    if (!items || items.length === 0) return null;
+                    return (
+                      <div key={role.key}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 700, color: role.color, marginBottom: 6, letterSpacing: 0.3 }}>
+                          {role.label} <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>· {role.app} · {items.length} path{items.length > 1 ? 's' : ''}</span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderLeft: `2px solid ${role.color}`, paddingLeft: 10 }}>
+                          {items.map(s => (
+                            <div key={s.id} style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: '0.86rem' }}>
+                                <CheckCircle2 size={13} color="var(--success)" />
+                                <span style={{ flex: 1 }}>{s.name}</span>
+                                {/* Edit the scenario right where the PR plan shows it — no
+                                    detour to the Scenarios page and back. */}
+                                <button onClick={() => setEditingScenario({
+                                  id: s.id, name: s.name, description: '', project_id: projectId,
+                                  device_id: '', steps: s.steps || [], covers: [],
+                                })}
+                                  title="Edit this scenario's steps"
+                                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'transparent', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-secondary)', cursor: 'pointer', padding: '2px 8px', fontSize: '0.72rem' }}>
+                                  <Pencil size={11} /> Edit
+                                </button>
+                              </div>
+                              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: 3 }}>{s.reason}</div>
+                              {!!(s.steps && s.steps.length) && (
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'monospace', marginTop: 4, lineHeight: 1.5 }}>
+                                  {s.steps.join(' → ')}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
                   <button className="btn" onClick={() => handleAutotest(plan.pr_number)}
                     style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 18px', marginTop: 4 }}>
                     <Play size={14} /> Run this plan (build → test → comment on PR)
@@ -237,6 +395,15 @@ export default function PullRequestsPage() {
         <div style={{ marginTop: 24 }}>
           <ScenarioPanel projectId={projectId} />
         </div>
+      )}
+
+      {editingScenario && (
+        <ScenarioEditorModal
+          initial={editingScenario}
+          isNew={false}
+          onClose={() => setEditingScenario(null)}
+          onSaved={() => { setEditingScenario(null); if (plan) handlePlan(plan.pr_number); }}
+        />
       )}
 
       <style>{`@keyframes sp { from { transform: rotate(0) } to { transform: rotate(360deg) } }`}</style>

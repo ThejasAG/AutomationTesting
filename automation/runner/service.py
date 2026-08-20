@@ -118,6 +118,18 @@ class RunnerService:
                 if normalized in ("passed", "failed"):
                     self._persist_final_status(run_id, normalized)
                     self._trigger_rca(run_id, normalized)
+                    # Visual regression check (never flips a pass to a fail; sets a warning flag).
+                    self._trigger_visual_regression(run_id, normalized)
+                    # Fire an immediate Slack alert on failure.
+                    if normalized == "failed":
+                        try:
+                            from automation.notifications.realtime_alerts import realtime_alert_service
+                            run = self.active_runs.get(run_id, {})
+                            err = (run.get("logs") or ["Test failed"])[-1]
+                            realtime_alert_service.alert_ios_failure(
+                                run_id, run.get("test_name") or run_id, str(err))
+                        except Exception as e:
+                            logger.warning(f"realtime alert failed for {run_id}: {e}")
             else:
                 self.active_runs[run_id]["status"] = "Running"
 
@@ -142,6 +154,103 @@ class RunnerService:
                     database.insert_test_run(db, db_run)
         except Exception as e:
             logger.error(f"Failed to persist final status for run {run_id}: {e}")
+        # If this run came from a GitHub PR, comment the verdict back onto the PR.
+        self._maybe_comment_on_pr(run_id, status)
+
+    def _maybe_comment_on_pr(self, run_id: str, status: str):
+        """Post a QA-verdict comment + commit status on the originating PR."""
+        try:
+            from automation.database.models import TestRun, RCAReport, VisualRegressionResult
+            with SessionLocal() as db:
+                run = db.query(TestRun).filter(TestRun.id == run_id).first()
+                if not run or not (run.triggered_by or "").startswith("github_webhook:"):
+                    return
+                # triggered_by = "github_webhook:owner/repo#<pr>"
+                meta = run.triggered_by.split("github_webhook:", 1)[1]
+                repo_full, _, pr_str = meta.partition("#")
+                if "/" not in repo_full or not pr_str:
+                    return
+                owner, short_repo = repo_full.split("/", 1)
+                pr_number = int(pr_str)
+                commit_sha = run.commit_sha
+
+                rca = db.query(RCAReport).filter(RCAReport.run_id == run_id).first()
+                vrs = db.query(VisualRegressionResult).filter(
+                    VisualRegressionResult.run_id == run_id).all()
+
+            from automation.ai.services.summary import test_summary_generator
+            with SessionLocal() as db:
+                summary = test_summary_generator.generate_run_summary(run_id, db).get("summary")
+
+            run_results = {
+                "verdict": status,
+                "status": status,
+                "run_id": run_id,
+                "total": 1,
+                "passed": 1 if status == "passed" else 0,
+                "failed": 1 if status == "failed" else 0,
+                "rca": getattr(rca, "root_cause", None) if rca else None,
+                "summary": summary,
+                "visual_regression": {
+                    "regressions": [
+                        {"screen": v.screen_name, "diff_percentage": v.diff_percentage,
+                         "severity": v.severity}
+                        for v in vrs if not v.passed
+                    ]
+                },
+            }
+            from automation.integrations.pr_comment import pr_comment_bot
+            pr_comment_bot.post_pr_comment(pr_number, short_repo, run_results, owner=owner)
+            gh_state = "success" if status == "passed" else "failure"
+            pr_comment_bot.update_pr_status(
+                short_repo, commit_sha, gh_state,
+                f"QA {status}", owner=owner)
+        except Exception as e:
+            logger.warning(f"PR comment for run {run_id} failed: {e}")
+
+    def _trigger_visual_regression(self, run_id: str, status: str):
+        """Compare this run's screenshots to the project baseline and store results.
+
+        A regression on a passing run does NOT flip it to failed — it sets
+        `visual_warning` so the UI can surface it while keeping the honest verdict.
+        """
+        try:
+            from automation.intelligence.visual_regression import visual_regression_analyzer
+            from automation.database.models import TestRun, VisualRegressionResult
+
+            with SessionLocal() as db:
+                run = db.query(TestRun).filter(TestRun.id == run_id).first()
+                if not run or not run.project_id:
+                    return
+                project_id = run.project_id
+                screenshots_dir = visual_regression_analyzer._screenshots_dir(run_id)
+
+            result = visual_regression_analyzer.compare_with_baseline(
+                run_id, project_id, [screenshots_dir])
+
+            with SessionLocal() as db:
+                for reg in result.get("regressions", []):
+                    db.add(VisualRegressionResult(
+                        run_id=run_id,
+                        screen_name=reg["screen"],
+                        diff_percentage=reg["diff_percentage"],
+                        severity=reg["severity"],
+                        baseline_path=reg["baseline_path"],
+                        current_path=reg["current_path"],
+                        diff_path=reg["diff_path"],
+                        passed=False,
+                    ))
+                if result.get("regressions"):
+                    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+                    if run:
+                        run.visual_warning = True
+                db.commit()
+
+            # No baseline yet + a clean pass → capture this run as the baseline.
+            if status == "passed" and result.get("total_screens", 0) == 0:
+                visual_regression_analyzer.capture_baseline(run_id, screenshots_dir)
+        except Exception as e:
+            logger.warning(f"visual regression check failed for {run_id}: {e}")
 
     def _trigger_rca(self, run_id: str, status: str):
         """Generate and store an RCA report for a completed run.

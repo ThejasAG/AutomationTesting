@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getRun, getRCA, getEvidence, getAuthToken, getRunScenarios, triggerAnalysis } from '../api';
-import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult } from '../api';
+import { getRun, getRCA, getEvidence, getRunScenarios, triggerAnalysis,
+  getVisualRegression, updateVisualBaseline, getRiskPredictions, getRunSummary, getPerformance } from '../api';
+import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult,
+  VisualRegressionItem, RiskPrediction, PerformanceResponse } from '../api';
 import { format } from 'date-fns';
-import { ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, Monitor, Wifi, WifiOff, ChevronDown, ChevronRight, Smartphone, Users, Loader2 } from 'lucide-react';
+import { parseServerDate } from '../time';
+import { ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 
 // ── Scenarios Tab (Android cross-app: Consumer + Business) ───────────────────
@@ -28,7 +32,7 @@ function StatusBadge({ status }: { status: string }) {
 
 function ScenarioRow({ s }: { s: ScenarioResult }) {
   const [open, setOpen] = useState(false);
-  const canExpand = (s.reasons && s.reasons.length > 0) || !!s.error;
+  const canExpand = (s.reasons && s.reasons.length > 0) || !!s.error || !!s.screenshot;
   return (
     <>
       <tr
@@ -58,6 +62,16 @@ function ScenarioRow({ s }: { s: ScenarioResult }) {
                 <li key={i}>{r}</li>
               ))}
             </ul>
+            {s.screenshot && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: 5 }}>Screen at failure:</div>
+                <a href={s.screenshot} target="_blank" rel="noreferrer">
+                  <img src={s.screenshot} alt="screen at failure"
+                    style={{ maxWidth: 240, maxHeight: 420, border: '1px solid var(--border-color)', borderRadius: 8, boxShadow: '0 2px 10px rgba(0,0,0,0.35)' }} />
+                </a>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.68rem', marginTop: 3 }}>click to enlarge</div>
+              </div>
+            )}
           </td>
         </tr>
       )}
@@ -170,207 +184,209 @@ const ACTIVE_JOB_STATES = new Set([
   'preparing',
 ]);
 
-type StreamState = 'waiting' | 'streaming' | 'ended';
+/** Elapsed seconds → a readable duration. A stage that took four minutes read as
+ *  "247.3s", which is why long stages looked wrong at a glance. */
+function fmtSecs(secs: number): string {
+  if (secs < 60) return `${secs.toFixed(1)}s`;
+  const m = Math.floor(secs / 60);
+  return `${m}m ${Math.round(secs - m * 60)}s`;
+}
 
 interface LiveViewProps {
   runId: string;
   jobState?: string | null;
 }
 
+/** Live Steps — replaces the (meaningless) video stream with the actual steps
+ *  the run has executed and is executing, polled from the scenarios endpoint.
+ *  Each segment shows its step log with ✓/✗; the in-flight segment is highlighted. */
 function LiveView({ runId, jobState }: LiveViewProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const [streamState, setStreamState] = useState<StreamState>('waiting');
+  const [scenarios, setScenarios] = useState<ScenarioResult[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const isActive = !!jobState && ACTIVE_JOB_STATES.has(jobState);
 
-  const isActive = jobState && ACTIVE_JOB_STATES.has(jobState);
+  // Live clock for the in-flight stage. The backend only writes an elapsed value
+  // when a STEP completes, so between events (which can be a minute apart on a
+  // slow resolve) a poll-driven number sits frozen and under-reports the stage.
+  // We keep the last elapsed the backend reported plus the wall-clock moment it
+  // CHANGED, and count up from there — re-baselining on every poll instead would
+  // make the timer jump backwards each time an unchanged value came back.
+  const baseline = useRef<{ num: string; secs: number; at: number } | null>(null);
+  const [, tick] = useState(0);
 
   useEffect(() => {
-    if (!isActive) return;
-
-    const token = getAuthToken();
-    if (!token) return;
-
-    const wsUrl = `ws://localhost:8000/ws/stream/${runId}?token=${encodeURIComponent(token)}`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-    ws.binaryType = 'blob';
-
-    ws.onmessage = async (event: MessageEvent) => {
-      // Binary frame → draw on canvas
-      if (event.data instanceof Blob) {
-        setStreamState('streaming');
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-        try {
-          const blob = new Blob([event.data]);
-          const bitmap = await createImageBitmap(blob);
-          ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-          bitmap.close();
-        } catch {
-          // Corrupt frame — skip silently
-        }
-        return;
-      }
-      // Text/JSON frame → check for end signal
-      if (typeof event.data === 'string') {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'ended') {
-            setStreamState('ended');
-            ws.close(1000, 'stream ended');
-          }
-        } catch {
-          // Ignore non-JSON text frames
-        }
-      }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const d = await getRunScenarios(runId);
+        if (!cancelled) { setScenarios(d.scenarios || []); setLoaded(true); }
+      } catch { if (!cancelled) setLoaded(true); }
+      if (!cancelled && isActive) timer = setTimeout(poll, 2500);
     };
-
-    ws.onerror = () => {
-      setStreamState(prev => (prev === 'waiting' ? 'ended' : prev));
-    };
-
-    ws.onclose = () => {
-      setStreamState(prev => (prev === 'streaming' || prev === 'waiting' ? 'ended' : prev));
-    };
-
-    return () => {
-      // Detach first: a socket torn down by StrictMode's double-mount must not
-      // flip streamState to 'ended' on the instance that replaced it.
-      ws.onmessage = ws.onerror = ws.onclose = null;
-      if (ws.readyState === WebSocket.CONNECTING) {
-        ws.addEventListener('open', () => ws.close(), { once: true });
-      } else {
-        ws.close();
-      }
-      wsRef.current = null;
-    };
+    poll();
+    return () => { cancelled = true; clearTimeout(timer!); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, isActive]);
 
-  if (!isActive) return null;
+  // Re-baseline only when the in-flight stage changes, or its reported elapsed does.
+  const last = scenarios[scenarios.length - 1];
+  const lastNum = last?.scenario_num ?? '';
+  const lastSecs = last?.launch_time ?? 0;
+  useEffect(() => {
+    if (!last) return;
+    const b = baseline.current;
+    if (!b || b.num !== lastNum || b.secs !== lastSecs) {
+      baseline.current = { num: lastNum, secs: lastSecs, at: Date.now() };
+    }
+  }, [last, lastNum, lastSecs]);
+
+  // Repaint once a second while the run is live, so the ticker actually ticks.
+  useEffect(() => {
+    if (!isActive) return;
+    const t = setInterval(() => tick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [isActive]);
+
+  // Nothing to show if the run isn't active and never recorded a step.
+  if (!isActive && scenarios.length === 0) return null;
 
   return (
     <div className="card animate-fade-in" style={{ marginBottom: '24px' }}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
-        <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-          <Monitor size={18} color="var(--accent-primary)" />
-          Live Device View
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <h3 style={{ display: 'flex', alignItems: 'center', gap: 8, margin: 0 }}>
+          <Activity size={18} color="var(--accent-primary)" />
+          Live Steps
         </h3>
-        <div
-          className="badge"
-          style={{
-            background: streamState === 'streaming'
-              ? 'rgba(52, 211, 153, 0.15)'
-              : streamState === 'ended'
-              ? 'rgba(255,255,255,0.06)'
-              : 'rgba(251, 191, 36, 0.15)',
-            color: streamState === 'streaming'
-              ? 'var(--success)'
-              : streamState === 'ended'
-              ? 'var(--text-muted)'
-              : 'var(--warning)',
-          }}
-        >
-          {streamState === 'streaming'
-            ? <><Wifi size={12} /> Live</>
-            : streamState === 'ended'
-            ? <><WifiOff size={12} /> Ended</>
-            : <><Wifi size={12} /> Connecting…</>}
+        <div className="badge" style={{
+          background: isActive ? 'rgba(251,191,36,0.15)' : 'rgba(255,255,255,0.06)',
+          color: isActive ? 'var(--warning)' : 'var(--text-muted)',
+        }}>
+          {isActive ? <><Loader2 size={12} className="spin" /> Running</> : <>Finished</>}
         </div>
       </div>
 
-      {/* Canvas wrapper */}
-      <div
-        style={{
-          position: 'relative',
-          width: 360,
-          height: 640,
-          background: '#000',
-          borderRadius: 'var(--radius-md)',
-          overflow: 'hidden',
-          margin: '0 auto',
-          border: '1px solid var(--border-color)',
-          boxShadow: '0 0 40px rgba(0,0,0,0.6)',
-        }}
-      >
-        <canvas
-          ref={canvasRef}
-          width={360}
-          height={640}
-          style={{ display: 'block', width: '100%', height: '100%' }}
-        />
+      {!loaded && scenarios.length === 0 ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Loader2 size={13} className="spin" /> Waiting for the first step…
+        </div>
+      ) : scenarios.length === 0 ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>No steps recorded yet.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {scenarios.map((s, i) => {
+            const done = s.status === 'PASS' || s.status === 'FAIL';
+            const running = isActive && i === scenarios.length - 1 && !done;
+            const isLast = i === scenarios.length - 1;
+            const steps = (s.reasons || []).filter(r => !/↳ (screen ids|on screen):/.test(r));
+            // Which app/role this stage runs on → node icon + chip.
+            const role = /kitchen/i.test(s.scenario_name)
+              ? { icon: '🍳', label: 'Kitchen', tint: '#f59e0b' }
+              : /waiter|b-app|business/i.test(s.scenario_name)
+              ? { icon: '🧑‍🍳', label: 'Waiter', tint: 'var(--accent-primary)' }
+              : { icon: '🧑', label: 'Consumer', tint: '#38bdf8' };
+            const nodeColor = s.status === 'PASS' ? 'var(--success)'
+              : s.status === 'FAIL' ? 'var(--danger)'
+              : running ? 'var(--accent-primary)' : 'var(--border-color)';
+            const nodeBg = s.status === 'PASS' ? 'rgba(52,211,153,0.15)'
+              : s.status === 'FAIL' ? 'rgba(248,113,113,0.15)'
+              : running ? 'rgba(129,140,248,0.12)' : 'var(--bg-secondary, rgba(255,255,255,0.03))';
+            const badgeBg = s.status === 'PASS' ? 'rgba(52,211,153,0.15)'
+              : s.status === 'FAIL' ? 'rgba(248,113,113,0.15)' : 'rgba(129,140,248,0.15)';
+            const badgeFg = s.status === 'PASS' ? 'var(--success)'
+              : s.status === 'FAIL' ? 'var(--danger)' : 'var(--accent-primary)';
+            // The spine below a node is solid+colored once the stage resolves, so the
+            // flow reads as "connected" and progress flows top→bottom.
+            const spineColor = s.status === 'PASS' ? 'var(--success)'
+              : s.status === 'FAIL' ? 'var(--danger)' : 'var(--border-color)';
+            return (
+              <div key={s.id || i} style={{ display: 'flex', gap: 14, alignItems: 'stretch' }}>
+                {/* Left rail: the stage node + the connecting spine to the next stage. */}
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 32, flexShrink: 0 }}>
+                  <div style={{
+                    width: 30, height: 30, borderRadius: '50%', flexShrink: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem',
+                    background: nodeBg, border: `2px solid ${nodeColor}`,
+                    boxShadow: running ? '0 0 0 4px rgba(129,140,248,0.14)' : 'none',
+                    transition: 'all .2s',
+                  }}>
+                    {s.status === 'PASS' ? <CheckCircle2 size={16} color="var(--success)" />
+                      : s.status === 'FAIL' ? <AlertTriangle size={15} color="var(--danger)" />
+                      : running ? <Loader2 size={15} className="spin" color="var(--accent-primary)" />
+                      : <span>{role.icon}</span>}
+                  </div>
+                  {!isLast && <div style={{ width: 2, flex: 1, minHeight: 14, background: spineColor, marginTop: 2, borderRadius: 2 }} />}
+                </div>
 
-        {/* Waiting overlay */}
-        {streamState === 'waiting' && (
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexDirection: 'column',
-              gap: '16px',
-              background: 'rgba(10,10,15,0.92)',
-            }}
-          >
-            <div style={{ position: 'relative', width: 56, height: 56 }}>
-              <div style={{
-                position: 'absolute', inset: 0,
-                borderRadius: '50%',
-                border: '3px solid rgba(129,140,248,0.2)',
-              }} />
-              <div style={{
-                position: 'absolute', inset: 0,
-                borderRadius: '50%',
-                border: '3px solid transparent',
-                borderTopColor: 'var(--accent-primary)',
-                animation: 'lv-spin 1s linear infinite',
-              }} />
-            </div>
-            <div style={{ textAlign: 'center' }}>
-              <p style={{ color: 'var(--text-primary)', fontWeight: 500, margin: 0 }}>
-                Waiting for stream…
-              </p>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '4px' }}>
-                Frames will appear once the test starts
-              </p>
-            </div>
-          </div>
-        )}
+                {/* Stage content: header + its steps branching off a guide line. */}
+                <div style={{ flex: 1, minWidth: 0, paddingBottom: isLast ? 4 : 20 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: steps.length ? 10 : 0, flexWrap: 'wrap' }}>
+                    <span style={{
+                      fontSize: '0.64rem', fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+                      background: 'var(--bg-secondary, rgba(255,255,255,0.05))', color: role.tint,
+                      border: `1px solid ${role.tint}33`, whiteSpace: 'nowrap',
+                    }}>{role.icon} {role.label}</span>
+                    <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)' }}>{s.scenario_num}</span>
+                    <span style={{ fontSize: '0.88rem', fontWeight: 600 }}>{s.scenario_name}</span>
+                    <span className="badge" style={{ background: badgeBg, color: badgeFg, fontSize: '0.62rem' }}>
+                      {running ? <><Loader2 size={10} className="spin" /> running</> : s.status}
+                    </span>
+                    {(() => {
+                      // In flight: count up from the last reported elapsed. Finished:
+                      // show exactly what the backend recorded.
+                      const b = baseline.current;
+                      const secs = running && b && b.num === s.scenario_num
+                        ? b.secs + (Date.now() - b.at) / 1000
+                        : s.launch_time;
+                      if (secs == null) return null;
+                      return (
+                        <span style={{
+                          marginLeft: 'auto', fontSize: '0.72rem',
+                          color: running ? 'var(--accent-primary)' : 'var(--text-muted)',
+                          fontVariantNumeric: 'tabular-nums',
+                        }}>
+                          {fmtSecs(secs)}
+                        </span>
+                      );
+                    })()}
+                  </div>
 
-        {/* Stream ended overlay */}
-        {streamState === 'ended' && (
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexDirection: 'column',
-              gap: '8px',
-              background: 'rgba(0,0,0,0.55)',
-              backdropFilter: 'blur(4px)',
-            }}
-          >
-            <WifiOff size={32} color="var(--text-muted)" />
-            <p style={{ color: 'var(--text-secondary)', fontSize: '1rem', margin: 0 }}>
-              Stream ended
-            </p>
-          </div>
-        )}
-      </div>
-
-      <style>{`
-        @keyframes lv-spin {
-          from { transform: rotate(0deg); }
-          to   { transform: rotate(360deg); }
-        }
-      `}</style>
+                  {(steps.length > 0 || (running && steps.length === 0)) && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, borderLeft: '1px dashed var(--border-color)', paddingLeft: 14, marginLeft: 2 }}>
+                      {steps.map((line, j) => {
+                        const ok = /^\s*\[ok\]/i.test(line);
+                        const fail = /^\s*\[FAIL\]/i.test(line);
+                        const now = /^\s*▶/.test(line);       // step currently executing
+                        const text = line.replace(/^\s*(\[(ok|FAIL)\]|▶)\s*/i, '');
+                        return (
+                          <div key={j} style={{ position: 'relative', display: 'flex', alignItems: 'flex-start', gap: 7,
+                            fontSize: '0.76rem', lineHeight: 1.7,
+                            color: fail ? 'var(--danger)' : now ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                            fontWeight: now ? 600 : 400,
+                          }}>
+                            {/* little branch stub from the guide line to this step's marker */}
+                            <span style={{ position: 'absolute', left: -14, top: 11, width: 10, height: 1, background: 'var(--border-color)' }} />
+                            {ok ? <CheckCircle2 size={13} color="var(--success)" style={{ flexShrink: 0, marginTop: 3 }} />
+                              : fail ? <AlertTriangle size={13} color="var(--danger)" style={{ flexShrink: 0, marginTop: 3 }} />
+                              : now ? <Loader2 size={13} className="spin" color="var(--accent-primary)" style={{ flexShrink: 0, marginTop: 3 }} />
+                              : <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--border-color)', flexShrink: 0, marginTop: 6 }} />}
+                            <span style={{ fontFamily: 'monospace' }}>{now ? `running: ${text}` : text}</span>
+                          </div>
+                        );
+                      })}
+                      {running && steps.length === 0 && (
+                        <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <Loader2 size={12} className="spin" /> executing…
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -378,13 +394,285 @@ function LiveView({ runId, jobState }: LiveViewProps) {
 
 // ── Main RunDetails Page ─────────────────────────────────────────────────────
 
+// ── AI Summary card (PM-friendly, auto-generated) ────────────────────────────
+function AISummaryCard({ runId }: { runId: string }) {
+  const [summary, setSummary] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    getRunSummary(runId)
+      .then(r => { if (!cancelled) setSummary(r.summary); })
+      .catch(() => { if (!cancelled) setSummary(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [runId]);
+  if (loading) return (
+    <div className="card" style={{ marginBottom: 24, display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-secondary)' }}>
+      <Loader2 size={16} className="spin" /> Generating AI summary…
+    </div>
+  );
+  if (!summary) return null;
+  return (
+    <div className="card" style={{ marginBottom: 24, borderLeft: '4px solid var(--accent-primary)', background: 'rgba(99,102,241,0.06)' }}>
+      <h3 style={{ margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.95rem' }}>
+        <Sparkles size={16} color="var(--accent-primary)" /> AI Summary
+      </h3>
+      <p style={{ margin: 0, lineHeight: 1.6, color: 'var(--text-primary)' }}>{summary}</p>
+    </div>
+  );
+}
+
+// ── Risk badge (test impact prediction) ──────────────────────────────────────
+function riskColor(level: string): { bg: string; fg: string } {
+  if (level === 'HIGH') return { bg: 'rgba(239,68,68,0.15)', fg: '#ef4444' };
+  if (level === 'MEDIUM') return { bg: 'rgba(245,158,11,0.15)', fg: '#f59e0b' };
+  return { bg: 'rgba(34,197,94,0.15)', fg: '#22c55e' };
+}
+
+function RiskPredictions({ runId }: { runId: string }) {
+  const [preds, setPreds] = useState<RiskPrediction[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getRiskPredictions(runId)
+      .then(r => { if (!cancelled) setPreds(r.predictions); })
+      .catch(() => { if (!cancelled) setPreds([]); });
+    return () => { cancelled = true; };
+  }, [runId]);
+  if (!preds || preds.length === 0) return null;
+  return (
+    <div className="card" style={{ marginBottom: 24 }}>
+      <h3 style={{ margin: '0 0 12px', display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.95rem' }}>
+        <TrendingUp size={16} color="var(--accent-primary)" /> Failure-Risk Prediction
+      </h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {preds.slice(0, 8).map(p => {
+          const c = riskColor(p.risk_level);
+          return (
+            <div key={p.test} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <span style={{ fontFamily: 'monospace', fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.test_name}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                <span style={{ width: 90, height: 6, background: 'var(--bg-tertiary)', borderRadius: 999, overflow: 'hidden' }}>
+                  <span style={{ display: 'block', height: '100%', width: `${p.risk_score}%`, background: c.fg }} />
+                </span>
+                <span style={{ background: c.bg, color: c.fg, padding: '2px 8px', borderRadius: 999, fontSize: '0.7rem', fontWeight: 700 }}>
+                  {p.risk_level} {p.risk_score}
+                </span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Visual regression tab ────────────────────────────────────────────────────
+function VisualTab({ runId, canUpdateBaseline }: { runId: string; canUpdateBaseline: boolean }) {
+  const [items, setItems] = useState<VisualRegressionItem[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getVisualRegression(runId)
+      .then(r => { if (!cancelled) setItems(r.results); })
+      .catch(e => { if (!cancelled) setErr(String(e)); });
+    return () => { cancelled = true; };
+  }, [runId]);
+
+  const onUpdate = async () => {
+    setUpdating(true); setMsg(null);
+    try { await updateVisualBaseline(runId); setMsg('Baseline updated ✓'); }
+    catch (e) { setMsg('Update failed: ' + String(e)); }
+    finally { setUpdating(false); }
+  };
+
+  const sev = (s: string) => s === 'high' ? { bg: 'rgba(239,68,68,0.15)', fg: '#ef4444' }
+    : s === 'medium' ? { bg: 'rgba(245,158,11,0.15)', fg: '#f59e0b' }
+    : { bg: 'rgba(148,163,184,0.15)', fg: '#94a3b8' };
+
+  if (err) return <div className="card" style={{ color: 'var(--danger)' }}>Failed to load visual regression: {err}</div>;
+  if (!items) return <div className="card" style={{ display: 'flex', gap: 10, alignItems: 'center' }}><Loader2 size={16} className="spin" /> Loading visual comparison…</div>;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <p style={{ margin: 0, color: 'var(--text-secondary)' }}>
+          {items.length === 0
+            ? 'No baseline comparison recorded for this run.'
+            : `${items.length} screen(s) compared · ${items.filter(i => !i.passed).length} regression(s)`}
+        </p>
+        {canUpdateBaseline && (
+          <button className="btn" onClick={onUpdate} disabled={updating}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <RefreshCw size={14} className={updating ? 'spin' : ''} /> Update Baseline
+          </button>
+        )}
+      </div>
+      {msg && <div className="card" style={{ marginBottom: 16 }}>{msg}</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {items.map(it => {
+          const c = sev(it.severity);
+          return (
+            <div key={it.id} className="card">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                <ImageIcon size={16} color="var(--accent-primary)" />
+                <strong>{it.screen_name}</strong>
+                <span style={{ background: c.bg, color: c.fg, padding: '2px 10px', borderRadius: 999, fontSize: '0.72rem', fontWeight: 700 }}>
+                  {it.severity.toUpperCase()} · {it.diff_percentage}%
+                </span>
+                {it.passed
+                  ? <span style={{ color: '#22c55e', fontSize: '0.75rem' }}>within threshold</span>
+                  : <span style={{ color: '#ef4444', fontSize: '0.75rem' }}>regression</span>}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                {[['Baseline', it.baseline_image], ['Current', it.current_image], ['Diff', it.diff_image]].map(([label, src]) => (
+                  <div key={label as string}>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: 6 }}>{label}</div>
+                    {src
+                      ? <img src={src as string} alt={label as string} style={{ width: '100%', borderRadius: 8, border: '1px solid var(--border-color)' }} />
+                      : <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)', background: 'var(--bg-tertiary)', borderRadius: 8 }}>n/a</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Performance tab ──────────────────────────────────────────────────────────
+export function gradeColor(grade: string | null | undefined): string {
+  switch ((grade || '').toUpperCase()) {
+    case 'A': return '#22c55e';
+    case 'B': return '#3b82f6';
+    case 'C': return '#eab308';
+    case 'D': return '#f97316';
+    default:  return '#ef4444';
+  }
+}
+
+function MetricBar({ label, value, unit, pct, good }: { label: string; value: string; unit: string; pct: number; good: boolean }) {
+  return (
+    <div className="card" style={{ padding: '14px 16px' }}>
+      <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
+      <div style={{ fontSize: '1.4rem', fontWeight: 700, margin: '4px 0' }}>{value}<span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: 4 }}>{unit}</span></div>
+      <div style={{ height: 5, background: 'var(--bg-tertiary)', borderRadius: 999, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${Math.max(4, Math.min(100, pct))}%`, background: good ? '#22c55e' : pct > 66 ? '#ef4444' : '#eab308' }} />
+      </div>
+    </div>
+  );
+}
+
+function PerformanceTab({ runId }: { runId: string }) {
+  const [perf, setPerf] = useState<PerformanceResponse | null | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    getPerformance(runId)
+      .then(p => { if (!cancelled) setPerf(p); })
+      .catch(() => { if (!cancelled) setPerf(null); });
+    return () => { cancelled = true; };
+  }, [runId]);
+
+  if (perf === undefined) return <div className="card" style={{ display: 'flex', gap: 10, alignItems: 'center' }}><Loader2 size={16} className="spin" /> Loading performance…</div>;
+  if (perf === null) return <div className="card" style={{ color: 'var(--text-secondary)' }}>No performance data was collected for this run.</div>;
+
+  const s = perf.summary;
+  const g = gradeColor(perf.grade);
+  const cmp = perf.comparison?.vs_previous_run;
+  const sev = (issue: string) => /spike|failed|took|\b[89]\d%/.test(issue) ? '🔴' : /drop|slow|peak/i.test(issue) ? '🟡' : '🟢';
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+      {/* 1. Score card */}
+      <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 24, borderLeft: `5px solid ${g}` }}>
+        <div style={{ textAlign: 'center', minWidth: 120 }}>
+          <div style={{ fontSize: '3.5rem', fontWeight: 800, color: g, lineHeight: 1 }}>{perf.grade || '—'}</div>
+          <div style={{ fontSize: '1.1rem', fontWeight: 700 }}>{perf.score ?? '—'}<span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>/100</span></div>
+        </div>
+        <div style={{ flex: 1 }}>
+          <h2 style={{ margin: '0 0 6px', display: 'flex', alignItems: 'center', gap: 8 }}><Gauge size={20} color={g} /> Performance Score</h2>
+          {cmp && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: cmp.better ? '#22c55e' : '#ef4444', fontSize: '0.9rem' }}>
+              {cmp.better ? <ArrowUp size={15} /> : <ArrowDown size={15} />}
+              {cmp.score_change !== null ? `${cmp.score_change > 0 ? '+' : ''}${cmp.score_change} pts` : ''} vs previous run
+              {cmp.launch_time_change !== null && <span style={{ color: 'var(--text-secondary)' }}>· launch {cmp.launch_time_change > 0 ? '+' : ''}{cmp.launch_time_change}s</span>}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 2. Key metrics row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+        <MetricBar label="Launch Time" value={s.app_launch_time_s != null ? s.app_launch_time_s.toFixed(1) : '—'} unit="s" pct={s.app_launch_time_s ? (s.app_launch_time_s / 3) * 100 : 0} good={(s.app_launch_time_s ?? 99) < 2} />
+        <MetricBar label="Avg CPU" value={`${s.avg_cpu_percent?.toFixed(0) ?? '—'}`} unit="%" pct={s.avg_cpu_percent ?? 0} good={(s.avg_cpu_percent ?? 99) < 30} />
+        <MetricBar label="Peak Memory" value={`${s.peak_memory_mb?.toFixed(0) ?? '—'}`} unit="MB" pct={s.peak_memory_mb ? (s.peak_memory_mb / 500) * 100 : 0} good={(s.peak_memory_mb ?? 999) < 300} />
+        <MetricBar label="Avg FPS" value={s.avg_fps != null ? s.avg_fps.toFixed(0) : 'n/a'} unit="fps" pct={s.avg_fps ? 100 - (s.avg_fps / 60) * 100 : 0} good={(s.avg_fps ?? 0) > 55} />
+        <MetricBar label="Avg API" value={s.avg_api_response_ms != null ? s.avg_api_response_ms.toFixed(0) : 'n/a'} unit="ms" pct={s.avg_api_response_ms ? (s.avg_api_response_ms / 500) * 100 : 0} good={(s.avg_api_response_ms ?? 999) < 300} />
+      </div>
+
+      {/* 3. CPU + Memory over time */}
+      {perf.metrics_over_time.length > 0 && (
+        <div className="card">
+          <h3 style={{ margin: '0 0 12px', display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.95rem' }}><Cpu size={16} color="var(--accent-primary)" /> CPU &amp; Memory over time</h3>
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={perf.metrics_over_time.map((m, i) => ({ t: i, cpu: m.cpu, memory: m.memory }))}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
+              <XAxis dataKey="t" stroke="var(--text-secondary)" fontSize={11} />
+              <YAxis stroke="var(--text-secondary)" fontSize={11} />
+              <RTooltip contentStyle={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)' }} />
+              <Legend />
+              <Line type="monotone" dataKey="cpu" name="CPU %" stroke="#3b82f6" dot={false} strokeWidth={2} />
+              <Line type="monotone" dataKey="memory" name="Memory MB" stroke="#22c55e" dot={false} strokeWidth={2} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* 4. API response times */}
+      <div className="card">
+        <h3 style={{ margin: '0 0 12px', fontSize: '0.95rem' }}>API Response Times</h3>
+        {perf.api_calls.total_calls > 0 ? (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+            <thead><tr style={{ textAlign: 'left', color: 'var(--text-secondary)' }}>
+              <th style={{ padding: '6px 8px' }}>Endpoint</th><th>Calls</th><th>Avg</th><th>Max</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+              <tr style={{ borderTop: '1px solid var(--border-color)' }}>
+                <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>{perf.api_calls.slowest.url || 'all endpoints'}</td>
+                <td>{perf.api_calls.total_calls}</td>
+                <td>{perf.api_calls.avg_ms != null ? `${perf.api_calls.avg_ms}ms` : '—'}</td>
+                <td>{perf.api_calls.slowest.ms != null ? `${perf.api_calls.slowest.ms}ms` : '—'}</td>
+                <td>{(perf.api_calls.slowest.ms ?? 0) > 500 ? '⚠️ SLOW' : '✅ OK'}</td>
+              </tr>
+            </tbody>
+          </table>
+        ) : <div style={{ color: 'var(--text-secondary)' }}>No API calls captured (set <code>METRO_LOG_PATH</code> to enable).</div>}
+      </div>
+
+      {/* 5. Issues */}
+      <div className="card">
+        <h3 style={{ margin: '0 0 12px', fontSize: '0.95rem' }}>Performance Issues</h3>
+        {perf.issues.length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {perf.issues.map((it, i) => <div key={i}>{sev(it)} {it}</div>)}
+          </div>
+        ) : <div style={{ color: '#22c55e' }}>🟢 No performance issues detected — all metrics within thresholds.</div>}
+      </div>
+    </div>
+  );
+}
+
 export default function RunDetails() {
   const { id } = useParams<{id: string}>();
   const [run, setRun] = useState<TestRun | null>(null);
   const [rca, setRca] = useState<RCAReport | null>(null);
   const [evidence, setEvidence] = useState<Evidence | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<'analysis' | 'scenarios'>('analysis');
+  const [tab, setTab] = useState<'analysis' | 'scenarios' | 'visual' | 'performance'>('analysis');
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
@@ -440,11 +728,29 @@ export default function RunDetails() {
               {run.status}
             </span>
             <BotBadge botType={run.bot_type} />
+            {(run.flaky_detected || run.is_flaky) && (
+              <span className="badge" style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '4px 10px', fontSize: '0.75rem', fontWeight: 700 }}
+                title={run.attempts ? `Passed after ${run.attempts} attempts` : 'Flaky test'}>
+                ⚡ FLAKY{run.attempts ? ` ×${run.attempts}` : ''}
+              </span>
+            )}
+            {run.visual_warning && (
+              <span className="badge" style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '4px 10px', fontSize: '0.75rem', fontWeight: 700 }}
+                title="Visual regression detected">
+                🖼️ VISUAL DIFF
+              </span>
+            )}
+            {run.crash_detected && (
+              <span className="badge" style={{ background: 'rgba(239,68,68,0.18)', color: '#ef4444', padding: '4px 10px', fontSize: '0.75rem', fontWeight: 700 }}
+                title="The app crashed during this run (app bug, not automation) — crash logs collected">
+                💥 APP CRASH
+              </span>
+            )}
             <h1 className="page-title" style={{ margin: 0 }}>{run.test_name}</h1>
           </div>
           <p className="page-subtitle">
             Suite: {run.test_suite} • Run ID: {run.id.substring(0,8)}... • 
-            Time: {format(new Date(run.created_at), "MMM d, yyyy h:mm a")} • 
+            Time: {format(parseServerDate(run.created_at), "MMM d, yyyy h:mm a")} • 
             Device: {run.device_name}
           </p>
         </div>
@@ -452,31 +758,46 @@ export default function RunDetails() {
 
       {/* ── Tab bar ── */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 24, borderBottom: '1px solid var(--border-color)' }}>
-        {(['analysis', 'scenarios'] as const).map(t => (
+        {(['analysis', 'scenarios', 'visual', 'performance'] as const).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
             style={{
               background: 'transparent', border: 'none', cursor: 'pointer',
               padding: '10px 18px', fontSize: '0.9rem', fontWeight: 600, fontFamily: 'inherit',
+              display: 'inline-flex', alignItems: 'center', gap: 6,
               color: tab === t ? 'var(--accent-primary)' : 'var(--text-secondary)',
               borderBottom: tab === t ? '2px solid var(--accent-primary)' : '2px solid transparent',
               marginBottom: -1,
             }}
           >
-            {t === 'analysis' ? 'Analysis' : 'Scenarios'}
+            {t === 'analysis' ? 'Analysis' : t === 'scenarios' ? 'Scenarios'
+              : t === 'visual' ? <><ImageIcon size={14} /> Visual</>
+              : <><Gauge size={14} /> Performance</>}
+            {t === 'visual' && run.visual_warning && (
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: '#f59e0b' }} />
+            )}
           </button>
         ))}
       </div>
 
+      {tab === 'performance' && id && <PerformanceTab runId={id} />}
+
       {tab === 'scenarios' && id && (
         <ScenariosTab runId={id} active={ACTIVE_RUN_STATES.has(run.status)} />
+      )}
+
+      {tab === 'visual' && id && (
+        <VisualTab runId={id} canUpdateBaseline={run.status === 'passed'} />
       )}
 
       {tab === 'analysis' && (
       <>
       {/* ── Live View — shown for in-progress runs ── */}
       {id && <LiveView runId={id} jobState={run.job_state} />}
+
+      {id && <AISummaryCard runId={id} />}
+      {id && <RiskPredictions runId={id} />}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '24px', alignItems: 'start' }}>
         <div>

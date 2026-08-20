@@ -14,9 +14,10 @@ import type {
 import {
   Plus, Pencil, Trash2, GitBranch, DownloadCloud, RefreshCw, FolderOpen,
   Play, AlertTriangle, CheckCircle2, XCircle, Loader2, X, Smartphone,
-  Layers, Server, HeartPulse,
+  Layers, HeartPulse,
 } from 'lucide-react';
 import ModalPortal from '../components/ModalPortal';
+import { parseServerDate } from '../time';
 
 // ── Presentation helpers ─────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ const EMPTY_FORM: ProjectInput = {
 const UNGROUPED = '__ungrouped__';
 
 const fmtDate = (iso: string | null) =>
-  iso ? new Date(iso).toLocaleString() : '—';
+  iso ? parseServerDate(iso).toLocaleString() : '—';
 
 const inputStyle: React.CSSProperties = {
   width: '100%', padding: '10px', borderRadius: '6px',
@@ -86,7 +87,6 @@ function HealthCell({ label, value, ok }: { label: string; value: React.ReactNod
 function ProjectHealth({ p }: { p: Project }) {
   const h = p.health;
   const lastRun = h.last_run;
-  const agentOnline = h.agent_status === 'online';
 
   return (
     <div style={{
@@ -116,11 +116,6 @@ function ProjectHealth({ p }: { p: Project }) {
         label="Dependencies"
         value={h.dependencies_ok ? 'Installed' : 'Not installed'}
         ok={h.dependencies_ok}
-      />
-      <HealthCell
-        label="Agent"
-        value={<><Server size={12} /> {agentOnline ? 'Online' : h.agent_status === 'offline' ? 'Offline' : 'Unknown'}</>}
-        ok={h.agent_status === 'unknown' ? undefined : agentOnline}
       />
       <HealthCell
         label="Last Run"
@@ -293,7 +288,7 @@ export default function ProjectsPage() {
    *  The build can take minutes, so this polls a background task rather than
    *  blocking on one long request.
    */
-  const doExecute = async (p: Project, generateYaml = false) => {
+  const doExecute = async (p: Project, generateYaml = false, runAfter = true) => {
     const device = devices.find(d => d.platform?.toLowerCase() === p.platform) ?? devices[0];
     if (!device) return alert('No device connected. Connect a device or boot a simulator first.');
 
@@ -336,6 +331,10 @@ export default function ProjectsPage() {
       }
 
       setProgress(null);
+      if (!runAfter) {
+        alert(`${p.name}: pulled latest + rebuilt + installed. Ready to test.`);
+        return;
+      }
       const runId = await startRun(p.id, device.id);
       navigate(`/run/${runId}`);
     } catch (e: any) {
@@ -598,6 +597,15 @@ export default function ProjectsPage() {
                   </button>
 
                   <div style={{ flex: 1 }} />
+
+                  <button
+                    onClick={() => doExecute(p, false, false)}
+                    disabled={isBusy || !cloned}
+                    title="Pull the latest merged code, force a rebuild, and install the fresh app — then run the flows to test it."
+                    style={btn('rgba(139, 92, 246, 0.25)', isBusy || !cloned)}
+                  >
+                    <RefreshCw size={14} /> Pull latest &amp; rebuild
+                  </button>
 
                   <button onClick={() => doExecute(p)} disabled={isBusy} style={btn('var(--primary)', isBusy)}>
                     {isBusy ? <Loader2 size={14} className="spin" /> : <Play size={14} />}

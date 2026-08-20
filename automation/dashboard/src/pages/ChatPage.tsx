@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { MessageSquare, Plus, Trash2, Send, Bot, Loader2, AlertTriangle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { parseServerDate } from '../time';
 import ChatMessage from '../components/ChatMessage';
 import { getSessions, getSession, deleteSession, getApiBase, getHeaders } from '../api';
 
@@ -50,7 +51,7 @@ function SessionItem({
   const [hovered, setHovered] = useState(false);
 
   const relTime = session.created_at
-    ? formatDistanceToNow(new Date(session.created_at), { addSuffix: true })
+    ? formatDistanceToNow(parseServerDate(session.created_at), { addSuffix: true })
     : '';
 
   return (

@@ -28,6 +28,7 @@ class ScenarioIn(BaseModel):
     bundle_id: Optional[str] = None
     device_id: Optional[str] = None
     steps: List[str] = []
+    covers: List[str] = []      # screens/modules this scenario exercises
 
 
 @router.get("/devices")
@@ -35,6 +36,70 @@ def scenario_devices(current_user=Depends(get_current_user)):
     """Available iOS simulators for the scenario's device picker (Booted first)."""
     from automation.scenarios.cross_app_config import list_ios_simulators
     return {"simulators": list_ios_simulators()}
+
+
+def _app_screens(project_id: str) -> List[str]:
+    """Screen/module names of the app under test — the vocabulary coverage tags
+    should use so they line up with the dependency graph's affected modules."""
+    import os
+    from automation.projects.repository import repository_manager
+    repo = repository_manager.get_repo_path(project_id)
+    if not repo:
+        return []
+    screens = set()
+    for root, dirs, _ in os.walk(repo):
+        if any(skip in root for skip in ("node_modules", ".git", "Pods", "build", "ios/", "android/")):
+            continue
+        base = os.path.basename(root).lower()
+        if base in ("screens", "views", "pages"):
+            for d in dirs:
+                if not d.startswith(".") and not d.startswith("_"):
+                    screens.add(d)
+    return sorted(screens)
+
+
+class SuggestCoversIn(BaseModel):
+    project_id: str
+    name: str = ""
+    steps: List[str] = []
+
+
+@router.post("/suggest-covers")
+def suggest_covers(body: SuggestCoversIn, current_user=Depends(get_current_user)):
+    """Suggest coverage tags for a scenario: which of the app's screens its steps
+    exercise. Grounded on the real screen list so the tags match the graph."""
+    import json as _json
+    import os
+    import httpx
+    screens = _app_screens(body.project_id)
+    if not screens:
+        return {"covers": [], "available": []}
+
+    system = ("You map a mobile test scenario to the app screens it exercises. "
+              "Return ONLY JSON {\"covers\": [screen names]}. Choose ONLY from the "
+              "provided screen list; include every screen the steps clearly pass "
+              "through (e.g. a browse-and-add-to-cart flow covers Home, StoreView, Cart).")
+    user = (f"Scenario: {body.name}\nSteps:\n" + "\n".join(f"- {s}" for s in body.steps) +
+            f"\n\nAvailable screens: {', '.join(screens)}\n\nReturn the JSON.")
+    covers: List[str] = []
+    try:
+        base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        model = os.getenv("LLM_MODEL_NAME", "llama3.2")
+        resp = httpx.post(f"{base}/api/generate",
+                          json={"model": model, "system": system, "prompt": user,
+                                "stream": False, "format": "json",
+                                "options": {"temperature": 0.1, "num_predict": 512}},
+                          timeout=120)
+        resp.raise_for_status()
+        data = _json.loads(resp.json().get("response", "{}"))
+        low = {s.lower(): s for s in screens}
+        for c in (data.get("covers") or []):
+            hit = low.get(str(c).strip().lower())
+            if hit and hit not in covers:
+                covers.append(hit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach the local model: {e}")
+    return {"covers": covers, "available": screens}
 
 
 @router.get("")
@@ -52,6 +117,7 @@ def create_scenario(body: ScenarioIn, db: Session = Depends(get_db),
         name=body.name.strip(), description=body.description,
         project_id=body.project_id, bundle_id=body.bundle_id,
         device_id=body.device_id, steps=[s for s in body.steps if s.strip()],
+        covers=[c.strip() for c in body.covers if c.strip()],
     )
     db.add(row)
     db.commit()
@@ -82,6 +148,7 @@ def update_scenario(scenario_id: str, body: ScenarioIn, db: Session = Depends(ge
     row.bundle_id = body.bundle_id
     row.device_id = body.device_id
     row.steps = [s for s in body.steps if s.strip()]
+    row.covers = [c.strip() for c in body.covers if c.strip()]
     db.commit()
     db.refresh(row)
     return row.to_dict()

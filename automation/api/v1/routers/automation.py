@@ -4,6 +4,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from automation.device_manager.service import device_service
+from automation.device_manager.models import DeviceStatus
 from automation.runner.service import runner_service
 from automation.ai.services.intelligence import AIGitImpactAnalyzer, AITestRecommendationEngine
 from automation.auth.security import require_role
@@ -23,13 +24,43 @@ class RunRequest(BaseModel):
 class StopRequest(BaseModel):
     run_id: str
 
+@router.get("/engine-status")
+def engine_status():
+    """Live health of the automation engine so the UI can show what's happening
+    instead of a run looking like it hung. Cheap checks only."""
+    import subprocess
+    from automation.projects.builder import app_builder
+    appium = app_builder._appium_healthy()
+    try:
+        out = subprocess.run(["xcrun", "simctl", "list", "devices", "booted"],
+                             capture_output=True, text=True, timeout=8).stdout
+        booted = [ln.strip() for ln in out.splitlines()
+                  if "Booted" in ln and ("iPhone" in ln or "iPad" in ln)]
+    except Exception:
+        booted = []
+    return {
+        "appium": {"healthy": appium, "url": app_builder.APPIUM_URL,
+                   "note": "ready" if appium else "not running — it will auto-start on the next run"},
+        "booted_simulators": booted,
+        "ready": appium,
+    }
+
+
 @router.get("/devices")
 def get_devices():
+    # Discover local iOS simulators directly so the dropdown is populated even
+    # when no agent is running (booted sims first — those are runnable now).
+    try:
+        device_service.discover_local_simulators(booted_only=False)
+    except Exception:
+        pass
     devices = device_service.get_all_devices()
+    # Sort ONLINE (booted) first so a runnable device is preselected.
+    devices = sorted(devices, key=lambda d: 0 if getattr(d, "status", None) == DeviceStatus.ONLINE else 1)
     return {
         "count": len(devices),
         "devices": devices,
-        "warning": None if devices else "No devices connected. Connect a physical or emulator device via ADB and restart the agent."
+        "warning": None if devices else "No simulators found. Boot an iOS simulator (Xcode ▸ Open Developer Tool ▸ Simulator) and refresh."
     }
 
 @router.get("/devices/{device_id}")

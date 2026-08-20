@@ -7,7 +7,7 @@ import threading
 import requests
 import logging
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 
@@ -29,6 +29,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Agent")
 
 PLATFORM_URL = os.getenv("PLATFORM_URL", "http://localhost:8000/api/v1")
+
+# One session for every platform call, so the agent token is attached in ONE
+# place instead of on each of the ~10 call sites (where the next one added
+# would silently forget it).
+AGENT_TOKEN = os.getenv("AGENT_TOKEN", "").strip()
+HTTP = requests.Session()
+if AGENT_TOKEN:
+    HTTP.headers["X-Agent-Token"] = AGENT_TOKEN
 AGENT_ID = None
 
 # Job ids this agent process has already executed — a duplicate dispatch of the
@@ -102,7 +110,7 @@ def heartbeat_loop():
         try:
             if AGENT_ID:
                 devices = discover_devices()
-                requests.post(
+                HTTP.post(
                     f"{PLATFORM_URL}/agents/{AGENT_ID}/heartbeat",
                     json={"status": "online", "connected_devices": devices},
                     timeout=5
@@ -113,7 +121,7 @@ def heartbeat_loop():
 
 def report_status(job_id: str, status: str, logs: List[str] = [], timeline_event: str = None, error_message: str = None):
     try:
-        requests.post(
+        HTTP.post(
             f"{PLATFORM_URL}/jobs/{job_id}/status",
             json={
                 "status": status,
@@ -131,7 +139,7 @@ def _upload_evidence_with_retry(job_id: str, evidence_data: dict, max_retries: i
     import time as _time
     for attempt in range(1, max_retries + 1):
         try:
-            res = requests.post(
+            res = HTTP.post(
                 f"{PLATFORM_URL}/jobs/{job_id}/evidence",
                 json={"evidence": evidence_data},
                 timeout=15
@@ -155,7 +163,7 @@ def _post_frame(job_id: str, png_bytes: bytes) -> None:
     network hiccups never crash the capture loop or the parent job thread.
     """
     try:
-        requests.post(
+        HTTP.post(
             f"{PLATFORM_URL}/jobs/{job_id}/stream/frame",
             data=png_bytes,
             headers={
@@ -171,7 +179,7 @@ def _post_frame(job_id: str, png_bytes: bytes) -> None:
 def _signal_stream_ended(job_id: str) -> None:
     """Send an empty-body POST to tell the backend the stream is finished."""
     try:
-        requests.post(
+        HTTP.post(
             f"{PLATFORM_URL}/jobs/{job_id}/stream/frame",
             data=b"",
             headers={
@@ -279,6 +287,100 @@ def _has_test_suite(project_id: str, config) -> bool:
     return True
 
 
+def _run_planned_scenarios(job_id: str, project_id: str, device_id: str,
+                           planned: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Run the planner's chosen scenarios through the SCENARIO runner.
+
+    The plan selects saved scenarios (plain-language steps), which pytest cannot run —
+    they are executed by the same engine the Scenarios page and the autotest path use.
+    Returns the shape execute() returns, so the caller treats both paths identically,
+    and writes one scenario_results row per scenario so the run shows its steps.
+    """
+    from automation.database.config import SessionLocal
+    from automation.database.models import ScenarioResult
+    from automation.api.v1.routers.scenario import ScenarioRequest, run_scenario_headless
+
+    logs: List[str] = []
+    passed = 0
+    with SessionLocal() as db:
+        for i, sc in enumerate(planned, 1):
+            name = sc.get("name") or f"scenario {i}"
+            try:
+                outcome = run_scenario_headless(
+                    ScenarioRequest(project_id=project_id, steps=sc.get("steps") or [],
+                                    device_id=device_id, name=name, save=False,
+                                    prepare=False),
+                    db,
+                )
+            except Exception as e:
+                outcome = {"ok": False, "steps": [], "error": str(e)[:300]}
+            ok = bool(outcome.get("ok"))
+            passed += ok
+            reasons = [f"{s.get('step')} — {'ok' if s.get('ok') else 'FAIL'}"
+                       for s in (outcome.get("steps") or [])]
+            if outcome.get("error"):
+                reasons.append(f"[FAIL] {outcome['error']}")
+            logs.append(f"{'PASS' if ok else 'FAIL'} {name}")
+
+            row = (db.query(ScenarioResult)
+                   .filter_by(run_id=job_id, scenario_num=str(i)).first())
+            if row is None:
+                row = ScenarioResult(run_id=job_id, scenario_num=str(i))
+                db.add(row)
+            row.scenario_name = name[:500]
+            row.status = "PASS" if ok else "FAIL"
+            row.consumer_status = "N/A"
+            row.business_status = "N/A"
+            row.reasons = reasons
+            row.error = None if ok else (outcome.get("error")
+                                         or "; ".join(r for r in reasons if "FAIL" in r))[:500]
+        db.commit()
+
+    total = len(planned)
+    failed = total - passed
+    return {
+        "status": "passed" if total and not failed else "failed",
+        "detail": (f"{passed}/{total} planned scenario(s) passed." if total
+                   else "The plan selected no runnable scenarios."),
+        "logs": logs, "exit_code": 0 if not failed else 1,
+        "tests": total, "failures": failed, "errors": 0, "skipped": 0,
+        "attempts": 1, "flaky_detected": False,
+        "evidence_dir": None,
+    }
+
+
+# Wipe the app before AND after each PR job, so one PR's run cannot inherit the previous
+# one's login, cache or half-finished screen. OFF by default on purpose: a wiped app
+# comes back at first-run (onboarding carousel, signed out) and NO consumer scenario
+# handles that yet — turning this on today makes every consumer PR test fail the way a
+# fresh simulator did. Turn it on once a first-run preamble exists.
+FRESH_INSTALL_PER_JOB = os.getenv("FRESH_INSTALL_PER_JOB", "").lower() in ("1", "true", "yes")
+
+
+def _bundle_id_for(project_id: str, config) -> Optional[str]:
+    """The app's bundle id, from automation.yaml's built artifact."""
+    try:
+        app = getattr(getattr(config, "environment", None), "app", None)
+        if app and os.path.exists(app):
+            from automation.projects.builder import app_builder
+            return app_builder._bundle_id(app)
+    except Exception as e:
+        logger.warning(f"Could not resolve bundle id: {e}")
+    return None
+
+
+def _wipe_app(device_id: str, bundle_id: Optional[str], platform: str, when: str) -> None:
+    """Best-effort uninstall — never fails a job over cleanup."""
+    if not bundle_id:
+        return
+    try:
+        from automation.projects.builder import app_builder
+        ok, msg = app_builder.uninstall(device_id, bundle_id, platform)
+        logger.info(f"Fresh-install ({when}): {msg}")
+    except Exception as e:
+        logger.warning(f"Uninstall ({when}) failed: {e}")
+
+
 def run_job(job: Dict[str, Any], connected_devices: List[str]):
 
     job_id = job["job_id"]
@@ -312,6 +414,7 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
     # Screen capture state — declared here so finally block can always reference it.
     capture_thread: threading.Thread | None = None
     stop_capture_event = threading.Event()
+    perf_collector = None  # declared here so finally can always stop it
         
     try:
         # 1. Prepare the project. This ALWAYS runs before validation:
@@ -323,6 +426,12 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
             [f"Preparing repository {git_url} (branch: {branch})..."],
             "Git Sync",
         )
+
+        # Clean slate for this PR, when enabled — see FRESH_INSTALL_PER_JOB.
+        if FRESH_INSTALL_PER_JOB and job.get("is_pr"):
+            _cfg = repository_manager.validate_yaml(project_id)
+            _wipe_app(device_id, _bundle_id_for(project_id, _cfg) if _cfg else None,
+                      (job.get("platform") or "ios"), "before")
 
         prep = preparation_service.prepare_for_execution(
             project_id,
@@ -362,6 +471,29 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
 
         framework = AppiumFramework()
 
+        # 2a. Start performance collection (CPU/mem/API sampling) for iOS runs.
+        perf_collector = None
+        try:
+            from automation.performance.collector import PerformanceCollector
+            _bundle = None
+            try:
+                _bundle = getattr(getattr(config, "execution", None), "bundle_id", None) \
+                    or getattr(config, "bundle_id", None)
+            except Exception:
+                _bundle = None
+            _metro_log = os.getenv("METRO_LOG_PATH")
+            perf_collector = PerformanceCollector(
+                device_id=device_id, run_id=job_id,
+                bundle_id=_bundle, metro_log_path=_metro_log)
+            perf_collector.start()
+            if _bundle:
+                lt = perf_collector.measure_app_launch_time(_bundle)
+                if lt is not None:
+                    report_status(job_id, "running", [f"App launch time: {lt:.2f}s"])
+        except Exception as _pe:
+            logger.warning(f"perf collector start failed: {_pe}")
+            perf_collector = None
+
         # 2. Start screen capture BEFORE executing tests so the browser can
         #    watch from the very first moment the suite launches. By this point
         #    the app is already built, installed and launched, so the stream
@@ -372,11 +504,16 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
         #    A repo with no Appium tests is not a failure: the app was deployed
         #    and is running on the device. Reporting that as "failed" makes a
         #    perfectly healthy platform look broken.
-        if not _has_test_suite(project_id, config):
+        # A PLAN does not need a repo test suite — planned scenarios are platform-side
+        # (plain-language steps run by the scenario runner), not pytest files. This check
+        # sat BEFORE the plan branch, so a job carrying 10 planned scenarios still
+        # short-circuited to "no tests to run" and reported PASSED without executing one.
+        if not (job.get("planned_scenarios") or []) and not _has_test_suite(project_id, config):
             report_status(
                 job_id, "running",
                 ["App built, installed and launched on the device.",
-                 "No test suite found in the repository — nothing to execute.",
+                 "No test suite found in the repository, and no plan for this job — "
+                 "nothing to execute.",
                  f"Add an Appium suite and set execution.command (currently: "
                  f"{config.execution.command!r}) to run automated tests."],
                 "App Deployed",
@@ -385,32 +522,95 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
             time.sleep(8)
             _stop_screen_capture(job_id, capture_thread, stop_capture_event)
             capture_thread = None
+            # NOT "passed". Nothing was verified about the change — the app merely
+            # built and launched. Reporting green here means a PR with no runnable
+            # tests looks identical to a PR whose tests all passed, which is exactly
+            # how empty runs kept showing up as green ticks.
             report_status(
-                job_id, "passed",
-                ["Deployment verified. No tests to run."],
-                "Done",
+                job_id, "no_tests",
+                ["Deployment verified — the app built, installed and launched.",
+                 "NO TESTS RAN, so this is not a pass: nothing was verified."],
+                "Deployed (not tested)",
+                "No test suite and no plan — nothing was executed.",
             )
             return
 
-        report_status(job_id, "running", ["Executing tests..."], "Executing")
-        exec_res = framework.execute(project_id, device_id, {"command": config.execution.command}, job_id)
+        # RUN THE PLAN when the job carries one. The planner selects scenarios via the
+        # dependency graph and the linked ticket, but the agent used to ignore that
+        # entirely and run the project's fixed execution.command — so "smart selection"
+        # never reached execution and every PR ran the same suite.
+        planned = job.get("planned_scenarios") or []
+        if planned:
+            report_status(job_id, "running",
+                          [f"Executing {len(planned)} planned scenario(s) for this change: "
+                           + ", ".join(s.get("name", "?") for s in planned)],
+                          "Executing")
+            exec_res = _run_planned_scenarios(job_id, project_id, device_id, planned)
+        else:
+            report_status(job_id, "running",
+                          ["No plan for this job — running the project's default command."],
+                          "Executing")
+            # Flaky auto-retry: retries on failure and flags the run if it only passed on a retry.
+            exec_res = framework.execute_with_retry(
+                project_id, device_id, {"command": config.execution.command}, job_id,
+                max_retries=2)
 
         status = exec_res.get("status", "failed")
         logs = exec_res.get("logs", [])
+        attempts = exec_res.get("attempts", 1)
+        flaky = bool(exec_res.get("flaky_detected"))
+        if attempts > 1:
+            logs = list(logs) + [f"Ran {attempts} attempt(s)" + (" — FLAKY (passed on retry)" if flaky else "")]
+        # Persist attempts/flaky onto the run so the dashboard can badge it.
+        try:
+            HTTP.post(
+                f"{PLATFORM_URL}/jobs/{job_id}/status",
+                json={"status": "running", "attempts": attempts, "flaky_detected": flaky},
+                timeout=10,
+            )
+        except Exception:
+            pass
 
         # 5. Stop capture as soon as pytest exits.
         _stop_screen_capture(job_id, capture_thread, stop_capture_event)
         capture_thread = None  # prevent double-stop in finally
         
         report_status(job_id, "collecting_evidence", logs, f"Execution {status}")
-        
+
+        # 5b. Stop performance collection, persist summary, attach to evidence.
+        perf_summary = None
+        if perf_collector is not None:
+            try:
+                perf_collector.stop()          # halt sampling thread
+                perf_summary = perf_collector.save_to_db()
+                report_status(job_id, "collecting_evidence",
+                              [f"Performance: score {perf_summary.get('performance_score')} "
+                               f"(grade {perf_summary.get('grade')})"])
+            except Exception as _pe:
+                logger.warning(f"perf stop/save failed: {_pe}")
+
         # 6. Upload Evidence
         evidence_data = framework.collect_evidence(project_id, exec_res)
         evidence_data["run_id"] = job_id
+        if perf_summary is not None:
+            evidence_data["performance"] = perf_summary
         _upload_evidence_with_retry(job_id, evidence_data)
 
         final_status = "passed" if status == "passed" else "failed"
-        report_status(job_id, final_status, ["Execution Complete."], "Done")
+        # Carry the REASON through. This used to report only "Execution Complete." with no
+        # error_message, so a failed job showed a blank cause in the dashboard — a 48-minute
+        # run that failed told you nothing about why.
+        detail = exec_res.get("detail") or ""
+        counts = (f"{exec_res.get('tests', 0)} test(s), "
+                  f"{exec_res.get('failures', 0)} failed, "
+                  f"{exec_res.get('errors', 0)} errored, "
+                  f"{exec_res.get('skipped', 0)} skipped")
+        report_status(
+            job_id, final_status,
+            [f"Execution complete — {counts}." + (f" {detail}" if detail else "")],
+            "Done",
+            None if final_status == "passed" else (detail or f"Tests failed ({counts})"),
+        )
         
     except Exception as e:
         logger.error(f"Job Execution Error: {e}")
@@ -419,10 +619,25 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
         # Always stop capture if it wasn't already stopped cleanly above.
         if capture_thread is not None:
             _stop_screen_capture(job_id, capture_thread, stop_capture_event)
+        # Never leak the perf-collector thread on an error path.
+        if perf_collector is not None and getattr(perf_collector, "is_collecting", False):
+            try:
+                perf_collector.stop()
+                perf_collector.save_to_db()
+            except Exception:
+                pass
         try:
             framework.cleanup(project_id)
         except Exception:
             pass
+        # Remove the app so the NEXT job starts clean (opt-in — see FRESH_INSTALL_PER_JOB).
+        if FRESH_INSTALL_PER_JOB and job.get("is_pr"):
+            try:
+                _cfg = repository_manager.validate_yaml(project_id)
+                _wipe_app(device_id, _bundle_id_for(project_id, _cfg) if _cfg else None,
+                          (job.get("platform") or "ios"), "after")
+            except Exception:
+                pass
 
 def poll_loop():
     global AGENT_ID
@@ -430,7 +645,7 @@ def poll_loop():
         try:
             devices = [d["id"] for d in discover_devices()]
             # devices always has at least the virtual fallback — no early bail-out needed
-            res = requests.post(
+            res = HTTP.post(
                 f"{PLATFORM_URL}/jobs/poll",
                 json={"agent_id": AGENT_ID, "connected_devices": devices},
                 timeout=5
@@ -452,7 +667,7 @@ def main():
     devices = discover_devices()
     
     logger.info(f"Registering agent {hostname}...")
-    res = requests.post(
+    res = HTTP.post(
         f"{PLATFORM_URL}/agents/register",
         json={
             "hostname": hostname,

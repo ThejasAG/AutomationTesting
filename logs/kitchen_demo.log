@@ -1,0 +1,26 @@
+RUN_ID ddfa82ca-e803-472b-baf6-6205e832289f
+[108s] «Waiter: create a booking» [ok] logged in as waiter
+[108s] «Waiter: create a booking» ▶ click addNewEvent
+[126s] «Waiter: create a booking» ▶ type roopa in firstName
+[180s] «Waiter: create a booking» ▶ type D in lastName
+[264s] «Waiter: create a booking» ▶ @hide_keyboard
+[288s] «Waiter: create a booking» ▶ click anyBtn
+[306s] «Waiter: create a booking» ▶ @first_time_slot
+[589s] «Waiter: create a booking» [ok] @first_time_slot — could not select slot '11:04Btn' (Command '['/usr/local/bin/idb', 'ui', 'tap', '--udid', 'D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B', '1026', '793']' timed out after 9.999476420000065 seconds); continuing
+[589s] «Waiter: create a booking» [FAIL] @first_time_slot — timed out after 150s (step hung; aborting segment). Screen: []
+[589s] «Waiter: assign table + send to kitchen» ▶ @open_reservation
+[662s] «Waiter: assign table + send to kitchen»     · relaunch note: WebDriverException
+[662s] «Waiter: assign table + send to kitchen» [FAIL] @open_reservation — bookings list never loaded for THU 6 (waiter backend fetch failing / not synced)
+[662s] «Waiter: assign table + send to kitchen»     ↳ on screen: []
+[662s] «Waiter: assign table + send to kitchen» ▶ @assign_table
+[686s] «Waiter: assign table + send to kitchen» [ok] @assign_table — no Confirm button visible; continuing
+[686s] «Waiter: assign table + send to kitchen» [ok] @ensure_order_items — no addItems button (already has items?); continuing
+[686s] «Waiter: assign table + send to kitchen» ▶ click selectAllItemsBtn
+[698s] «Waiter: assign table + send to kitchen»     ↳ on screen: []
+[698s] «Waiter: assign table + send to kitchen» ▶ click sendItemsBtn
+logout text not found in Menu — account switch may fail (TUNE)
+[716s] «Kitchen: mark the order ready» [ok] logged in as kitchen
+[716s] «Kitchen: mark the order ready» ▶ @kitchen_ready
+[716s] «Waiter: assign table + send to kitchen»     ↳ on screen: []
+[734s] «Kitchen: mark the order ready»     ↳ on screen: []
+DONE status=failed after 734s

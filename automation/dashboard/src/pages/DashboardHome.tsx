@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued } from '../api';
+import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued, getTrendSummary } from '../api';
 import CrossAppRunModal from '../components/CrossAppRunModal';
 import type { TestRun, Trends, Device } from '../api';
 import { Activity, AlertTriangle, CheckCircle2, ChevronRight, Clock, FileText, Smartphone, PlayCircle, Square, Loader2 } from 'lucide-react';
-import { formatDistanceToNow, parseISO } from 'date-fns';
+import { formatDistanceToNow } from 'date-fns';
+import { parseServerDate } from '../time';
 
 // A run that has not reached a terminal state can still be stopped.
 const STOPPABLE = new Set(['queued', 'running', 'pending', 'preparing', 'downloading', 'collecting_evidence']);
@@ -30,6 +31,19 @@ export default function DashboardHome() {
   const [cancelling, setCancelling] = useState(false);
   const navigate = useNavigate();
   const [crossAppModal, setCrossAppModal] = useState(false);
+  const [trendSummary, setTrendSummary] = useState<string>('');
+
+  const flakyCount = runs.filter(r => r.flaky_detected || r.is_flaky).length;
+
+  useEffect(() => {
+    const projectId = runs.find(r => r.project_id)?.project_id;
+    if (!projectId) return;
+    let cancelled = false;
+    getTrendSummary(projectId, 7)
+      .then(r => { if (!cancelled) setTrendSummary(r.summary); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [runs]);
 
   async function refreshRuns() {
     try { setRuns(await getRuns()); setRunsError(null); } catch { setRunsError("Failed to load Runs."); }
@@ -193,6 +207,28 @@ export default function DashboardHome() {
         </div>
       )}
 
+      {/* ── Flaky KPI + Weekly Trend ── */}
+      <div className="grid-3" style={{ marginBottom: '40px' }}>
+        <div className="card">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+            <span style={{ fontSize: 16 }}>⚡</span> Flaky Tests
+          </div>
+          <div className="stat-value" style={{ color: flakyCount > 0 ? '#f59e0b' : undefined }}>{flakyCount}</div>
+          <div style={{ marginTop: '8px', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+            Passed only after a retry (recent runs)
+          </div>
+        </div>
+
+        <div className="card" style={{ gridColumn: 'span 2' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
+            <Activity size={18} color="var(--accent-primary)" /> Weekly Trend
+          </div>
+          <p style={{ marginTop: 12, marginBottom: 0, lineHeight: 1.6 }}>
+            {trendSummary || 'Generating weekly trend summary…'}
+          </p>
+        </div>
+      </div>
+
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', gap: 12, flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
           <h2 style={{ fontSize: '1.25rem', margin: 0 }}>Recent Test Runs</h2>
@@ -249,7 +285,27 @@ export default function DashboardHome() {
                       {run.status}
                     </span>
                   </td>
-                  <td style={{ fontWeight: 500 }}>{run.test_name}</td>
+                  <td style={{ fontWeight: 500 }}>
+                    {run.test_name}
+                    {(run.flaky_detected || run.is_flaky) && (
+                      <span title={run.attempts ? `Passed after ${run.attempts} attempts` : 'Flaky'}
+                        style={{ marginLeft: 8, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '1px 7px', borderRadius: 999, fontSize: '0.68rem', fontWeight: 700 }}>
+                        ⚡ FLAKY
+                      </span>
+                    )}
+                    {run.visual_warning && (
+                      <span title="Visual regression detected"
+                        style={{ marginLeft: 6, background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '1px 7px', borderRadius: 999, fontSize: '0.68rem', fontWeight: 700 }}>
+                        🖼️
+                      </span>
+                    )}
+                    {run.crash_detected && (
+                      <span title="App crashed during this run (app bug)"
+                        style={{ marginLeft: 6, background: 'rgba(239,68,68,0.18)', color: '#ef4444', padding: '1px 7px', borderRadius: 999, fontSize: '0.68rem', fontWeight: 700 }}>
+                        💥
+                      </span>
+                    )}
+                  </td>
                   <td><span style={{ color: 'var(--text-secondary)', fontFamily: 'monospace', fontSize: '0.8rem', background: 'rgba(255,255,255,0.05)', padding: '2px 6px', borderRadius: '4px' }}>{run.test_suite}</span></td>
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
@@ -262,7 +318,7 @@ export default function DashboardHome() {
                     </div>
                   </td>
                   <td style={{ color: 'var(--text-secondary)' }}>
-                    {formatDistanceToNow(parseISO(run.created_at), { addSuffix: true })}
+                    {formatDistanceToNow(parseServerDate(run.created_at), { addSuffix: true })}
                   </td>
                   <td style={{ textAlign: 'right' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px' }}>

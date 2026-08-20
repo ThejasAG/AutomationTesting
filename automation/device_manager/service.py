@@ -70,6 +70,53 @@ class DeviceDiscoveryService:
         self._devices_cache[udid] = dev
         return dev
 
+    def discover_local_simulators(self, booted_only: bool = True) -> List[Device]:
+        """List the Mac's iOS simulators via `xcrun simctl` and register them as
+        local devices, so the Automation page shows them even with no agent.
+        booted_only=True → only running sims (the ones you can execute on)."""
+        import json as _json
+        import subprocess as _sp
+        try:
+            out = _sp.run(
+                ["xcrun", "simctl", "list", "devices", "available", "-j"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+            data = _json.loads(out)
+        except Exception as e:
+            logger.warning("simulator discovery failed: %s", e)
+            return self.get_all_devices()
+
+        found: List[Device] = []
+        for runtime, devs in (data.get("devices") or {}).items():
+            # iOS only — skip tvOS / watchOS / visionOS runtimes.
+            if "iOS-" not in runtime:
+                continue
+            ver = runtime.split("iOS-")[-1].replace("-", ".")
+            for d in devs:
+                if not d.get("isAvailable", True):
+                    continue
+                name = d.get("name", "iOS Simulator")
+                # Only phones/tablets — no Apple TV / Watch entries.
+                if not (name.startswith("iPhone") or name.startswith("iPad")):
+                    continue
+                booted = d.get("state") == "Booted"
+                if booted_only and not booted:
+                    continue
+                dev = Device(
+                    id=d["udid"], name=d.get("name", "iOS Simulator"),
+                    manufacturer="Apple", model=d.get("name", "iOS Simulator"),
+                    platform="iOS", platform_version=ver,
+                    status=DeviceStatus.ONLINE if booted else DeviceStatus.DISCONNECTED,
+                    provider="local", last_seen=datetime.utcnow(),
+                )
+                self._devices_cache[d["udid"]] = dev
+                found.append(dev)
+        return found
+
+    def refresh_devices(self) -> List[Device]:
+        """Re-scan local simulators (used by the Automation page's refresh)."""
+        return self.discover_local_simulators(booted_only=False)
+
     def get_device(self, device_id: str) -> Optional[Device]:
         return self._devices_cache.get(device_id)
 

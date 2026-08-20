@@ -18,3 +18,4 @@ reports/
 .env
 automation/android_bot/bot_queue.json
 cross_app_config.json
+
