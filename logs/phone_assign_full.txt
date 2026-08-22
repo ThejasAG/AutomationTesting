@@ -1,0 +1,8 @@
+ROLE unknown
+SHEET_UP_NOW True
+Traceback (most recent call last):
+  File "<stdin>", line 24, in <module>
+  File "/Users/roops/Desktop/AutomationTestining/AutomationTesting/automation/scenarios/cross_app_flows.py", line 1704, in _assign_table
+    if want and pick is None:
+       ^^^^
+NameError: name 'want' is not defined

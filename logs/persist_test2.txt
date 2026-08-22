@@ -1,0 +1,10 @@
+P| open#1 -> True
+P| sheet_after_open#1 True
+P| assign -> False
+P|        · @assign_table — selected 'T0AssignAnyBtn' (verified: commit button went from disabled to enabled)
+P|    [FAIL] @assign_table — clicked Apply after selecting 'T0AssignAnyBtn' but the sheet never closed, so the table was NOT assigned
+P| screen_after_assign ['STG-VyaBusiness', 'My Bookings', 'allBtn', 'tableBtn', 'pickupBtn', 'August 2026', 'SUN 16', 'MON 17', 'TUE 18', 'WED 19']
+P| open#2 -> True
+P| sheet_after_open#2 = True   (True == still NOT assigned)
+P| screen ['STG-VyaBusiness', 'closeModal', 'Please assign a Table', 'T0AssignAnyBtn', 'T1AssignAnyBtn', 'T2AssignAnyBtn', 'T3AssignAnyBtn', 'T4AssignAnyBtn', 'T5AssignAnyBtn', 'T6AssignAnyBtn', 'T7AssignAnyBtn', 'T8AssignAnyBtn']
+P| sendItemsBtn present: False  selectAllItemsBtn: False

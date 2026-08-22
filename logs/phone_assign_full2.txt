@@ -1,0 +1,5 @@
+SHEET_UP True
+ASSIGN_TABLE -> False
+NOTE| [FAIL] @assign_table — clicked 'T0AssignAnyBtn' but the app does not report it selected (selected=none). The tap did not reach the chip.
+SHEET_STILL_UP False
+AFTER ['STG-VyaBusiness', 'My Bookings', 'allBtn', 'tableBtn', 'pickupBtn', 'August 2026', 'SUN 16', 'MON 17', 'TUE 18', 'WED 19', 'THU 20', 'FRI 21', 'SAT 22', 'SUN 23', 'MON 24', 'TUE 25']

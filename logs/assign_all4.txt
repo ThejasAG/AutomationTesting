@@ -1,0 +1,12 @@
+P| role_before unknown
+P| login -> True
+P|        · app is on an unrecognised screen — relaunching once
+P|        · already logged in as waiter after recovery
+P| role_now waiter
+P| open -> True
+P|        · booked slot '16:00' → target 16:00 row
+P|    [ok] @open_reservation — opened 'RoopaDReservedCard' (auto-scrolled) at slot '16:00'
+P| ASSIGN -> True  (56s)
+P|        · @assign_table — selected 'T0AssignAnyBtn' (verified: commit button went from disabled to enabled)
+P|    [ok] @assign_table — assigned 'T0' and the sheet closed
+P| sendItemsBtn: False  selectAllItemsBtn: True

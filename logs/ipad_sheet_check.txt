@@ -1,0 +1,6 @@
+RES modifyTable found 1
+RES elements 165
+RES chips 0 []
+RES applyTableBtn False
+RES appium tableChipI1 = 0
+RES appium applyTableBtn = 0

@@ -1,0 +1,10 @@
+ROLE waiter
+OPEN_RESERVATION -> False
+NOTE|     · booked slot '12:00' → target 12:00 row
+NOTE|     · note: 2 identical 'RoopaDReservedCard' cards in the 12:00 row — opened the first
+NOTE|     · @open_reservation — clicked 'RoopaDReservedCard' but the reservation did not open; retrying once
+NOTE|     · @open_reservation — could not scroll 'RoopaDReservedCard' into view; clicking anyway
+NOTE| [FAIL] @open_reservation — found 'RoopaDReservedCard' but could not open it (WDA click)
+AFTER n=15
+MARKERS []
+LABELS ['STG-VyaBusiness', 'closeModal', 'Please assign a Table', 'T0AssignAnyBtn', 'T1AssignAnyBtn', 'T2AssignAnyBtn', 'T3AssignAnyBtn', 'T4AssignAnyBtn', 'T5AssignAnyBtn', 'T6AssignAnyBtn', 'T7AssignAnyBtn', 'T8AssignAnyBtn', '29 Each child in a list should have a unique "key" prop.\n\nCheck the render method of `ForwardRef(PaymentDetails)`. See https://reactjs.org/link/warning-keys for more information.', 'AssignTableBtn', '3 no valid “aps-environment” entitlement string found for application {"message":"no valid “aps-environment” entitlement string found for application","details":{"NSLocalizedDescription":"no valid “aps-environment” entitlement string found for application"},"code":3000}']

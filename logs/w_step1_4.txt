@@ -1,0 +1,17 @@
+R| ENV bundle source: RCT_jsLocation=localhost:8083 (expected localhost:8083, metro 8083 is up) -> OK
+R| STEP1 role_before waiter
+WARNING:cross_app_flows:business logout did not reach the sign-in screen — switch may fail; trail: attempt 1: role=waiter | menuBtn found=0 | logOutBtn found=1 | logOutBtn clicked | confirmed via 'logOutBtn' | still role=waiter after ~12s | attempt 2: role=waiter | menuBtn found=0 | logOutBtn found=1 | logOutBtn clicked | confirmed via 'logOutBtn' | still role=waiter after ~12s
+R| STEP1 role_after_logout waiter
+R| STEP1 login -> True
+R|        · already logged in as waiter (detected waiter home) — skipping sign-in
+R| STEP2 role_now waiter
+R| STEP2 waiter markers ['addNewEvent', 'qrScaner']
+R| STEP3 cards ['RaajeshAnandavelExpiredCard', 'RoopaDExpiredCard', 'RoopaDReservedCard']
+R| STEP3 choose -> None | diag: multiple cards for 'Roopa' and no booked hour to disambiguate: RoopaDReservedCard, RoopaDReservedCard
+R| STEP4 open -> False
+R|        · card not found — relaunching business app once and retrying
+R|    [FAIL] @open_reservation — no reserved/confirmationpending card for diner 'Roopa' on FRI 21 near ? (already assigned, or backend not synced)
+R|        ↳ [RESERVATION] multiple cards for 'Roopa' and no booked hour to disambiguate: RoopaDReservedCard, RoopaDReservedCard
+R|        ↳ 9 card element(s) seen; rejected-for-width: none; labels: ['RaajeshAnandavelExpiredCard', 'RoopaDExpiredCard', 'RoopaDReservedCard']
+R| STEP4 after: ['STG-VyaBusiness', 'My Bookings', 'allBtn', 'tableBtn', 'pickupBtn', 'August 2026', 'SUN 16', 'MON 17', 'TUE 18', 'WED 19', 'THU 20', 'FRI 21', 'SAT 22', 'SUN 23']
+R| STEP4 sheet_up False

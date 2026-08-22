@@ -55,10 +55,30 @@ APPIUM_URL = "http://127.0.0.1:4723"
 # 8081 (which serves the Consumer bundle), so it runs its own packager on 8082
 # and is pointed at it via RCTBundleURLProvider's RCT_jsLocation user-default.
 BUSINESS_METRO_PORT = 8082
+# STAGING business is a SEPARATE checkout with its own API base
+# (vya.xorstack.com, vs api.vyapy.com for prod), so it needs its own packager.
+# Serving the staging app from 8082 hands it the PROD bundle: the app then talks
+# to api.vyapy.com while the run signs in with staging credentials, and the login
+# fails with what looks like a Firebase/getToken problem. MEASURED: the iPhone 16
+# held RCT_jsLocation=localhost:8082 and could never sign in, while the iPad held
+# 8083 and signed in fine on the same build.
+BUSINESS_STAGING_METRO_PORT = 8083
+BUSINESS_STAGING_PROJECT_ID = "5a430056-efd4-49af-8679-7b86a91f9f64"
 # Business login labels — captured live once the app loads from :8082.
 BIZ_EMAIL_FIELD = "emailValue"
 BIZ_PASSWORD_FIELD = "passwordValue"
 BIZ_SIGNIN_BTN = "signInBtn"
+
+
+def _business_metro_target(bundle: str):
+    """(metro_port, project_id) for the business bundle actually being driven.
+
+    The staging and prod business apps are different checkouts pointing at
+    different API hosts, so they cannot share one packager.
+    """
+    if (bundle or "").endswith("staging"):
+        return BUSINESS_STAGING_METRO_PORT, BUSINESS_STAGING_PROJECT_ID
+    return BUSINESS_METRO_PORT, BUSINESS_PROJECT_ID
 
 
 def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
@@ -70,19 +90,20 @@ def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
     RCT_jsLocation is never set and the staging app shows blank (this bit a fresh
     iPhone that had never had the default persisted).
     """
+    port, project_id = _business_metro_target(bundle)
     # Already up?
     try:
-        if httpx.get(f"http://localhost:{BUSINESS_METRO_PORT}/status", timeout=3).status_code == 200:
+        if httpx.get(f"http://localhost:{port}/status", timeout=3).status_code == 200:
             pass
         else:
             raise RuntimeError("not running")
     except Exception:
-        repo = rm.get_repo_path(BUSINESS_PROJECT_ID)
+        repo = rm.get_repo_path(project_id)
         env = dict(os.environ, NODE_OPTIONS="--max-old-space-size=8192",
-                   RCT_METRO_PORT=str(BUSINESS_METRO_PORT))
+                   RCT_METRO_PORT=str(port))
         try:
             subprocess.Popen(
-                ["npx", "react-native", "start", "--port", str(BUSINESS_METRO_PORT)],
+                ["npx", "react-native", "start", "--port", str(port)],
                 cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL, start_new_session=True,
             )
@@ -91,7 +112,7 @@ def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
             return False
         for _ in range(60):
             try:
-                if httpx.get(f"http://localhost:{BUSINESS_METRO_PORT}/status", timeout=3).status_code == 200:
+                if httpx.get(f"http://localhost:{port}/status", timeout=3).status_code == 200:
                     break
             except Exception:
                 pass
@@ -101,13 +122,13 @@ def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
     try:
         subprocess.run(
             ["xcrun", "simctl", "spawn", udid, "defaults", "write", bundle,
-             "RCT_jsLocation", f"localhost:{BUSINESS_METRO_PORT}"],
+             "RCT_jsLocation", f"localhost:{port}"],
             check=False, timeout=15,
         )
     except Exception as e:
         logger.warning("Could not set RCT_jsLocation for Business app: %s", e)
     try:
-        return httpx.get(f"http://localhost:{BUSINESS_METRO_PORT}/status", timeout=3).status_code == 200
+        return httpx.get(f"http://localhost:{port}/status", timeout=3).status_code == 200
     except Exception:
         return False
 

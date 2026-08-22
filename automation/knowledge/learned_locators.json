@@ -49,12 +49,12 @@
 "ts": 1786101895
 },
 "selectallitemsbtn": {
-"hits": 1,
-"heals": 0,
+"hits": 5,
+"heals": 4,
 "drifts": 0,
 "method": "aid",
 "value": "selectAllItemsBtn",
-"ts": 1786185215
+"ts": 1787302346
 }
 },
 "org.vyapy.sarls.vyaconsumerstaging": {

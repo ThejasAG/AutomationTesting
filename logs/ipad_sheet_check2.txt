@@ -1,0 +1,7 @@
+RES board back 6 s
+RES modifyTable 1
+RES elements 29
+RES sheet_title True
+RES chips 24 ['tableChipI1', 'tableChipI2', 'tableChipO1', 'tableChipO2', 'tableChipO3']
+RES applyTableBtn True
+RES appium_chip 1

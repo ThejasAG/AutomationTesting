@@ -1,0 +1,8 @@
+D| samples: 5 errors: 0
+D| unique states: 1
+D| spinner_all: False spinners: []
+D|  state[0] size=12
+D|  state[1] size=12
+D|  state[2] size=12
+D|  state[3] size=12
+D|  state[4] size=12

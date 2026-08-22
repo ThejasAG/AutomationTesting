@@ -1,0 +1,9 @@
+WINDOW {'width': 393, 'height': 852}
+APPIUM found 4
+  [0] rect={'y': 1216, 'x': 80, 'width': 281, 'height': 101} displayed=False
+  [1] rect={'y': 1216, 'x': 361, 'width': 281, 'height': 101} displayed=False
+  [2] rect={'y': 1216, 'x': 80, 'width': 281, 'height': 101} displayed=False
+  [3] rect={'y': 1216, 'x': 361, 'width': 281, 'height': 101} displayed=False
+IDB frames [(80, 1216.666753133138), (361, 1216.666753133138)]
+--- try mobile: scroll toVisible ---
+  mobile:scroll ERR InvalidElementStateException Message: Error Domain=com.facebook.WebDriverAgent Code=1 "Failed to perform scroll with visible cell due to max scroll count reached" UserInfo={NSLocalizedDescr

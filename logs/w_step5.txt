@@ -1,0 +1,6 @@
+R| PRE screen ['STG-VyaBusiness', 'Log 8 of 31', 'Console Error', 'no valid “aps-environment”', 'Source', '2 |', 'var', 'isNativeReflectConstruct']
+R| PRE logbox_viewer_up True
+R| ENSURE_ITEMS -> True
+R|    [ok] @ensure_order_items — pre-ordered items present; no add needed
+R| STEP5 'click selectAllItemsBtn' -> ok=True flaky=False note=tapped selectAllItemsBtn by id
+R|      after: ['STG-VyaBusiness', 'Log 8 of 31', 'Console Error', 'no valid “aps-environment”', 'Source', '2 |', 'var', 'isNativeReflectConstruct', '=', 'require(', '"./isNativeReflectConstruc', ')']

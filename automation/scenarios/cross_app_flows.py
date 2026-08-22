@@ -37,6 +37,7 @@ are marked ``# TUNE`` and fail loudly (never silently) so they can be corrected.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -54,9 +55,10 @@ from automation.intelligence.scenario_runner import ScenarioRunner
 from automation.scenarios.cross_app_orchestrator import (
     APPIUM_URL, CONSUMER_BUNDLE, BUSINESS_BUNDLE,
     DEFAULT_CONSUMER_UDID, DEFAULT_BUSINESS_UDID, DEFAULT_BUSINESS_PHONE_UDID,
-    _options, _fill_field, ensure_business_metro,
+    _options, _fill_field, ensure_business_metro, _business_metro_target,
 )
 from automation.scenarios import cross_app_config as cfgmod
+from automation.scenarios import ui_health as _uih
 
 logger = logging.getLogger("cross_app_flows")
 
@@ -121,6 +123,7 @@ _C_ORDER_LATER = _C_BOOK_PREFIX + [
 _C_ACCEPT_APPT = [
     "open app",
     "click walletTab",                # bottom tab (confirmed id)
+    "@wait_screen:wallet",            # shell AND the bookings list, or report why not
     "accept the appointment",         # TUNE: open the pending event + Accept
 ]
 
@@ -685,15 +688,38 @@ class FlowRunner:
         trail = self._last_logout_trail
         for _attempt in range(2):
             trail.append(f"attempt {_attempt + 1}: role={self._biz_role_state()}")
-            # 1) Open the Menu (Appium click — reliably navigates).
-            try:
-                e = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "menuBtn")
-                trail.append(f"menuBtn found={len(e)}")
-                if e:
+            # 1) Open the Menu. MEASURED: 'menuBtn' exists in NEITHER build (grep of
+            #    App/Screens and App/MobileScreens returns nothing), so this always
+            #    found 0 and the menu never opened — then logOutBtn, which lives on
+            #    the Menu screen, was clicked while OFF-SCREEN and did nothing. The
+            #    phone reaches it via the bottom tab labelled 'Menu' at (292,753).
+            opened_menu = False
+            for ident in ("menuBtn", "menuTab", "Menu"):
+                try:
+                    e = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
+                except Exception as ex:
+                    trail.append(f"{ident} ERROR {type(ex).__name__}")
+                    continue
+                trail.append(f"{ident} found={len(e)}")
+                if not e:
+                    continue
+                try:
                     e[0].click(); time.sleep(1.5)
-                    trail.append("menuBtn clicked")
-            except Exception as ex:
-                trail.append(f"menuBtn ERROR {type(ex).__name__}")
+                except Exception as ex:
+                    trail.append(f"{ident} click ERROR {type(ex).__name__}")
+                    continue
+                # VERIFY the menu actually opened — logOutBtn must be on screen now.
+                try:
+                    lo_now = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "logOutBtn")
+                    shown = bool(lo_now) and bool(lo_now[0].is_displayed())
+                except Exception:
+                    shown = False
+                trail.append(f"{ident} clicked -> logOutBtn displayed={shown}")
+                if shown:
+                    opened_menu = True
+                    break
+            if not opened_menu:
+                trail.append("menu did not open by any known control")
             # 2) Tap the real logout button.
             try:
                 lo = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "logOutBtn")
@@ -732,6 +758,35 @@ class FlowRunner:
     _BIZ_WAITER_IDS = ("addNewEvent", "qrScaner", "modifyTable", "orderFilterBtn")
     _BIZ_KITCHEN_IDS = ("kitchenAllBtn", "kitchenTableBtn", "kitchenPickupBtn",
                         "inProgressOrderCard", "completedOrderCard")
+
+    def _biz_bundle_source(self) -> str:
+        """Which Metro the business app is pointed at, and whether it is serving.
+
+        A blank/unknown screen is nearly always this: the wrong packager (or none).
+        Reading it back from the device turns a guess into a fact in the report.
+        """
+        import subprocess as _sp
+        udid = self._business_udid()
+        loc = "?"
+        try:
+            out = _sp.run(["xcrun", "simctl", "spawn", udid, "defaults", "read",
+                           self.business_bundle, "RCT_jsLocation"],
+                          capture_output=True, text=True, timeout=15).stdout.strip()
+            loc = out or "(unset)"
+        except Exception:
+            pass
+        expected, _pid = _business_metro_target(self.business_bundle)
+        alive = "?"
+        try:
+            import httpx as _hx
+            alive = "up" if _hx.get(f"http://localhost:{expected}/status",
+                                    timeout=3).status_code == 200 else "down"
+        except Exception:
+            alive = "down"
+        verdict = ("OK" if loc.endswith(str(expected))
+                   else f"WRONG — {self.business_bundle} must load from :{expected}")
+        return (f"bundle source: RCT_jsLocation={loc} (expected localhost:{expected}, "
+                f"metro {expected} is {alive}) -> {verdict}")
 
     def _biz_role_state(self) -> str:
         """Which role is CURRENTLY signed into the Business app — 'waiter', 'kitchen',
@@ -778,6 +833,72 @@ class FlowRunner:
             if role == account:
                 _note(f"    · already logged in as {account} (detected {role} home) — skipping sign-in")
                 return True
+
+            # 'unknown' after the settle loop means the app never rendered a screen
+            # we recognise — no sign-in fields, no waiter home, no kitchen home. That
+            # is an ENVIRONMENT fault, not a credentials one, and it used to be
+            # reported as "signed in as 'unknown' but need 'waiter' — logging out",
+            # then "could not log in (check creds / T&C checkbox)". MEASURED cause:
+            # the staging B-app was pointed at the PROD packager (RCT_jsLocation
+            # localhost:8082 serves repo 1519bec5 -> api.vyapy.com) while the run
+            # signed in with staging credentials, so it sat on a blank splash.
+            # Say which packager the app is actually on, so this is one glance.
+            if role == "unknown":
+                # RECOVER ONCE before blaming anything. A leftover screen from an
+                # earlier run parks the app somewhere with no role markers — MEASURED:
+                # the phone sat on the assign-a-table screen ('Please assign a Table' +
+                # T0AssignAnyBtn + AssignTableBtn), which is a perfectly valid screen
+                # but matches neither the sign-in nor either home. noReset keeps it
+                # across runs, so every later run inherits it.
+                if self._table_modal_up():
+                    _note("    · a leftover table sheet is up — dismissing it")
+                    self._dismiss_table_modal(r, notes if notes is not None else [])
+                else:
+                    # The role markers all live on the bookings board (Home tab).
+                    # A waiter sitting on Orders/History/Menu is perfectly signed in
+                    # yet reads as 'unknown' — MEASURED: the app resumed on "My
+                    # Orders" (In Queue 00 / ALL / TABLE / PICKUP) and a relaunch
+                    # just returned to the same tab, so recovery never converged.
+                    # Tap Home first; only relaunch if that does not reveal a
+                    # recognisable screen.
+                    # Tap it through idb: Appium does not resolve the tab-bar item
+                    # by accessibility id (find_elements("Home") -> 0), but idb
+                    # reports it as a labelled element at the bottom of the screen.
+                    try:
+                        tab = next((e for e in self._idb_els()
+                                    if e["label"].strip() == "Home" and e["h"] > 20), None)
+                        if tab:
+                            self._idb_tap(tab["cx"], tab["cy"])
+                            time.sleep(2.5)
+                            _note("    · unrecognised screen — tapped the Home tab")
+                    except Exception:
+                        pass
+                if self._biz_role_state() == "unknown" and not self._table_modal_up():
+                    _note("    · app is on an unrecognised screen — relaunching once")
+                    try:
+                        r.d.terminate_app(self.business_bundle); time.sleep(1.5)
+                        r.d.activate_app(self.business_bundle)
+                    except Exception as e:
+                        _note(f"    · relaunch note: {type(e).__name__}")
+                role = self._biz_role_state()
+                for _ in range(8):                  # ~16s to settle after recovery
+                    if role in ("login", "waiter", "kitchen"):
+                        break
+                    time.sleep(2)
+                    role = self._biz_role_state()
+                if role == account:
+                    _note(f"    · already logged in as {account} after recovery")
+                    return True
+
+            if role == "unknown":
+                _note(f"    · [FAIL] the Business app never rendered a known screen "
+                      f"(role='unknown' after ~16s + one recovery) — it is not a "
+                      f"credentials problem")
+                _note(f"    ↳ {self._biz_bundle_source()}")
+                els_now = self._idb_els()
+                _note(f"    ↳ on screen: {[e['label'] or e['id'] for e in els_now if (e['label'] or e['id'])][:12]}")
+                return False
+
             if role != "login":
                 # A DIFFERENT role's home is up. This used to dead-end here on the assumption
                 # that the caller had already logged out — but the caller decides BEFORE the
@@ -1236,8 +1357,35 @@ class FlowRunner:
                         "cx": int(x + w / 2), "cy": int(y + h / 2)})
         return out
 
-    # Card labels are '<Name>card<Status>'.
+    # Card labels differ BY DEVICE, and both forms are live in this fleet:
+    #   iPad  : '<Name>card<Status>'   e.g. RoopaDcardReserved
+    #   iPhone: '<Name><Status>Card'   e.g. RoopaDReservedCard
+    # Matching only the iPad form made every phone card parse as status '' — so it
+    # failed the assignable check and @open_reservation reported "card not found"
+    # while RoopaDReservedCard sat in its own screen dump.
     _CARD_RE = re.compile(r"^(?P<name>.+?)card(?P<status>[A-Za-z]*)$")
+    # Longest first so 'ConfirmationPending' wins over 'Pending' and
+    # 'InProgress' over 'Progress'. A vocabulary, not a greedy regex: '(.+?)([A-Z]\w*)Card'
+    # happily splits RoopaDReservedCard into name='Roopa', status='DReserved'.
+    _CARD_STATUSES = ("confirmationpending", "inprogress", "cancelled", "completed",
+                      "reserved", "expired", "payment", "serve")
+
+    @classmethod
+    def _split_card(cls, label: str):
+        """(name, status_lowercase) for either device's card-label convention."""
+        lbl = (label or "").strip()
+        m = cls._CARD_RE.match(lbl)
+        if m:
+            return m.group("name"), m.group("status").lower()
+        low = lbl.lower()
+        if low.endswith("card"):
+            stem = lbl[:-4]                      # drop the trailing 'Card'
+            stem_low = stem.lower()
+            for st in cls._CARD_STATUSES:
+                if stem_low.endswith(st):
+                    return stem[:len(stem) - len(st)], st
+            return stem, ""
+        return lbl, ""
 
     @classmethod
     def _choose_card(cls, els: List[dict], diner_key: str, statuses: tuple,
@@ -1263,8 +1411,7 @@ class FlowRunner:
             lbl = (e.get("label") or "").strip() or (e.get("id") or "").strip()
             if "card" not in lbl.lower() or (e.get("w") or 0) <= 60:
                 continue
-            m = cls._CARD_RE.match(lbl)
-            who, status = (m.group("name"), m.group("status").lower()) if m else (lbl, "")
+            who, status = cls._split_card(lbl)
             is_diner = diner_key in who.lower()
             if is_diner:
                 diner_all.append((e, lbl, status))
@@ -1291,13 +1438,33 @@ class FlowRunner:
 
         if len(diner) > 1:
             if hour_y is None:
-                return None, (f"multiple cards for '{diner_name}' and no booked hour to "
-                              f"disambiguate: " + ", ".join(l for _, l, _ in diner))
+                labels_only = {l for _, l, _ in diner}
+                if len(labels_only) > 1:
+                    return None, (f"multiple cards for '{diner_name}' and no booked hour to "
+                                  f"disambiguate: " + ", ".join(sorted(labels_only)))
+                # Same label, same status, nothing to tell them apart — the board
+                # lays several bookings side by side in a row. Interchangeable for
+                # "open this diner's assignable booking", so take the first and say
+                # so, exactly as the tied-on-the-hour case does.
+                return diner[0][1], (f"note: {len(diner)} identical '{diner[0][1]}' cards and no "
+                                     f"booked hour — opened the first")
             best = abs(diner[0][0]["cy"] - hour_y)
             tied = [l for e2, l, _ in diner if abs(e2["cy"] - hour_y) == best]
-            if len(tied) > 1:
+            if len(set(tied)) > 1:
+                # DIFFERENT cards tied on the hour — genuinely ambiguous, and picking
+                # one risks opening the wrong booking. Refuse.
                 return None, (f"multiple cards for '{diner_name}' equally near "
-                              f"{hour_lbl or 'the booked hour'}: " + ", ".join(tied))
+                              f"{hour_lbl or 'the booked hour'}: " + ", ".join(sorted(set(tied))))
+            if len(tied) > 1:
+                # IDENTICAL label, same status, same hour row — the board lays several
+                # bookings side by side in one row (measured on the phone: two
+                # RoopaDReservedCard at y=1550, x=80 and x=361, with the 12:00 row at
+                # cy=1556). They are indistinguishable by anything observable, so they
+                # are interchangeable for "open the diner's reserved booking at this
+                # hour". Take the first deterministically and SAY there were several,
+                # rather than dead-ending a flow on a distinction that does not exist.
+                return diner[0][1], (f"note: {len(tied)} identical '{tied[0]}' cards in the "
+                                     f"{hour_lbl or 'booked'} row — opened the first")
         return diner[0][1], ""
 
     @staticmethod
@@ -1579,14 +1746,20 @@ class FlowRunner:
         # concatenated ('tableChipI1 tableChipI2 … Vertical scroll bar, 3 pages') —
         # so an unfiltered [0] can be a container, and clicking that scrolls or
         # does nothing while looking like a chip. Require a single token.
-        _CHIP_NAME = _re.compile(r"tableChip\w+\Z")
+        # Two different assign-a-table UIs ship in this app:
+        #   iPad  : 'tableChip<Name>'   chips + 'applyTableBtn'
+        #   iPhone: 'T<N>AssignAnyBtn'  chips + 'AssignTableBtn'   (measured live)
+        # Both expose accessibilityState.selected, so selection stays verifiable.
+        _CHIP_NAME = _re.compile(r"(?:tableChip\w+|T\d+AssignAnyBtn)\Z")
 
         def chips():
             """(label, element) for every real table chip on the sheet."""
             out = []
             try:
                 for e in r.d.find_elements(
-                        AppiumBy.IOS_PREDICATE, 'name BEGINSWITH "tableChip"'):
+                        AppiumBy.IOS_PREDICATE,
+                        'name BEGINSWITH "tableChip" OR '
+                        '(name BEGINSWITH "T" AND name ENDSWITH "AssignAnyBtn")'):
                     try:
                         nm = (e.get_attribute("name") or "").strip()
                     except Exception:
@@ -1601,6 +1774,26 @@ class FlowRunner:
             return [lbl for lbl, e in chips()
                     if (e.get_attribute("selected") or "").lower() == "true"]
 
+        def commit_btn():
+            """The commit control, whichever build this is."""
+            for ident in ("applyTableBtn", "AssignTableBtn"):
+                try:
+                    els2 = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
+                except Exception:
+                    els2 = []
+                if els2:
+                    return els2[-1]
+            return None
+
+        def commit_enabled():
+            b = commit_btn()
+            if b is None:
+                return None
+            try:
+                return bool(b.is_enabled())
+            except Exception:
+                return None
+
         # ── new path: individually addressable chips ─────────────────────────
         found = []
         for _ in range(6):                        # sheet renders a beat late
@@ -1610,65 +1803,116 @@ class FlowRunner:
             time.sleep(1.0)
 
         if found:
-            want = f"tableChip{table}" if table else ""
-            pick = next((t for t in found if t[0] == want), None) if want else None
-            if want and pick is None:
+            wants = ({f"tableChip{table}", f"{table}AssignAnyBtn", table} if table else set())
+            pick = next((t for t in found if t[0] in wants), None) if wants else None
+            if wants and pick is None:
                 notes.append(f"[FAIL] @assign_table — requested table '{table}' not on the "
                              f"sheet. Available: {sorted(l for l, _ in found)}")
                 self._dismiss_table_modal(r, notes)
                 return False
-            if pick is None:
-                pick = found[0]                   # no specific table asked for
-            label, el = pick
+            # WHICH TABLES TO TRY. A specific request gets exactly that one; with
+            # no request the flow wants "the first FREE table", which is not the
+            # same as the first chip. MEASURED: the app validates the choice
+            # (validateTableForBooking) and rejects a table whose bookedSlots
+            # overlap this appointment — 'This table is already booked at the
+            # selected time !!' — then shows a toast and RETURNS WITHOUT POSTING,
+            # leaving the sheet up. T0 was already taken at 14:30, so committing
+            # it could never work however cleanly it was clicked.
+            candidates = [pick] if pick is not None else list(found)
+            tried = []
 
-            try:
-                el.click(); time.sleep(1.0)
-            except Exception as ex:
-                notes.append(f"[FAIL] @assign_table — could not click '{label}': "
-                             f"{type(ex).__name__}")
-                self._dismiss_table_modal(r, notes)
-                return False
+            for label, el in candidates[:6]:      # bounded; a room has ~10 tables
+                was_enabled = commit_enabled()
+                try:
+                    el.click(); time.sleep(1.0)
+                except Exception as ex:
+                    tried.append(f"{label}: click error {type(ex).__name__}")
+                    continue
 
-            # VERIFY the selection registered. A click that lands on nothing is
-            # indistinguishable from a successful one without this.
-            sel = selected_labels()
-            if label not in sel:
-                notes.append(f"[FAIL] @assign_table — clicked '{label}' but the app does not "
-                             f"report it selected (selected={sel or 'none'}). The tap did not "
-                             f"reach the chip.")
-                self._dismiss_table_modal(r, notes)
-                return False
-            notes.append(f"    · @assign_table — selected '{label}' (verified selected=true)")
+                # VERIFY the selection registered. A click that lands on nothing is
+                # indistinguishable from a successful one without this.
+                sel = selected_labels()
+                now_enabled = commit_enabled()
+                if label in sel:
+                    notes.append(f"    · @assign_table — selected '{label}' (verified selected=true)")
+                elif was_enabled is False and now_enabled is True:
+                    notes.append(f"    · @assign_table — selected '{label}' (verified: commit "
+                                 f"button went from disabled to enabled)")
+                elif now_enabled is True:
+                    notes.append(f"    · @assign_table — selected '{label}' (commit button enabled)")
+                else:
+                    tried.append(f"{label}: selection did not register")
+                    continue
 
-            # Commit. Appium reports two applyTableBtn matches (the Pressable and
-            # its wrapper, concentric and same centre), so either resolves to the
-            # same control — take the last, which is the one idb also reports.
-            try:
-                apply_els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "applyTableBtn")
-            except Exception:
-                apply_els = []
-            if not apply_els:
-                notes.append("[FAIL] @assign_table — table selected but applyTableBtn is not "
-                             "on the sheet; cannot commit")
-                self._dismiss_table_modal(r, notes)
-                return False
-            try:
-                apply_els[-1].click()
-            except Exception as ex:
-                notes.append(f"[FAIL] @assign_table — applyTableBtn click failed: "
-                             f"{type(ex).__name__}")
-                self._dismiss_table_modal(r, notes)
-                return False
+                # Commit. Appium reports two matches for the button (the Pressable
+                # and its wrapper, concentric); either resolves to the same control.
+                apply_btn = None
+                for _ in range(6):
+                    apply_btn = commit_btn()
+                    if apply_btn is not None:
+                        try:
+                            if apply_btn.is_enabled():
+                                break
+                        except Exception:
+                            break
+                    time.sleep(1.0)
+                if apply_btn is None:
+                    notes.append("[FAIL] @assign_table — table selected but no commit button on "
+                                 "the sheet")
+                    self._dismiss_table_modal(r, notes)
+                    return False
+                try:
+                    apply_btn.click()
+                except Exception as ex:
+                    tried.append(f"{label}: commit click error {type(ex).__name__}")
+                    continue
 
-            # VERIFY the assignment: the sheet closing is the app's own signal.
-            for _ in range(8):                    # ~12s
-                time.sleep(1.5)
-                if not self._table_modal_up():
-                    notes.append(f"[ok] @assign_table — assigned '{label[9:]}' and the sheet "
-                                 f"closed")
+                # VERIFY the assignment. "The sheet's elements are gone" is NOT the
+                # same as "the sheet closed": committing pushes a LogBox error whose
+                # viewer covers the screen and takes the sheet out of the tree, which
+                # this used to read as success while nothing had been assigned.
+                # Collapse the viewer first so we judge the real screen.
+                # Poll for EITHER outcome, whichever lands first — the app says no
+                # via a toast within a second or two, so waiting out the full window
+                # on every rejected table is what blew the 150s step ceiling after
+                # only three candidates. One idb read per pass, not three.
+                closed = False
+                refused = ""
+                for _ in range(8):                # ~10s worst case
+                    time.sleep(1.2)
+                    els_now = self._idb_els()
+                    msg = next((e["label"] for e in els_now
+                                if "already booked" in e["label"].lower()
+                                or "not enough" in e["label"].lower()), "")
+                    if msg:
+                        refused = msg
+                        break
+                    if not self._table_modal_in(els_now):
+                        # Could be genuinely closed, or merely hidden behind the
+                        # LogBox viewer — collapse it and look again before believing.
+                        if self._dismiss_logbox_viewer():
+                            if not self._table_modal_up():
+                                closed = True
+                            break
+                        closed = True
+                        break
+                if closed:
+                    shown = (label[9:] if label.startswith("tableChip")
+                             else label[:-len("AssignAnyBtn")]
+                             if label.endswith("AssignAnyBtn") else label)
+                    notes.append(f"[ok] @assign_table — assigned '{shown}' and the sheet closed")
                     return True
-            notes.append(f"[FAIL] @assign_table — clicked Apply after selecting '{label}' but "
-                         f"the sheet never closed, so the table was NOT assigned")
+
+                # Still open -> the app refused this table. Capture WHY if it said so,
+                # then untoggle it and try the next one.
+                tried.append(f"{label}: refused{' — ' + refused[:60] if refused else ''}")
+                try:
+                    el.click(); time.sleep(0.8)   # toggleTable() deselects
+                except Exception:
+                    pass
+
+            notes.append("[FAIL] @assign_table — no table could be assigned. Tried: "
+                         + "; ".join(tried[:6]))
             self._dismiss_table_modal(r, notes)
             return False
 
@@ -1777,9 +2021,14 @@ class FlowRunner:
         for e in els:
             lbl = (e.get("label") or "").strip()
             ident = (e.get("id") or "").strip()
-            if lbl == "applyTableBtn" or ident == "applyTableBtn":
+            if lbl in ("applyTableBtn", "AssignTableBtn") or ident in ("applyTableBtn", "AssignTableBtn"):
                 return True
             if lbl.startswith("tableChip") or ident.startswith("tableChip"):
+                return True
+            # phone variant: T0AssignAnyBtn … / "Please assign a Table"
+            if lbl.endswith("AssignAnyBtn") or ident.endswith("AssignAnyBtn"):
+                return True
+            if "assign a table" in lbl.lower():
                 return True
             if "select a table" in lbl.lower():
                 return True
@@ -2027,10 +2276,19 @@ class FlowRunner:
                     time.sleep(1.0); tapped = True
                     notes.append(f"[ok] @first_time_slot — tapped time slot '{lbl}' via idb ({tag})")
                 except Exception as ex:
-                    notes.append(f"[ok] @first_time_slot — could not select slot '{lbl}' ({ex}); continuing")
+                    notes.append(f"[FAIL] @first_time_slot — could not select slot '{lbl}' ({ex})")
+                    return False
             return True
-        notes.append("[ok] @first_time_slot — no time chip visible; booking proceeds without a slot")
-        return True
+        # NO SLOT. This used to report "[ok] ... booking proceeds without a slot",
+        # which is not a thing that can happen: BOOK NOW only goes live once a time
+        # chip is committed, so the flow went on to tap it three times, get ignored
+        # each time, and fail with "the booking dialog never opened" — a true
+        # statement about the wrong step. Fail here, with the real reason.
+        notes.append("[FAIL] @first_time_slot — no bookable time chip on this screen, so the "
+                     "booking cannot proceed (BOOK NOW stays inert without a committed slot). "
+                     "Usually the restaurant has no open slot left for the chosen date/duration "
+                     "at this hour, not an automation fault.")
+        return False
 
     def _on_home(self) -> bool:
         """Are we on the Home tab? Checked via idb (sees the full tree; the Appium
@@ -2225,6 +2483,49 @@ class FlowRunner:
         notes.append("[ok] @got_it — no confirmation dialog present")
         return True
 
+    def _scroll_into_view(self, r, label: str, tries: int = 8) -> bool:
+        """Bring a bookings-board card into the viewport before clicking it.
+
+        MEASURED on the phone: the diner's 12:00 card sat at y=1216 on an 852pt
+        screen — below the fold, is_displayed()==False — so the click landed on
+        nothing and the reservation never opened, which is what
+        '@open_reservation timed out after 150s' actually was.
+
+        WDA's own "mobile: scroll" toVisible fails here with "max scroll count
+        reached": the timeline is a plain RN ScrollView, not a cell-based list.
+        Appium's rect DOES track the live scroll position though, so compute the
+        swipe from it and verify after each one. Two swipes covered 1216 -> 396.
+        """
+        try:
+            W = r.d.get_window_size()
+        except Exception:
+            return False
+        safe = (label or "").replace('"', "")
+        for _ in range(tries):
+            try:
+                els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
+                if not els:
+                    return False
+                rc = els[0].rect
+            except Exception:
+                return False
+            top, h = rc["y"], rc["height"]
+            if 90 <= top and top + h <= W["height"] - 90:
+                return True                       # comfortably on screen
+            dy = (top + h / 2) - W["height"] * 0.45
+            step = max(-420, min(420, dy))        # cap per swipe so we cannot overshoot wildly
+            from_y = W["height"] * (0.72 if step > 0 else 0.28)
+            to_y = max(80, min(W["height"] - 80, from_y - step))
+            try:
+                r.d.execute_script("mobile: dragFromToForDuration",
+                                   {"duration": 0.6, "fromX": W["width"] // 2,
+                                    "fromY": int(from_y), "toX": W["width"] // 2,
+                                    "toY": int(to_y)})
+            except Exception:
+                return False
+            time.sleep(1.0)
+        return False
+
     def _open_reservation(self, r: ScenarioRunner, notes: List[str],
                           statuses: tuple = ("reserved", "confirmationpending"),
                           what: str = "@open_reservation") -> bool:
@@ -2305,6 +2606,8 @@ class FlowRunner:
             label, diag = self._choose_card(els, name, ASSIGNABLE, hour_y(els),
                                             CONSUMER_NAME, hour_lbl)
             self._last_card_diag = diag
+            if label and diag:
+                notes.append(f"    · {diag}")
             return label
 
         def appium_click(label: str) -> bool:
@@ -2395,8 +2698,13 @@ class FlowRunner:
         #
         # Markers are the controls the following steps depend on; the table sheet
         # counts too, because a reservation with a room opens straight onto it.
+        # Markers that the reservation actually opened. The phone lands straight on
+        # its assign-a-table screen ('Please assign a Table' + T<N>AssignAnyBtn +
+        # AssignTableBtn + closeModal), which none of the iPad markers cover — so
+        # a correctly-opened reservation was being reported as never opening.
         OPENED = ("selectAllItemsBtn", "addItemsBtn", "assignToBtn",
-                  "closeEventModal", "sendToKitchenBtn")
+                  "closeEventModal", "sendToKitchenBtn",
+                  "AssignTableBtn", "closeModal")
 
         def opened() -> bool:
             els = self._idb_els()
@@ -2404,6 +2712,12 @@ class FlowRunner:
             return any(m in seen for m in OPENED) or self._table_modal_up()
 
         for attempt in (1, 2):
+            # The card is usually BELOW THE FOLD (the timeline runs 00:00-23:00),
+            # and a click on an off-screen element does nothing. Scroll first.
+            scrolled = self._scroll_into_view(r, label)
+            if not scrolled:
+                notes.append(f"    · {what} — could not scroll '{label[:36]}' into view; "
+                             f"clicking anyway")
             if not appium_click(label):
                 notes.append(f"[FAIL] {what} — found '{label[:40]}' but could not open it "
                              f"(WDA click)")
@@ -2522,12 +2836,63 @@ class FlowRunner:
             if r._resolve(["menuLogout"]):
                 return r.run_one("click menuLogout", 0).ok
             return self._tap_text_contains(r, "logout")
+        if step.startswith("@wait_screen:"):
+            return self._await_screen(step.split(":", 1)[1].strip(), notes)
         if step.startswith("@pay:"):
             return self._pay(r, step.split(":", 1)[1], notes)
         notes.append(f"[FAIL] unknown token {step}")
         return False
 
     # -- per-segment execution ----------------------------------------------
+    # The SAME control carries different accessibility ids in the tablet and phone
+    # builds of the Business app. Measured in App/Screens/Event/OrderSummary.js vs
+    # App/MobileScreens/Event/OrderSummary.js:
+    #     select all   tablet 'selectAll'      phone 'selectAllItemsBtn'
+    #     unselect     tablet 'unSelectAll'    phone 'unSelectItemsBtn'
+    # The flows hardcode the PHONE spelling, so on the iPad 'click selectAllItemsBtn'
+    # hunted for a control that build does not contain and burned its whole 150s
+    # timeout every run — that is what killed segment 2 on the tablet. Treat the two
+    # spellings as one id and try whichever the running build actually has.
+    _ID_ALIASES = {
+        "selectAllItemsBtn": ("selectAll",),
+        "selectAll": ("selectAllItemsBtn",),
+        "unSelectItemsBtn": ("unSelectAll",),
+        "unSelectAll": ("unSelectItemsBtn",),
+    }
+
+    @classmethod
+    def _id_candidates(cls, ident: str):
+        """The id as written, then any known equivalent in the other build."""
+        return (ident,) + tuple(cls._ID_ALIASES.get(ident, ()))
+
+    def _dismiss_logbox_viewer(self, udid: str = "") -> bool:
+        """Close the EXPANDED LogBox (the full-screen stack-trace view).
+
+        Different shape from the collapsed toast: the toast is a full-width 48pt
+        strip dismissed by a ✕ at its right edge, while the viewer covers the whole
+        screen and carries a Dismiss/Minimize pair along the bottom (measured on the
+        phone: Dismiss (0,804,197,48), Minimize (197,804,196,48)). _logbox_strip
+        only matches the strip, so the viewer slipped past it — and while it is up
+        nothing else on the screen is reachable, which is how 'click sendItemsBtn'
+        burned its full 150s timeout.
+        """
+        els = self._idb_els(udid)
+        labels = {e["label"].strip() for e in els}
+        if not ({"Dismiss", "Minimize"} <= labels):
+            return False                       # the pair identifies the viewer
+        # MINIMIZE, not Dismiss. Measured: this debug build stacks ~28 logs and
+        # Dismiss closes only the CURRENT one — the header counts down
+        # "Log 8 of 29" -> "8 of 28" and the viewer still covers the screen, so
+        # clearing it that way would take 28 taps. Minimize collapses the whole
+        # viewer to its bottom toast in one tap (n=56 -> 15 elements) and the
+        # screen underneath becomes reachable again.
+        btn = next((e for e in els if e["label"].strip() == "Minimize"), None)
+        if not btn:
+            return False
+        self._idb_tap(btn["cx"], btn["cy"], udid)
+        time.sleep(1.2)
+        return not ({"Dismiss", "Minimize"} <= {e["label"].strip() for e in self._idb_els(udid)})
+
     def _smart_click(self, r: ScenarioRunner, step: str):
         """For a 'click <id>' step, tap the element DIRECTLY by accessibility id —
         fast and reliable on this app's huge tree (the fuzzy resolver + depth-capped
@@ -2578,15 +2943,19 @@ class FlowRunner:
             #    so gating here SKIPPED real buttons (e.g. anyBtn) and let the fuzzy resolver
             #    mis-heal to a similarly-named one (anyBtn -> allBtn). Just click; WDA scrolls it
             #    into view and raises if it's genuinely not there (then we fall through).
-            try:
-                for e in r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident):
+            for cand in self._id_candidates(ident):
+                try:
+                    found_any = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
+                except Exception:
+                    continue
+                for e in found_any:
                     try:
                         e.click(); time.sleep(0.6)
-                        return True, f"tapped {ident} by id", False
+                        note = (f"tapped {cand} by id" if cand == ident
+                                else f"tapped {cand} by id (this build's name for {ident})")
+                        return True, note, False
                     except Exception:
                         continue
-            except Exception:
-                pass
             # 2) idb EXACT-id coordinate tap (on-screen). Catches elements Appium's depth-capped
             #    snapshot misses, and taps the RIGHT element by its real id — never a fuzzy
             #    near-match. Skips off-screen ids (Appium above already auto-scrolls to those).
@@ -2594,8 +2963,9 @@ class FlowRunner:
                 els = self._idb_els()
                 sw = max((e["w"] for e in els), default=1600)
                 sh = max((e["h"] for e in els), default=1600)
+                cands = self._id_candidates(ident)
                 for e in els:
-                    if (e["id"] == ident or e["label"].strip() == ident) \
+                    if (e["id"] in cands or e["label"].strip() in cands) \
                             and e["w"] > 0 and e["h"] > 0 \
                             and 0 <= e["cx"] <= sw and 0 <= e["cy"] <= sh:
                         # A coordinate tap hits whatever is TOPMOST at that pixel,
@@ -2611,7 +2981,7 @@ class FlowRunner:
                             self._clear_logbox(udid)
                             els = self._idb_els()
                             e = next((x for x in els
-                                      if x["id"] == ident or x["label"].strip() == ident), None)
+                                      if x["id"] in cands or x["label"].strip() in cands), None)
                             over = self._occluding(e, els) if e else None
                             if e is None or over:
                                 what = (over or {}).get("label", "an overlay")
@@ -2623,6 +2993,23 @@ class FlowRunner:
                         return True, f"tapped {ident} (idb exact-id)", False
             except Exception:
                 pass
+            # Both id paths missed. The EXPANDED LogBox may be covering the screen —
+            # it hides every other element, so the id looks absent when it is merely
+            # obscured. Clear it and try the same ids once more before falling
+            # through to the (slow, fuzzy) resolver.
+            if self._dismiss_logbox_viewer():
+                for cand in self._id_candidates(ident):
+                    try:
+                        again = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
+                    except Exception:
+                        continue
+                    for e in again:
+                        try:
+                            e.click(); time.sleep(0.6)
+                            return True, f"tapped {cand} by id (after clearing LogBox)", False
+                        except Exception:
+                            continue
+
         # Fast-path for 'type <val> in <fieldId>': type directly by accessibility id (the same
         # mechanism login uses) instead of the fuzzy resolver + its retry/backoff, which is slow
         # on this huge tree. Falls through to the resolver if the id isn't found this way.
@@ -2699,14 +3086,21 @@ class FlowRunner:
                 # shutdown(wait=True), which BLOCKS on the hung worker thread and defeats the
                 # timeout entirely (a step hung 28 min despite result(timeout=…) firing).
                 # Manage it manually and shutdown(wait=False) so a hung step is abandoned.
+                _watch = self._start_step_watchdog(step, seg)
                 _ex = _fut.ThreadPoolExecutor(max_workers=1)
                 try:
                     ok, step_flaky = _ex.submit(_exec_step).result(timeout=STEP_TIMEOUT)
+                    _wnote = self._finish_step_watchdog(_watch, step, ok)
+                    if _wnote:
+                        notes.append(f"    {_wnote}")
                     if step_flaky:
                         flaky_steps += 1
                     _ex.shutdown(wait=False)
                 except _fut.TimeoutError:
                     _ex.shutdown(wait=False)   # abandon the hung worker; don't block on it
+                    _wnote = self._finish_step_watchdog(_watch, step, False)
+                    if _wnote:
+                        notes.append(f"    {_wnote}")
                     ok = False
                     status = "FAIL"
                     notes.append(f"[FAIL] {step} — timed out after {STEP_TIMEOUT}s (step hung; "
@@ -2788,6 +3182,111 @@ class FlowRunner:
         if raw:
             return "data:image/png;base64," + base64.b64encode(raw).decode()
         return None
+
+    # ── passive UI-loading watchdog (additive; can never fail a step) ────────
+    # Observes each step from a side thread and, only when there is EVIDENCE of a
+    # problem, records one note. Elapsed time alone is never an issue: a step that
+    # simply takes a while is not reported. idb/simctl ONLY — an Appium session is
+    # not safe for concurrent commands and this runs while the step is mid-command.
+    # Disable entirely with UI_WATCHDOG=0; window via UI_WATCHDOG_SECONDS.
+    def _await_screen(self, name: str, notes: List[str]) -> bool:
+        """Precise adopter API: wait for a NAMED screen and report what happened.
+
+        Additive and non-fatal by default — it records evidence and lets the
+        existing step/retry logic decide the outcome. Returns True when the screen
+        loaded (fast or slow), False only when it demonstrably did not.
+        """
+        try:
+            exp = _uih.SCREENS.get(name)
+            if exp is None:
+                return True                      # unknown screen -> never block
+            ctx = {"device": (getattr(self, "_cur_udid", "") or "")[:8],
+                   "env": getattr(self, "env", "?")}
+            rep = _uih.monitor_ui_loading(
+                lambda: [e["label"] for e in self._idb_els() if e.get("label")],
+                exp, sleep_s=5.0, context=ctx)
+            if rep.result == _uih.LoadResult.SUCCESS:
+                return True
+            notes.append(f"    {rep.to_note()}")
+            if rep.result in (_uih.LoadResult.SLOW_SUCCESS, _uih.LoadResult.RECOVERED,
+                              _uih.LoadResult.MONITOR_UNAVAILABLE):
+                return True                      # loaded late, or we simply could not observe
+            return False
+        except Exception:
+            return True                          # monitoring must never block a flow
+
+    def _watchdog_window(self) -> float:
+        try:
+            return float(os.getenv("UI_WATCHDOG_SECONDS", "30"))
+        except Exception:
+            return 30.0
+
+    def _start_step_watchdog(self, step: str, seg) -> Optional[dict]:
+        # EVERYTHING inside the try, including the kill-switch read. A missing
+        # import here once raised NameError on the very first step of every run —
+        # a monitoring feature must not be able to take the automation down, so
+        # nothing in this method is allowed to escape.
+        try:
+            if os.getenv("UI_WATCHDOG", "1") == "0":
+                return None
+            import threading as _th
+            w = {"stop": _th.Event(), "states": [], "spinners": [], "spinner_all": True,
+                 "samples": 0, "errors": 0, "t0": time.time(), "first": [], "last": []}
+
+            def _loop():
+                while not w["stop"].is_set():
+                    try:
+                        labels = [e["label"] for e in self._idb_els() if e.get("label")]
+                        w["samples"] += 1
+                        st = _uih.normalise_state(labels)
+                        if not w["states"]:
+                            w["first"] = labels[:40]
+                        w["last"] = labels[:40]
+                        w["states"].append(st)
+                        sp = _uih.find_spinners(labels)
+                        w["spinners"] = sp
+                        if not sp:
+                            w["spinner_all"] = False
+                    except Exception:
+                        w["errors"] += 1
+                    w["stop"].wait(6.0)      # 6s: each idb dump already costs ~2-3s
+
+            t = _th.Thread(target=_loop, name="ui-watchdog", daemon=True)
+            w["thread"] = t
+            t.start()
+            return w
+        except Exception:
+            return None                      # monitoring must never break a run
+
+    def _finish_step_watchdog(self, w: Optional[dict], step: str, ok: bool) -> Optional[str]:
+        """Stop the watchdog and return ONE note, or None. Never raises."""
+        if not w:
+            return None
+        try:
+            w["stop"].set()
+            waited = time.time() - w["t0"]
+            window = self._watchdog_window()
+            if waited < window:
+                return None                  # short step: nothing to say
+            if ok:
+                # It worked. Only worth noting that it was slow.
+                return (f"[SLOW LOAD] {step} — completed after {waited:.1f}s "
+                        f"(over the {window:.0f}s watchdog window)")
+            if w["samples"] and w["errors"] >= w["samples"]:
+                return (f"[MONITOR UNAVAILABLE] {step} — could not sample the UI "
+                        f"({w['errors']}/{w['samples']} reads failed); this is a MONITORING "
+                        f"fault, not an app loading failure")
+            uniq = len(set(w["states"]))
+            # EVIDENCE REQUIRED — never report on elapsed time alone.
+            if w["spinner_all"] and w["spinners"]:
+                return (f"[STUCK LOADING] {step} — a loading indicator stayed up for "
+                        f"{waited:.1f}s: {w['spinners'][:3]}; expected state never reached")
+            if uniq <= 1 and w["samples"] >= 2:
+                return (f"[NO UI PROGRESS] {step} — no meaningful UI change across "
+                        f"{w['samples']} samples over {waited:.1f}s; on screen: {w['last'][:12]}")
+            return None                      # UI was moving: leave it to the step's own report
+        except Exception:
+            return None
 
     def _persist(self, seg, status: str, notes: List[str], secs: float,
                  screenshot: Optional[str] = None) -> None:
@@ -2921,7 +3420,14 @@ class FlowRunner:
         def _warm(udid, bundle, wda, needs_metro):
             try:
                 if needs_metro and not self._biz_metro_ready:
-                    self._biz_metro_ready = ensure_business_metro(udid)
+                    # Pass the ACTUAL bundle. Called bare it defaults to the PROD
+                    # bundle, so it writes RCT_jsLocation onto
+                    # org.vyapy.sarls.vyabusinessipad and leaves the *staging*
+                    # bundle unset — then returns True (8082 is up) and marks
+                    # _biz_metro_ready, which makes _session_for skip the correct
+                    # staging call. On a device whose staging default was never
+                    # persisted the app then loads the wrong bundle for the whole run.
+                    self._biz_metro_ready = ensure_business_metro(udid, self.business_bundle)
                 if udid not in self._sessions:
                     d = webdriver.Remote(APPIUM_URL, options=_options(udid, bundle, wda))
                     d.activate_app(bundle)

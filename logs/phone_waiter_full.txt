@@ -1,0 +1,9 @@
+ROLE waiter
+OPEN_RESERVATION -> True
+NOTE|     · booked slot '12:00' → target 12:00 row
+NOTE|     · note: 2 identical 'RoopaDReservedCard' cards in the 12:00 row — opened the first
+NOTE| [ok] @open_reservation — opened 'RoopaDReservedCard' (auto-scrolled) at slot '12:00'
+ASSIGN_TABLE -> True
+NOTE2|     · @assign_table — selected 'T0AssignAnyBtn' (verified: commit button went from disabled to enabled)
+NOTE2| [ok] @assign_table — assigned 'nyBtn' and the sheet closed
+AFTER ['STG-VyaBusiness', 'Log 8 of 31', 'Console Error', 'no valid “aps-environment” entitlement string found for application {"message":"no valid “aps-environment” entitlement string found for application","details":{"NSLocalizedDescription":"no valid “aps-environment” entitlement string found for application"},"code":3000}', 'Source', '2 |', 'var', 'isNativeReflectConstruct', '=', 'require(', '"./isNativeReflectConstruct.js"', ')', ';', '3 |', 'function', '_construct(t']
