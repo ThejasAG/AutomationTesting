@@ -12,6 +12,33 @@ import ModalPortal from './ModalPortal';
  *  You choose WHICH simulators to install onto. It used to install on every
  *  simulator found, which is almost never wanted — a build meant for one device
  *  would overwrite the app on the others mid-run. */
+/** '3m 20s' / '45s'. Anything under a minute stays in seconds — "0m 45s" reads worse. */
+function fmtDuration(secs: number): string {
+  const s = Math.max(0, Math.round(secs));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function phaseLabel(phase?: string): string {
+  return phase === 'pull' ? 'Pulling'
+    : phase === 'build' ? 'Building'
+      : phase === 'install' ? 'Installing'
+        : phase === 'done' ? 'Finishing'
+          : 'Working';
+}
+
+/** The ETA, or an honest admission that there isn't one yet.
+ *
+ *  eta_s is null until a work unit completes — during the very first build there is
+ *  nothing to extrapolate from, and printing a made-up "about 5 minutes" would be worse
+ *  than saying so. The phase timer next to it still shows the deploy is alive. */
+function etaText(p?: { eta_s: number | null; phase_elapsed_s: number }): string {
+  if (!p) return '';
+  if (p.eta_s === null) return `estimating… (${fmtDuration(p.phase_elapsed_s)} in this step)`;
+  return p.eta_s <= 0 ? 'almost done' : `~${fmtDuration(p.eta_s)} left`;
+}
+
 export default function BuildUpdateBell() {
   const [projects, setProjects] = useState<BuildUpdateProject[]>([]);
   const [count, setCount] = useState(0);
@@ -45,9 +72,6 @@ export default function BuildUpdateBell() {
 
   useEffect(() => {
     getScenarioDevices().then(r => setSims(r.simulators)).catch(() => {});
-    // Show the LAST deploy's versions when the modal is reopened — the result used to
-    // vanish the moment you closed it, so the version was only ever visible in passing.
-    getBuildDeployStatus().then(s => { if (s.status !== 'idle') setDeploy(s); }).catch(() => {});
   }, []);
 
   // A fetch per project runs server-side on every check, so keep this slow.
@@ -75,6 +99,24 @@ export default function BuildUpdateBell() {
 
   useEffect(() => () => { if (poll.current) window.clearInterval(poll.current); }, []);
 
+  /** Read the server's deploy state and, if one is still running, START WATCHING IT.
+   *
+   *  This used to only setDeploy() once on mount and never poll. A deploy started in
+   *  another tab — or simply still running after a page reload — therefore rendered a
+   *  frozen snapshot: the button said "Deploying…" forever and the log never advanced,
+   *  so there was no way to tell whether it was installing or had silently died. The
+   *  polling is what makes the progress live, so it has to be resumed here too, not
+   *  only in onDeploy(). */
+  const syncDeploy = useCallback(async () => {
+    try {
+      const s = await getBuildDeployStatus();
+      if (s.status !== 'idle') setDeploy(s);
+      if (s.status === 'running' && !poll.current) startPolling();
+    } catch { /* offline — leave the panel as it is */ }
+  }, [startPolling]);
+
+  useEffect(() => { syncDeploy(); }, [syncDeploy]);
+
   const onDeploy = async () => {
     setError('');
     try {
@@ -90,6 +132,10 @@ export default function BuildUpdateBell() {
 
   const running = deploy?.status === 'running';
   const withUpdates = projects.filter((p) => p.has_updates);
+  // The newest log line IS the answer to "is it installing?" — surface it instead of
+  // making people scroll a 200px-tall <pre> at the bottom of a modal to find out.
+  const lastStep = deploy?.steps?.length ? deploy.steps[deploy.steps.length - 1].message : '';
+  const prog = deploy?.progress;
   const devicesTouched = new Set(
     (deploy?.results ?? []).filter((r) => r.device_id).map((r) => r.device_id),
   ).size;
@@ -97,7 +143,7 @@ export default function BuildUpdateBell() {
   return (
     <>
       <button
-        onClick={() => { setOpen(true); refresh(); }}
+        onClick={() => { setOpen(true); refresh(); syncDeploy(); }}
         className="nav-link"
         title="Latest build — pull and install on every device"
         style={{
@@ -150,6 +196,72 @@ export default function BuildUpdateBell() {
                   background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.35)',
                   borderRadius: 8, padding: 10, marginBottom: 14, fontSize: 13,
                 }}>{error}</div>
+              )}
+
+              {/* Pinned progress. The Deploy button and the detailed log live BELOW the
+                  app + simulator lists, which on a full list are off the bottom of the
+                  modal — so clicking Deploy appeared to do nothing at all. This stays put
+                  at the top and says what is happening right now. */}
+              {deploy && deploy.status !== 'idle' && (
+                <div style={{
+                  position: 'sticky', top: 0, zIndex: 1,
+                  background: running ? 'rgba(124,58,237,0.16)' : 'rgba(255,255,255,0.06)',
+                  border: `1px solid ${running ? 'rgba(124,58,237,0.45)' : 'rgba(255,255,255,0.12)'}`,
+                  borderRadius: 8, padding: '9px 11px', marginBottom: 14,
+                  display: 'flex', alignItems: 'center', gap: 9,
+                }}>
+                  {running
+                    ? <Loader2 size={15} className="spin" style={{ flexShrink: 0 }} />
+                    : deploy.status === 'completed'
+                      ? <CheckCircle2 size={15} style={{ color: '#34d399', flexShrink: 0 }} />
+                      : <AlertTriangle size={15} style={{ color: '#fbbf24', flexShrink: 0 }} />}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, display: 'flex', gap: 8 }}>
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        {running
+                          ? `${phaseLabel(prog?.phase)}${prog?.detail ? ` — ${prog.detail}` : ''}`
+                          : deploy.status.replace(/_/g, ' ')}
+                        {devicesTouched > 0 && (
+                          <span style={{ opacity: 0.6, fontWeight: 400 }}> · {devicesTouched} device(s)</span>
+                        )}
+                      </span>
+                      {!!prog?.total && (
+                        <span style={{ opacity: 0.85, fontVariantNumeric: 'tabular-nums' }}>
+                          {prog.percent}%
+                        </span>
+                      )}
+                    </div>
+
+                    {!!prog?.total && (
+                      <div style={{
+                        height: 5, borderRadius: 3, marginTop: 6,
+                        background: 'rgba(255,255,255,0.12)', overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          width: `${prog.percent}%`, height: '100%',
+                          background: running ? '#7c3aed'
+                            : deploy.status === 'completed' ? '#34d399' : '#fbbf24',
+                          transition: 'width 400ms ease',
+                        }} />
+                      </div>
+                    )}
+
+                    <div style={{
+                      fontSize: 11, opacity: 0.7, marginTop: 4, display: 'flex', gap: 10,
+                      fontVariantNumeric: 'tabular-nums',
+                    }}>
+                      {running && <span>{etaText(prog)}</span>}
+                      {!!prog && <span>elapsed {fmtDuration(prog.elapsed_s)}</span>}
+                    </div>
+
+                    {!!lastStep && (
+                      <div style={{
+                        fontSize: 11, opacity: 0.55, marginTop: 3,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{lastStep}</div>
+                    )}
+                  </div>
+                </div>
               )}
 
               <div style={{ marginBottom: 18 }}>

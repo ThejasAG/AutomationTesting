@@ -1031,6 +1031,61 @@ class FlowRunner:
                      "dialog never opened (form still on screen)")
         return False
 
+    def _tap_save_btn(self) -> bool:
+        """Tap Save on the New Appointment form, AROUND the LogBox toast that covers it.
+
+        Measured on the iPad, with the form open:
+            saveBtn  GenericElement  x 832..1179  y 685..735
+            toast    GenericElement  x  10..1200  y 708..756   <- drawn on top
+        The strip overlaps the button's lower half, so Appium's .click() — which always
+        aims at the element CENTRE (y=710) — lands on the toast and is swallowed. The
+        form then just sits there and @save_appointment burned its full 150s timeout
+        every run, reporting "tapped Save but the form is still open".
+
+        Clearing it first is attempted but cannot be relied on. _clear_logbox() does
+        find this toast (its text "8 Deprecation warning: …" matches _LOGBOX on
+        "Warning:"), yet its dismiss tap at the strip's right edge does not close it on
+        the iPad — measured: six taps at (1180, 732), the toast still up. The iPhone
+        geometry that tap was derived from simply does not transfer.
+
+        So aim at the part of the button the strip does NOT cover instead. Verified
+        live: a tap at y=694 saved the appointment immediately, and the invitation
+        appeared on the Consumer wallet.
+        """
+        els = self._idb_els()
+        btn = next((e for e in els if (e["label"] or "").strip() == "saveBtn"), None)
+        if btn is None:
+            return False
+        y = btn["cy"]
+        covering = [t for t in self._logbox_strips(els)
+                    if t is not btn
+                    and t["x"] <= btn["cx"] <= t["x"] + t["w"]
+                    and t["y"] <= y <= t["y"] + t["h"]]
+        if covering:
+            clear_y = btn["y"] + 9                # just inside the button's top edge
+            if clear_y < min(t["y"] for t in covering):   # ...if that is actually uncovered
+                y = clear_y
+        return self._idb_tap(btn["cx"], int(y))
+
+    @staticmethod
+    def _logbox_strips(els: List[dict]) -> List[dict]:
+        """EVERY collapsed LogBox strip on screen, not just the first.
+
+        _logbox_strip() returns one, which is all its dismissal caller needs. Here it is
+        the wrong answer: a debug build STACKS them, and on the live iPad the first in
+        idb's list ("3 no valid aps-environment …", y 761.5) is NOT the one covering
+        saveBtn ("8 Deprecation warning …", y 708). Testing only the first one said
+        "nothing covers the button", the tap kept aiming at the centre, and the fix
+        looked like it had done nothing.
+        """
+        screen_w = max((e.get("w") or 0 for e in els), default=0)
+        if not screen_w:
+            return []
+        return [e for e in els
+                if e.get("type") == "GenericElement"
+                and 40 <= (e.get("h") or 0) <= 60
+                and (e.get("w") or 0) >= 0.9 * screen_w]
+
     def _save_appointment(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """Tap Save on the New Appointment form and CONFIRM the form closed.
 
@@ -1047,18 +1102,20 @@ class FlowRunner:
             return any(m in labels for m in FORM_MARKERS)
 
         for attempt in range(1, 4):
-            try:
-                r.dismiss_logbox()
-            except Exception:
-                pass
-            tapped = False
-            try:
-                els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "saveBtn")
-                if els:
-                    els[0].click()
-                    tapped = True
-            except Exception:
-                pass
+            # r.dismiss_logbox() was here. It cannot see this toast at all — a
+            # GenericElement, which Appium's collapsed tree never reports. _clear_logbox()
+            # (idb) does see it, so use that; but do not RELY on it, because tapping the
+            # strip's right edge does not close it on the iPad (see _tap_save_btn).
+            self._clear_logbox()
+            tapped = self._tap_save_btn()
+            if not tapped:
+                try:                                  # no idb node -> fall back to Appium
+                    els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "saveBtn")
+                    if els:
+                        els[0].click()
+                        tapped = True
+                except Exception:
+                    pass
             if not tapped:
                 notes.append(f"[FAIL] @save_appointment — no saveBtn on screen (attempt {attempt})")
                 return False
@@ -2526,6 +2583,214 @@ class FlowRunner:
             time.sleep(1.0)
         return False
 
+    # ── horizontal card search (one hour row) ───────────────────────────────
+    # The board is a DAY CALENDAR whose every hour row is its own
+    # <ScrollView horizontal={true}> (Business App/Screens/Home/index.js:1190), with
+    # flexShrink:0 cards laid side by side. Measured on the iPad (viewport 1210 wide):
+    #     RoopaDcardCompleted      x=208
+    #     RoopaDcardCompleted      x=700
+    #     tanishcardReserved       x=1192   <- past the right edge
+    #     tanishcardInProgress     x=1684   <- past the right edge
+    #     NooluNagacardInProgress  x=2176   <- past the right edge
+    # idb and Appium BOTH report live (scroll-adjusted) coordinates, so a card outside
+    # the viewport is still DISCOVERED — it just cannot be clicked, because a click on
+    # an off-screen element silently does nothing. Hence: discover with the existing
+    # logic, then bring the chosen card into the viewport before clicking it.
+    #
+    # Two gesture facts, both measured, both non-obvious:
+    #   • 'mobile: dragFromToForDuration' does NOT scroll this row horizontally (0pt
+    #     movement at any duration). 'mobile: swipe' with an ELEMENT does — one swipe
+    #     moved the row 680pt.
+    #   • The swipe surface must be an element ACTUALLY INSIDE the viewport. Swiping on
+    #     the RoopaDcardCompleted instance at x=-472 was a no-op in BOTH directions —
+    #     indistinguishable from "end of row" unless the surface is validated first.
+    #     That is why _pick_swipe_surface refuses the target when the target is the
+    #     thing that is off-screen, and why no-progress is only believed after a
+    #     confirmed-visible surface produced no movement.
+    #: A swipe surface needs a real finger-sized patch on screen, not one stray pixel.
+    _MIN_SWIPE_SURFACE_PX = 200
+    #: Cards within this many points of the target's y count as its hour row.
+    _ROW_Y_TOLERANCE = 40
+
+    @staticmethod
+    def _card_visible_px(card: dict, viewport_w: float) -> float:
+        """How much of *card* lies inside the viewport horizontally."""
+        x, w = card.get("x") or 0, card.get("w") or 0
+        return max(0.0, min(x + w, viewport_w) - max(x, 0.0))
+
+    @classmethod
+    def _row_cards(cls, cards: List[dict], target: dict) -> List[dict]:
+        """The cards sharing *target*'s hour row (same horizontal ScrollView)."""
+        ty = target.get("cy")
+        if ty is None:
+            return list(cards)
+        return [c for c in cards
+                if abs((c.get("cy") or 0) - ty) <= cls._ROW_Y_TOLERANCE]
+
+    @classmethod
+    def _pick_swipe_surface(cls, cards: List[dict], target: dict, viewport_w: float,
+                            min_visible: Optional[float] = None) -> Optional[dict]:
+        """The card to perform the gesture ON: the one most inside the viewport.
+
+        NEVER returns a card that is not genuinely on screen, and never returns the
+        target while the target is the off-screen one — a gesture on an off-screen
+        element reports success and moves nothing, which reads as a boundary.
+        """
+        floor = cls._MIN_SWIPE_SURFACE_PX if min_visible is None else min_visible
+        row = cls._row_cards(cards, target)
+        usable = [c for c in row if cls._card_visible_px(c, viewport_w) >= floor]
+        if not usable:
+            return None
+        return max(usable, key=lambda c: cls._card_visible_px(c, viewport_w))
+
+    @classmethod
+    def _swipe_direction(cls, target: dict, viewport_w: float) -> str:
+        """Finger direction that reveals *target*.
+
+        XCUITest reads direction as the way the FINGER travels, so 'left' reveals
+        content off to the RIGHT. Decide on the edge that is actually clipped, not on
+        x alone: a card at x=1004 on a 1210 viewport has its LEFT edge on screen while
+        its right half hangs off, and still needs the row to move left. Testing
+        `x >= viewport_w` sent that case the wrong way and the loop swung back and
+        forth without ever converging.
+        """
+        x, w = target.get("x") or 0, target.get("w") or 0
+        return "left" if x + w > viewport_w else "right"
+
+    @classmethod
+    def _target_in_viewport(cls, target: dict, viewport_w: float) -> bool:
+        """Fully inside the viewport horizontally — a partly-clipped card can still
+        take a click on the wrong half, so require the whole width."""
+        x, w = target.get("x") or 0, target.get("w") or 0
+        return x >= 0 and x + w <= viewport_w
+
+    def _find_target_card(self, cards: List[dict], label: str,
+                          diner_key: str = "") -> Optional[dict]:
+        """The live element for *label*, matched by IDENTITY rather than by the whole
+        string: the status suffix moves mid-flow (Reserved -> InProgress -> Completed,
+        and the phone spells it '<Name><Status>Card'), so a scroll loop pinned to the
+        exact label would lose its target the moment the board re-rendered."""
+        exact = [c for c in cards if (c.get("label") or "").strip() == label]
+        if exact:
+            return exact[0]
+        want, _ = self._split_card(label)
+        want = (want or diner_key or "").strip().lower()
+        if not want:
+            return None
+        for c in cards:
+            who, _st = self._split_card((c.get("label") or "").strip())
+            if who.strip().lower() == want:
+                return c
+        return None
+
+    def _cards_on_board(self, els: Optional[List[dict]] = None) -> List[dict]:
+        """Every booking card idb can see, on screen or scrolled out of it."""
+        return [e for e in (self._idb_els() if els is None else els)
+                if "card" in ((e.get("label") or "") + (e.get("id") or "")).lower()
+                and (e.get("w") or 0) > 60]
+
+    def _scroll_card_into_view_h(self, r: ScenarioRunner, label: str, notes: List[str],
+                                 diner_key: str = "", slot: str = "", tries: int = 8) -> bool:
+        """Horizontally scroll the target's hour row until the target is in the viewport.
+
+        Returns True when the target is (or becomes) fully visible. Reports the search
+        as it goes so a failure says which cards were seen and what the scroll did.
+        """
+        try:
+            viewport_w = float(r.d.get_window_size()["width"])
+        except Exception:
+            return False
+
+        def _fmt(cards):
+            return [f"{(c.get('label') or '').strip()}@x={int(c.get('x') or 0)}"
+                    for c in sorted(cards, key=lambda c: c.get("x") or 0)]
+
+        cards = self._cards_on_board()
+        target = self._find_target_card(cards, label, diner_key)
+        if target is None:
+            notes.append(f"    [card search] target={label!r} not on the board")
+            return False
+        row = self._row_cards(cards, target)
+        notes.append(f"    [card search] target={label!r}")
+        if slot:
+            notes.append(f"    [card search] slot={slot!r}")
+        notes.append(f"    [card search] visible cards: {_fmt(row)}")
+        if self._target_in_viewport(target, viewport_w):
+            notes.append("    [card search] target already in the viewport")
+            return True
+        notes.append("    [card search] target not visible — horizontal scroll required")
+
+        stalled = 0
+        for i in range(1, tries + 1):
+            surface = self._pick_swipe_surface(cards, target, viewport_w)
+            if surface is None:
+                notes.append(f"    [card search] scroll {i} — no card is far enough inside "
+                             f"the viewport to swipe on safely; refusing to gesture on an "
+                             f"off-screen element")
+                return False
+            direction = self._swipe_direction(target, viewport_w)
+            before_x = surface.get("x") or 0
+            if not self._swipe_element(r, surface, direction):
+                notes.append(f"    [card search] scroll {i} — swipe {direction} on "
+                             f"{(surface.get('label') or '')!r} could not be dispatched")
+                return False
+            time.sleep(1.2)
+            cards = self._cards_on_board()
+            moved_el = self._find_target_card(cards, (surface.get("label") or "").strip())
+            row = self._row_cards(cards, target) if target else cards
+            notes.append(f"    [card search] scroll {i} — new visible cards: {_fmt(row)}")
+            target = self._find_target_card(cards, label, diner_key) or target
+            if self._target_in_viewport(target, viewport_w):
+                notes.append(f"    [card search] found "
+                             f"{(target.get('label') or '').strip()!r} in the viewport")
+                return True
+            # Only NOW is no-progress meaningful: the gesture went to a surface we had
+            # already confirmed was visible, so nothing moving is the row's own limit.
+            after_x = (moved_el or {}).get("x", before_x)
+            if abs(after_x - before_x) < 1:
+                stalled += 1
+                if stalled >= 2:
+                    notes.append(f"    [card search] scroll {i} — the row did not move on a "
+                                 f"confirmed-visible surface twice; end of row reached")
+                    return False
+            else:
+                stalled = 0
+        notes.append(f"    [card search] target still off-screen after {tries} scrolls")
+        return False
+
+    def _swipe_element(self, r: ScenarioRunner, card: dict, direction: str) -> bool:
+        """'mobile: swipe' on the Appium element matching *card*.
+
+        Element-scoped on purpose: dragFromToForDuration does not move this row at all
+        (measured 0pt), and a screen-level swipe has no way to say WHICH hour row it
+        means. The instance is matched back by x so a repeated label cannot hand us the
+        off-screen twin.
+        """
+        import concurrent.futures as _fut
+        safe = (card.get("label") or "").strip().replace('"', "")
+        if not safe:
+            return False
+
+        def _do():
+            els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
+            if not els:
+                return False
+            el = els[0]
+            for cand in els:                      # the instance actually on screen
+                try:
+                    if abs(cand.rect["x"] - (card.get("x") or 0)) < 3:
+                        el = cand
+                        break
+                except Exception:
+                    continue
+            r.d.execute_script("mobile: swipe", {"direction": direction, "element": el.id})
+            return True
+        try:
+            with _fut.ThreadPoolExecutor(max_workers=1) as ex:
+                return ex.submit(_do).result(timeout=45)
+        except Exception:
+            return False
+
     def _open_reservation(self, r: ScenarioRunner, notes: List[str],
                           statuses: tuple = ("reserved", "confirmationpending"),
                           what: str = "@open_reservation") -> bool:
@@ -2718,13 +2983,25 @@ class FlowRunner:
             if not scrolled:
                 notes.append(f"    · {what} — could not scroll '{label[:36]}' into view; "
                              f"clicking anyway")
+            # ...and the same card can be outside the row's HORIZONTAL scroll, which the
+            # vertical helper above cannot reach. Additive: a target already in the
+            # viewport returns immediately, and a failure here only annotates — the
+            # click still runs and reports its own outcome.
+            if not self._scroll_card_into_view_h(r, label, notes, diner_key=name,
+                                                 slot=hour_lbl or slot):
+                notes.append(f"    · {what} — '{label[:36]}' could not be brought into the "
+                             f"viewport horizontally; clicking anyway")
             if not appium_click(label):
                 notes.append(f"[FAIL] {what} — found '{label[:40]}' but could not open it "
                              f"(WDA click)")
                 return False
+            notes.append(f"    [card search] clicked target {label[:40]!r}")
             for _ in range(6):                    # ~9s for the summary to render
                 time.sleep(1.5)
                 if opened():
+                    # The click landing is NOT the reservation opening — opened() is what
+                    # proves it, by the controls the following steps depend on.
+                    notes.append("    [card search] reservation opened successfully")
                     notes.append(f"[ok] {what} — opened '{label[:40]}' (auto-scrolled) at "
                                  f"slot '{slot or '?'}'"
                                  + ("" if attempt == 1 else f" (attempt {attempt})"))
@@ -2793,6 +3070,135 @@ class FlowRunner:
             + f"On screen: {onscreen}")
         return False
 
+    # ── consumer: accept a waiter-created appointment ───────────────────────
+    # Read off the Consumer app, not guessed:
+    #   App/Screens/Wallet/Upcoming.js:810  a business-created invite renders with
+    #       cardLabel = el.eventFromBusiness ? `${el.restaurant.name}InviteCard`
+    #                                        : `${el.user_id.username}InviteCard`
+    #     and its onPress does setState({idVal: el, invVis: true}) — i.e. the card
+    #     OPENS the invitation modal, it does not accept anything by itself.
+    #   App/Components/Modal/index.js:9332  InvitaionScreenModal's ACCEPT button is
+    #       accessibilityLabel="eventAccept"  (DECLINE is "eventDecline",
+    #     the ✕ is "inviteclose"); the pair only renders while !btnAcceptStatus.
+    #   App/Screens/Wallet/Upcoming.js:218   accept() POSTs
+    #       /appointments/api/acceptInvitation, sets status 'Reserved' and invVis:false.
+    #   App/Screens/Wallet/index.js:463      dynamicUpdatingAppointments(id, …, 'invite')
+    #     then MOVES the row: out of `invitation` (so the InviteCard disappears) and
+    #     into `upcoming` as '<Restaurant>Card', toasting 'Appointment updated
+    #     successfully'. THAT move is the acceptance; a tap that merely lands proves
+    #     nothing, so this step verifies the move and fails loudly if it never happens.
+    _INVITE_SUFFIX = "InviteCard"
+    _ACCEPT_ID = "eventAccept"
+    _ACCEPT_TOAST = "Appointment updated successfully"
+    # For a "1 hr" slot accept() also raises the booking-confirmed modal
+    # (AcceptInvitaionOrder → preOrderBooking / orderLater). Flows 5/6 have the WAITER
+    # add the items afterwards, so take orderLater — the same choice flow 3/4 make.
+    _POST_ACCEPT_IDS = ("orderLater", "preOrderBooking", "appointmentId")
+
+    def _accept_appointment(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Open the pending wallet invitation and ACCEPT it, verifying the transition.
+
+        Previously there was no handler for this step at all: it fell through to the
+        fuzzy resolver, which hunted a non-existent element for the full STEP_TIMEOUT
+        (150s) and then reported a generic miss. That is a MISSING IMPLEMENTATION, not
+        a wallet loading problem — @wait_screen:wallet has already proved the screen
+        is up by the time this runs.
+        """
+        def labels() -> List[str]:
+            return [e["label"] for e in self._idb_els() if e["label"]]
+
+        def invites(ls: List[str]) -> List[str]:
+            return [l for l in ls if l.endswith(self._INVITE_SUFFIX)]
+
+        self._clear_logbox()
+        before = labels()
+        cards = invites(before)
+        if not cards:
+            # Nothing pending. Distinguish "already accepted" from "never arrived":
+            # an accepted invite is in the upcoming list as '<Restaurant>Card'.
+            notes.append(
+                "[FAIL] accept appointment — no pending appointment on the wallet "
+                f"(no '<name>{self._INVITE_SUFFIX}'). The waiter-created appointment "
+                f"never reached this account, or it was already accepted. "
+                f"On screen: {before[:18]}")
+            return False
+        card = cards[0]
+
+        # 1. Open the invitation modal. The card is the only way in — its onPress sets
+        #    invVis. Retry the tap: a LogBox toast can eat it, exactly as it does for
+        #    BOOK NOW in @book_appointment.
+        opened = False
+        for attempt in range(1, 4):
+            el = next((e for e in self._idb_els() if e["label"] == card), None)
+            if el is None:
+                break
+            self._idb_tap(el["cx"], el["cy"])
+            for _ in range(5):                       # ~7.5s for the modal to render
+                time.sleep(1.5)
+                if self._ACCEPT_ID in labels():
+                    opened = True
+                    break
+            if opened:
+                if attempt > 1:
+                    notes.append(f"    · accept appointment — modal opened on attempt {attempt}")
+                break
+            self._clear_logbox()
+        if not opened:
+            notes.append(
+                f"[FAIL] accept appointment — tapped the pending appointment {card!r} but the "
+                f"invitation modal never opened (no {self._ACCEPT_ID!r} on screen). "
+                f"On screen: {labels()[:18]}")
+            return False
+
+        # 2. Accept, then VERIFY the state actually moved. A landed tap is not acceptance.
+        btn = next((e for e in self._idb_els() if e["label"] == self._ACCEPT_ID), None)
+        if btn is None:
+            notes.append(f"[FAIL] accept appointment — {self._ACCEPT_ID!r} vanished before it "
+                         f"could be tapped. On screen: {labels()[:18]}")
+            return False
+        self._idb_tap(btn["cx"], btn["cy"])
+
+        accepted = False
+        post_modal = False
+        for _ in range(12):                          # ~24s: this is a network round-trip
+            time.sleep(2)
+            now = labels()
+            if any(i in now for i in self._POST_ACCEPT_IDS):
+                post_modal = accepted = True
+                break
+            if self._ACCEPT_ID not in now and (card not in now or self._ACCEPT_TOAST in now):
+                accepted = True
+                break
+        if not accepted:
+            notes.append(
+                "[FAIL] accept appointment — pending appointment found, but acceptance action "
+                f"did not transition to the expected state: {self._ACCEPT_ID!r} is still on "
+                f"screen and {card!r} never left the invitation list "
+                f"(/appointments/api/acceptInvitation did not land). "
+                f"On screen: {labels()[:18]}")
+            return False
+
+        # 3. The booking-confirmed modal, when the slot is "1 hr". The waiter adds the
+        #    items in the next segment, so decline the pre-order and carry on.
+        if post_modal:
+            ok, note, _ = self._smart_click(r, "click orderLater")
+            notes.append(f"[{'ok' if ok else 'warn'}] accept appointment — booking-confirmed "
+                         f"modal: orderLater — {note}")
+            time.sleep(2)
+
+        # 4. Final proof: the invitation is gone from the pending list.
+        self._clear_logbox()
+        after = labels()
+        if card in after:
+            notes.append(
+                "[FAIL] accept appointment — pending appointment found, but acceptance action "
+                f"did not transition to the expected state: {card!r} is STILL in the pending "
+                f"list after ACCEPT. On screen: {after[:18]}")
+            return False
+        notes.append(f"[ok] accept appointment — {card!r} accepted; it left the pending list"
+                     + (" (booking-confirmed modal dismissed via orderLater)" if post_modal else ""))
+        return True
+
     def _handle_special(self, r, step: str, notes: List[str]) -> bool:
         if step == "@wait_form":
             return self._wait_form(r, notes)
@@ -2836,6 +3242,8 @@ class FlowRunner:
             if r._resolve(["menuLogout"]):
                 return r.run_one("click menuLogout", 0).ok
             return self._tap_text_contains(r, "logout")
+        if step == "@accept_appointment":
+            return self._accept_appointment(r, notes)
         if step.startswith("@wait_screen:"):
             return self._await_screen(step.split(":", 1)[1].strip(), notes)
         if step.startswith("@pay:"):
@@ -2853,17 +3261,21 @@ class FlowRunner:
     # hunted for a control that build does not contain and burned its whole 150s
     # timeout every run — that is what killed segment 2 on the tablet. Treat the two
     # spellings as one id and try whichever the running build actually has.
-    _ID_ALIASES = {
-        "selectAllItemsBtn": ("selectAll",),
-        "selectAll": ("selectAllItemsBtn",),
-        "unSelectItemsBtn": ("unSelectAll",),
-        "unSelectAll": ("unSelectItemsBtn",),
-    }
+    # Plain-English steps that have a DEDICATED handler. Without this they fall
+    # through to _smart_click's fuzzy resolver, which hunts an element that does not
+    # exist for the full STEP_TIMEOUT (150s) and then reports a generic miss. Kept as
+    # an ALIAS rather than rewriting the flow blocks because flows edited in the
+    # dashboard are stored in the DB with this plain-English wording.
+    _PLAIN_STEP_TOKENS = {"accept the appointment": "@accept_appointment"}
+
+    # ONE map, shared with ScenarioRunner (which the Scenarios page runs through) so a
+    # tablet/phone id pair fixed in one runner cannot stay broken in the other.
+    _ID_ALIASES = ScenarioRunner.ID_ALIASES
 
     @classmethod
     def _id_candidates(cls, ident: str):
         """The id as written, then any known equivalent in the other build."""
-        return (ident,) + tuple(cls._ID_ALIASES.get(ident, ()))
+        return ScenarioRunner.id_candidates(ident)
 
     def _dismiss_logbox_viewer(self, udid: str = "") -> bool:
         """Close the EXPANDED LogBox (the full-screen stack-trace view).
@@ -3069,8 +3481,9 @@ class FlowRunner:
                 # 'preOrderBooking' once hung a run 21 min). Bound it: if a step exceeds
                 # STEP_TIMEOUT, fail the segment fast instead of stalling the whole run.
                 def _exec_step():
-                    if step.startswith("@"):
-                        _ok = self._handle_special(r, step, notes)
+                    _step = self._PLAIN_STEP_TOKENS.get(step, step)
+                    if _step.startswith("@"):
+                        _ok = self._handle_special(r, _step, notes)
                         if not _ok:
                             notes.append(f"    ↳ on screen: {self._visible_ids(r)}")
                         return _ok, False

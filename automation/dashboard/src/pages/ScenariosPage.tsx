@@ -229,7 +229,7 @@ export default function ScenariosPage() {
         />
       )}
 
-      {running && <RunModal scenario={running} projects={projects} onClose={() => setRunning(null)} />}
+      {running && <RunModal scenario={running} projects={projects} sims={sims} onClose={() => setRunning(null)} />}
       {runAll && <RunAllModal scenarios={runnable} onClose={() => setRunAll(false)} />}
       {recording && (
         <RecorderModal
@@ -242,6 +242,10 @@ export default function ScenariosPage() {
   );
 }
 
+function simNameOf(sims: SimDevice[], udid: string | null): string {
+  return sims.find(d => d.udid === udid)?.name || (udid ? udid.slice(0, 8) : 'its saved device');
+}
+
 const iconBtn: React.CSSProperties = {
   display: 'flex', alignItems: 'center', justifyContent: 'center', width: 34, height: 34,
   background: 'transparent', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)',
@@ -250,8 +254,13 @@ const iconBtn: React.CSSProperties = {
 
 // ── Editor ───────────────────────────────────────────────────────────────────
 // ── Live run ─────────────────────────────────────────────────────────────────
-function RunModal({ scenario, projects, onClose }: { scenario: SavedScenario; projects: Project[]; onClose: () => void }) {
+function RunModal({ scenario, projects, sims, onClose }: { scenario: SavedScenario; projects: Project[]; sims: SimDevice[]; onClose: () => void }) {
   const [envId, setEnvId] = useState(scenario.project_id || '');
+  // Per-run device override. The Business scenarios are all saved against the iPad, but
+  // the same journeys have to be runnable on the iPhone — the app ships both builds. This
+  // does NOT rewrite the scenario: the saved device stays the default, so "run this one on
+  // the phone" is a one-off rather than a destructive edit to a shared scenario.
+  const [deviceId, setDeviceId] = useState(scenario.device_id || '');
   const [prepare, setPrepare] = useState(false);
   const [started, setStarted] = useState(false);
   const [events, setEvents] = useState<ScenarioEvent[]>([]);
@@ -266,13 +275,25 @@ function RunModal({ scenario, projects, onClose }: { scenario: SavedScenario; pr
     runScenarioStream(
       // No bundle_id: each environment (project) has its own app, so the backend
       // uses the chosen environment's bundle id — same steps, different app.
-      { project_id: envId, steps: scenario.steps, device_id: scenario.device_id!, name: scenario.name, save: false, prepare },
+      { project_id: envId, steps: scenario.steps, device_id: deviceId, name: scenario.name, save: false, prepare },
       (ev) => { if (!ac.signal.aborted) setEvents(prev => [...prev, ev]); },
       ac.signal,
     ).catch(e => { if (!ac.signal.aborted) setFatal(e?.message || 'Run failed to start'); })
       .finally(() => { if (!ac.signal.aborted) setBusy(false); });
     return () => ac.abort();
   }, [started]);
+
+  const deviceName = sims.find(d => d.udid === deviceId)?.name || 'device';
+  const bundleOf = (pid: string) => projects.find(p => p.id === pid)?.app_bundle_id || '';
+  /** Is this env's app on this device? null = we cannot know (sim shut down) — and an
+   *  unknown must never be shown as missing, or every shut-down sim looks broken. */
+  const hasApp = (udid: string, pid: string): boolean | null => {
+    const apps = sims.find(d => d.udid === udid)?.apps;
+    const bundle = bundleOf(pid);
+    if (apps === null || apps === undefined || !bundle) return null;
+    return apps.includes(bundle);
+  };
+  const installed = hasApp(deviceId, envId);
 
   useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight }); }, [events]);
 
@@ -289,13 +310,54 @@ function RunModal({ scenario, projects, onClose }: { scenario: SavedScenario; pr
             <p style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', marginTop: 4 }}>Same steps — choose which environment to run against.</p>
             <label style={{ display: 'block', fontSize: '0.68rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '14px 0 5px', fontWeight: 600 }}>Environment (app / repo)</label>
             <select value={envId} onChange={e => setEnvId(e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
-              {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              {projects.map(p => {
+                const ok = hasApp(deviceId, p.id);
+                return (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{ok === true ? ' ✓ installed' : ok === false ? ' — not on this device' : ''}
+                  </option>
+                );
+              })}
             </select>
+            <label style={{ display: 'block', fontSize: '0.68rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '14px 0 5px', fontWeight: 600 }}>Device</label>
+            <select value={deviceId} onChange={e => setDeviceId(e.target.value)} style={{ ...inputStyle, cursor: 'pointer' }}>
+              {sims.map(d => {
+                const ok = hasApp(d.udid, envId);
+                return (
+                  <option key={d.udid} value={d.udid}>
+                    {d.name}{d.udid === scenario.device_id ? ' (saved default)' : ''}
+                    {d.state === 'Booted' ? ' ● booted' : ''}
+                    {ok === true ? ' ✓ app installed' : ok === false ? ' — app not installed' : ''}
+                  </option>
+                );
+              })}
+            </select>
+            {deviceId !== scenario.device_id && (
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 5 }}>
+                One-off — the scenario still defaults to {simNameOf(sims, scenario.device_id)}.
+              </div>
+            )}
+            {installed === false && (
+              <div style={{
+                marginTop: 8, padding: '8px 10px', borderRadius: 6, fontSize: '0.78rem',
+                background: 'rgba(251,191,36,0.12)', border: '1px solid rgba(251,191,36,0.35)',
+                color: 'var(--text-secondary)',
+              }}>
+                <strong>{projects.find(p => p.id === envId)?.name}</strong> ({bundleOf(envId)}) is
+                not installed on {deviceName}. Pick an environment marked ✓, or install it
+                via Latest build.
+              </div>
+            )}
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, fontSize: '0.85rem', cursor: 'pointer' }}>
               <input type="checkbox" checked={prepare} onChange={e => setPrepare(e.target.checked)} />
               Pull latest &amp; rebuild before running <span style={{ color: 'var(--text-muted)' }}>(use for staging — daily builds)</span>
             </label>
-            <button className="btn" onClick={() => setStarted(true)} disabled={!envId} style={{ marginTop: 18, display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 20px' }}>
+            {/* Blocked only on a DEFINITE no. `installed === null` means the simulator is
+                shut down so we could not look — that stays runnable, and the backend
+                preflight catches it in ~2s with the same explanation. */}
+            <button className="btn" onClick={() => setStarted(true)} disabled={!envId || !deviceId || installed === false}
+              title={installed === false ? 'That app is not installed on this simulator' : 'Run this scenario'}
+              style={{ marginTop: 18, display: 'inline-flex', alignItems: 'center', gap: 7, padding: '9px 20px' }}>
               <Play size={14} /> Run{prepare ? ' (build + install first)' : ''}
             </button>
           </div>
@@ -309,7 +371,7 @@ function RunModal({ scenario, projects, onClose }: { scenario: SavedScenario; pr
       <div style={overlay} onClick={onClose}>
         <div className="card modal-pop" style={{ width: 640, maxWidth: '94vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column', padding: 24, position: 'relative' }} onClick={e => e.stopPropagation()}>
           <button onClick={onClose} style={closeBtn}><X size={18} /></button>
-          <h3 style={{ margin: '0 0 4px' }}>Running: {scenario.name} <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 400 }}>· {envName}</span></h3>
+          <h3 style={{ margin: '0 0 4px' }}>Running: {scenario.name} <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 400 }}>· {envName} · {deviceName}</span></h3>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 14 }}>
             {busy ? <><Loader2 size={12} className="spin" /> live…</> : done ? (done.ok ? 'Completed' : 'Completed with failures') : fatal ? 'Failed to run' : 'Finished'}
           </div>

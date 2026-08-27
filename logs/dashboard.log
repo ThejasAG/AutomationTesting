@@ -3,7 +3,28 @@
 > vite
 
 
-  VITE v8.1.0  ready in 2323 ms
+  VITE v8.1.0  ready in 3674 ms
 
   ➜  Local:   http://localhost:5173/
   ➜  Network: use --host to expose
+11:16:09 AM [vite] (client) hmr update /src/components/BuildUpdateBell.tsx
+11:16:30 AM [vite] (client) hmr update /src/components/BuildUpdateBell.tsx
+11:24:20 AM [vite] (client) hmr update /src/App.tsx, /src/pages/DashboardHome.tsx, /src/pages/ReportsPage.tsx, /src/pages/ProjectsPage.tsx, /src/pages/ScenariosPage.tsx, /src/pages/SettingsPage.tsx, /src/pages/GraphPage.tsx, /src/pages/AutomationPage.tsx, /src/pages/RunDetails.tsx, /src/pages/LoginPage.tsx, /src/pages/PullRequestsPage.tsx, /src/pages/ChatPage.tsx, /src/pages/PerformancePage.tsx, /src/pages/ScriptEditorPage.tsx, /src/pages/WorkflowPage.tsx, /src/components/BuildUpdateBell.tsx, /src/pages/JobQueuePage.tsx and 6 more
+11:24:20 AM [vite] (client) hmr invalidate /src/pages/RunDetails.tsx Could not Fast Refresh ("gradeColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+11:24:20 AM [vite] (client) hmr update /src/App.tsx
+11:24:20 AM [vite] (client) hmr invalidate /src/components/ScenarioEditorModal.tsx Could not Fast Refresh ("emptyScenario" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+11:24:20 AM [vite] (client) hmr update /src/pages/ScenariosPage.tsx, /src/pages/PullRequestsPage.tsx
+11:24:47 AM [vite] (client) hmr update /src/components/BuildUpdateBell.tsx
+11:45:21 AM [vite] (client) hmr update /src/pages/ScenariosPage.tsx
+12:14:07 PM [vite] (client) hmr update /src/App.tsx, /src/pages/DashboardHome.tsx, /src/pages/ReportsPage.tsx, /src/pages/ProjectsPage.tsx, /src/pages/ScenariosPage.tsx, /src/pages/SettingsPage.tsx, /src/pages/GraphPage.tsx, /src/pages/AutomationPage.tsx, /src/pages/RunDetails.tsx, /src/pages/LoginPage.tsx, /src/pages/PullRequestsPage.tsx, /src/pages/ChatPage.tsx, /src/pages/PerformancePage.tsx, /src/pages/ScriptEditorPage.tsx, /src/pages/WorkflowPage.tsx, /src/components/BuildUpdateBell.tsx, /src/pages/JobQueuePage.tsx and 6 more
+12:14:07 PM [vite] (client) hmr update /src/pages/ScenariosPage.tsx
+12:14:08 PM [vite] (client) hmr invalidate /src/pages/RunDetails.tsx Could not Fast Refresh ("gradeColor" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+12:14:08 PM [vite] (client) hmr update /src/App.tsx
+12:14:08 PM [vite] (client) hmr invalidate /src/components/ScenarioEditorModal.tsx Could not Fast Refresh ("emptyScenario" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+12:14:08 PM [vite] (client) hmr update /src/pages/ScenariosPage.tsx, /src/pages/PullRequestsPage.tsx
+12:14:45 PM [vite] (client) hmr update /src/pages/ScenariosPage.tsx
+npm notice
+npm notice New major version of npm available! 10.8.2 -> 12.0.2
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.0.2
+npm notice To update run: npm install -g npm@12.0.2
+npm notice

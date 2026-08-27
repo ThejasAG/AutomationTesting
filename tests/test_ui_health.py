@@ -258,3 +258,27 @@ def test_substring_match_is_not_fooled_by_a_similar_word():
     exp = ScreenExpectation(name="t", required_any_contains=("Card",))
     assert not exp.satisfied(["discard", "placard"]) or exp.satisfied(["NylaiKitchen2Card"])
     assert exp.satisfied(["RoopaDpreOrderCard"])
+
+
+def test_static_wallet_shell_is_partial_load_not_no_progress():
+    """The REAL partial-load shape: the shell renders once and never moves because
+    the bookings request never lands. NO_PROGRESS would drop the only useful fact —
+    which expected content is missing — so PARTIAL_LOAD must win over it."""
+    shell = ["walletUpcomingSearchInput", "upcomingBlock", "finishedBlock",
+             "couponBlock", "walletUpcomingFilterIcon", "Home", "Wallet", "Menu"]
+    rep = run([list(shell) for _ in range(8)], expectation=SCREENS["wallet"])
+    assert rep.result == LoadResult.PARTIAL_LOAD
+    assert rep.progressed is False
+    assert any("Card" in g for g in rep.missing)
+    assert "no meaningful UI change" in rep.to_note()      # evidence is not lost
+
+
+def test_a_stuck_spinner_still_outranks_partial_load():
+    shell = ["walletUpcomingSearchInput", "ActivityIndicator"]
+    rep = run([list(shell) for _ in range(8)], expectation=SCREENS["wallet"])
+    assert rep.result == LoadResult.STUCK_LOADING
+
+
+def test_nothing_expected_found_and_frozen_is_still_no_progress():
+    rep = run([["someOtherScreen"]] * 8, expectation=SCREENS["wallet"])
+    assert rep.result == LoadResult.NO_PROGRESS

@@ -28,7 +28,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from appium.webdriver.common.appiumby import AppiumBy
 
@@ -539,31 +539,61 @@ class ScenarioRunner:
                              method=method)
         return Match()
 
+    # The SAME control carries different accessibility ids in the tablet and phone
+    # builds of the Business app. Measured in the app source:
+    #     App/Screens/Event/OrderSummary.js:689        tablet 'selectAll'
+    #     App/MobileScreens/Event/OrderSummary.js:726  phone  'selectAllItemsBtn'
+    #     App/Screens/Event/OrderSummary.js:675        tablet 'unSelectAll'
+    #     App/MobileScreens/Event/OrderSummary.js:718  phone  'unSelectItemsBtn'
+    # Every other id these scenarios use (addItemsBtn, assignToBtn, sendItemsBtn,
+    # serveItemsBtn, notifyPaymentBtn, closeTableBtn, orderReadyBtn, orderCloseBtn,
+    # AssignTableBtn, addNewEvent, saveBtn, anyBtn) exists in BOTH trees, so these two
+    # pairs are the whole difference — a scenario written on the iPad hunts a control
+    # the phone build does not contain and burns its timeout, and vice versa.
+    #
+    # This is the canonical map. FlowRunner._ID_ALIASES points here so the two runners
+    # cannot drift apart.
+    ID_ALIASES: Dict[str, tuple] = {
+        "selectAllItemsBtn": ("selectAll",),
+        "selectAll": ("selectAllItemsBtn",),
+        "unSelectItemsBtn": ("unSelectAll",),
+        "unSelectAll": ("unSelectItemsBtn",),
+    }
+
+    @classmethod
+    def id_candidates(cls, ident: str) -> tuple:
+        """The id as written, then any known equivalent in the other build."""
+        return (ident,) + tuple(cls.ID_ALIASES.get(ident, ()))
+
     def _resolve_raw(self, words: List[str], prefer_container: bool = False,
                      phrase: str = "") -> "Match":
         # The label as WRITTEN. Real ids contain spaces ("1 hr", "Reserve a
         # table", "Not Sure"); squashing them to "1hr"/"1-hr" never matched, so a
         # step naming a control exactly still fell through to fuzzy matching.
         if phrase:
-            for cand in (phrase.strip(), phrase.strip().title()):
-                if not cand:
+            for base in (phrase.strip(), phrase.strip().title()):
+                if not base:
                     continue
-                els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
-                if els:
-                    return Match(els[0], "accessibility_id", cand, exact=True,
-                                 method=METHOD_EXACT_ID)
+                # ...and the other build's spelling of the same control, so one
+                # scenario runs on the iPad and the iPhone without being rewritten.
+                for cand in self.id_candidates(base):
+                    els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
+                    if els:
+                        return Match(els[0], "accessibility_id", cand, exact=True,
+                                     method=METHOD_EXACT_ID)
 
         joined = "".join(words)
         camel = (words[0].lower() + "".join(w.capitalize() for w in words[1:])) if words else ""
         kebab = "-".join(w.lower() for w in words)
         long_words = [w for w in words if len(w) >= 3]
 
-        # 1. exact accessibility id
-        for cand in filter(None, {joined, camel, kebab, *words}):
-            els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
-            if els:
-                return Match(els[0], "accessibility_id", cand, exact=True,
-                             method=METHOD_EXACT_ID)
+        # 1. exact accessibility id (each one plus its other-build alias)
+        for base in filter(None, {joined, camel, kebab, *words}):
+            for cand in self.id_candidates(base):
+                els = self.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
+                if els:
+                    return Match(els[0], "accessibility_id", cand, exact=True,
+                                 method=METHOD_EXACT_ID)
 
         # 1b. Normalized id/label match — bridges spacing + case between the
         #     written step ("Nylai kitchen 2") and the real testID ("NylaiKitchen2").

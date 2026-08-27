@@ -33,9 +33,34 @@ class ScenarioIn(BaseModel):
 
 @router.get("/devices")
 def scenario_devices(current_user=Depends(get_current_user)):
-    """Available iOS simulators for the scenario's device picker (Booted first)."""
+    """Available iOS simulators for the scenario's device picker (Booted first).
+
+    Each one carries the app bundle ids installed on it, so the Run modal can say up
+    front which environment/device pairs will actually work. Without it the only way
+    to find out was to start a run and wait ~40s for Appium to fail with "App with
+    bundle identifier '…' unknown" — an error that names neither the device nor what
+    it does have.
+    """
+    from concurrent.futures import ThreadPoolExecutor
     from automation.scenarios.cross_app_config import list_ios_simulators
-    return {"simulators": list_ios_simulators()}
+    from automation.projects.builder import app_builder
+    sims = list_ios_simulators()
+
+    # BOOTED ONLY, and in parallel. `simctl listapps` needs a running simulator: asking
+    # all 26 took 30.6s and every shut-down one answered with an empty list anyway —
+    # which would then read as "this device has no apps" and wrongly grey it out.
+    # A shut-down sim keeps apps: null = UNKNOWN, and the UI must not gate on unknown.
+    def _apps(sim):
+        if (sim.get("state") or "") != "Booted":
+            sim["apps"] = None
+            return
+        sim["apps"] = [b for b in app_builder.installed_bundles(sim["udid"])
+                       if not b.startswith("com.apple.") and "WebDriverAgent" not in b]
+
+    targets = [s for s in sims if isinstance(s, dict) and s.get("udid")]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_apps, targets))
+    return {"simulators": sims}
 
 
 def _app_screens(project_id: str) -> List[str]:

@@ -153,7 +153,9 @@ export async function getGoldenRun(): Promise<{ run_id: string | null; report_ur
     return await handleResponse(res);
 }
 
-export interface SimDevice { udid: string; name: string; state: string; ios: string; }
+/** `apps` = bundle ids installed on this simulator. null means UNKNOWN (the sim is shut
+ *  down, and `simctl listapps` needs a booted one) — never treat null as "has nothing". */
+export interface SimDevice { udid: string; name: string; state: string; ios: string; apps?: string[] | null; }
 export interface CrossAppConfig {
     simulators: SimDevice[];
     devices: { consumer: string; waiter: string; kitchen: string };
@@ -1730,6 +1732,20 @@ export interface BuildDeployResult {
      *  install did not take, however green the step looked. */
     version_matches?: boolean;
 }
+/** Weighted progress for the running deploy. `percent`/`done`/`total` are WORK UNITS,
+ *  not steps logged — the build is one step but most of the wall clock. `eta_s` is null
+ *  until a unit completes, because before that there is no honest basis for a number. */
+export interface BuildDeployProgress {
+    percent: number;
+    done: number;
+    total: number;
+    phase: string;
+    detail: string;
+    elapsed_s: number;
+    eta_s: number | null;
+    phase_elapsed_s: number;
+}
+
 export interface BuildDeployStatus {
     status: 'idle' | 'running' | 'completed' | 'completed_with_errors' | 'failed';
     steps: { at: string; message: string }[];
@@ -1737,6 +1753,7 @@ export interface BuildDeployStatus {
     projects?: string[];
     started_at?: string;
     finished_at?: string;
+    progress?: BuildDeployProgress;
 }
 
 export async function getBuildUpdates(): Promise<{ projects: BuildUpdateProject[]; count: number }> {

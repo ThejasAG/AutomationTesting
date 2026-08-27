@@ -302,12 +302,17 @@ def monitor_ui_loading(sample_fn: Callable[[], Sequence[str]],
     )
     found_some = bool(missing) and bool(_hits)
 
+    # ORDER MATTERS. A real partial load looks exactly like "no progress": the shell
+    # renders once and then sits there because the list request never lands. Checking
+    # `not progressed` first swallowed that case and reported NO_PROGRESS, throwing away
+    # the one useful fact — WHICH expected content is missing. PARTIAL_LOAD keeps the
+    # "no meaningful UI change" evidence in its note, so nothing is lost by preferring it.
     if spinner_every_sample and spinners_last:
         result = LoadResult.STUCK_LOADING
-    elif not progressed:
-        result = LoadResult.NO_PROGRESS
     elif found_some:
         result = LoadResult.PARTIAL_LOAD
+    elif not progressed:
+        result = LoadResult.NO_PROGRESS
     else:
         result = LoadResult.TIMEOUT
 

@@ -156,6 +156,27 @@ def _resolve_run(req: "ScenarioRequest", db: Session):
     return bundle_id, steps, repo_path
 
 
+def _app_missing_detail(device_id: str, bundle_id: str) -> Optional[str]:
+    """None if the app is on the device, else a message that actually explains it.
+
+    Appium's own error for this is "App with bundle identifier '…' unknown", which
+    reads like a corrupt install or a driver fault. The real cause is almost always
+    a mismatched pair — the prod Business app only exists on the iPad, the staging
+    one on the phone — so name what IS there and what to do about it.
+    """
+    from automation.projects.builder import app_builder
+    if app_builder.is_installed(device_id, bundle_id):
+        return None
+    # Apple's own apps and Appium's runner are not answers to "which app can I run?"
+    present = [b for b in app_builder.installed_bundles(device_id)
+               if not b.startswith("com.apple.")
+               and "WebDriverAgent" not in b]
+    return (f"The app for this environment ({bundle_id}) is not installed on this "
+            f"simulator. Installed here: {', '.join(present) or 'no third-party apps'}. "
+            f"Pick an environment whose app is on this device, or install it first "
+            f"(Latest build → tick the app + this device).")
+
+
 def _persist_run_start(req: "ScenarioRequest") -> Optional[str]:
     """Create a TestRun so this Scenarios-tab execution shows in Dashboard/Reports."""
     import uuid
@@ -298,6 +319,16 @@ def _scenario_events(
             yield _sse({"type": "error", "detail": boot_msg})
             return
         yield _sse({"type": "phase", "message": boot_msg})
+
+        # Fail here, not 40s later inside WebDriverAgent. Booting, starting Metro and
+        # building WDA all succeed against a device that does not have the app — the
+        # run only dies at session-create, by which point the log looks like an Appium
+        # problem rather than the wrong app/device pair that it is.
+        missing = _app_missing_detail(req.device_id, bundle_id)
+        if missing:
+            yield _sse({"type": "error", "detail": missing})
+            _persist_run_finish(run_id, run_started, error=missing)
+            return
 
         # Staging updates daily — pull the latest build for this environment and
         # build+install it before running (same bundle id replaces what's there).
@@ -500,6 +531,10 @@ def _batch_events(req: BatchRequest, bundle_id: str, repo_path: str) -> Generato
             prep = preparation_service.prepare_for_execution(req.project_id, device_id=req.device_id)
             if not prep.ok:
                 yield _sse({"type": "error", "detail": f"Prepare failed: {prep.error}"}); return
+
+        missing = _app_missing_detail(req.device_id, bundle_id)
+        if missing:
+            yield _sse({"type": "error", "detail": missing}); return
 
         yield _sse({"type": "phase", "message": "Starting Metro…"})
         metro_ok, metro_msg = app_builder.ensure_metro(repo_path, udid=req.device_id, bundle_id=bundle_id)

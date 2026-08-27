@@ -1387,6 +1387,30 @@ class AppBuilder:
             logger.warning("Could not read version from %s: %s", app_path, e)
         return out
 
+    def installed_bundles(self, device_id: str) -> List[str]:
+        """Every app bundle id installed on this simulator.
+
+        Used to turn Appium's "App with bundle identifier '…' unknown" — which says
+        nothing about WHY — into a message naming what is actually on the device.
+        """
+        try:
+            ok, out = _run(["xcrun", "simctl", "listapps", device_id], timeout=30)
+            if not ok or not out:
+                return []
+            return sorted(set(re.findall(r'CFBundleIdentifier\s*=\s*"([^"]+)"', out)))
+        except Exception as e:
+            logger.debug("installed_bundles(%s): %s", device_id, e)
+            return []
+
+    def is_installed(self, device_id: str, bundle_id: str) -> bool:
+        """Is this exact app on this simulator? (cheap, no plist parsing)"""
+        try:
+            ok, _ = _run(["xcrun", "simctl", "get_app_container",
+                          device_id, bundle_id], timeout=30)
+            return bool(ok)
+        except Exception:
+            return False
+
     def installed_version(self, device_id: str, bundle_id: str) -> Dict[str, Optional[str]]:
         """Version currently ON the device, so a deploy can report old -> new."""
         try:

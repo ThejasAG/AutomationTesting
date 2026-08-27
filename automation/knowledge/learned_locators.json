@@ -55,6 +55,22 @@
 "method": "aid",
 "value": "selectAllItemsBtn",
 "ts": 1787302346
+},
+"emailvalue": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "emailValue",
+"ts": 1787814710
+},
+"passwordvalue": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "passwordValue",
+"ts": 1787814732
 }
 },
 "org.vyapy.sarls.vyaconsumerstaging": {
