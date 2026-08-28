@@ -931,6 +931,44 @@ export interface Coverage {
     categories: CoverageCategory[];
 }
 export interface SpineNode { id: string; label: string; app: string; order: number; status: string; scenario: string | null }
+/** The spine as an Archify artifact: self-contained interactive HTML.
+ *  `ok:false` when node/archify is unavailable — the page keeps its existing lanes. */
+export interface WorkflowDiagram { ok: boolean; html?: string; reason?: string }
+
+export interface WorkflowDeltaCounts {
+    added: number; removed: number; changed: number;
+    moved?: number; rerouted?: number; evidenceChanged?: number; geometryChanged?: number;
+}
+export interface WorkflowDelta {
+    ok: boolean;
+    base_ref?: string;
+    head_ref?: string;
+    reason?: string;
+    html?: string;
+    summary?: {
+        components: WorkflowDeltaCounts;
+        connections: WorkflowDeltaCounts;
+        boundaries: WorkflowDeltaCounts;
+        presentationChanged?: boolean;
+        provenanceChanged?: boolean;
+    };
+}
+
+export async function getWorkflowDiagram(): Promise<WorkflowDiagram> {
+    const res = await fetch(`${API_BASE}/workflow/diagram`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+/** Before / Delta / After for the spine.
+ *  `headRef` empty compares against the WORKING TREE (what you want while editing);
+ *  a PR passes its head sha, because the working tree is not the PR. */
+export async function getWorkflowDelta(baseRef = 'main', headRef = ''): Promise<WorkflowDelta> {
+    const qs = new URLSearchParams({ base_ref: baseRef });
+    if (headRef) qs.set('head_ref', headRef);
+    const res = await fetch(`${API_BASE}/workflow/diagram/delta?${qs}`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
 export async function getWorkflowCoverage(): Promise<Coverage> {
     const res = await fetch(`${API_BASE}/workflow/coverage`, { headers: getHeaders() });
     return await handleResponse(res);

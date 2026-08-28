@@ -907,14 +907,27 @@ class ScenarioRunner:
             if not m:
                 return StepResult(step=s, ok=False, action=f'no field for "{target}"',
                                   detail=f"No input matches '{target}'.")
-            m.el.send_keys(text)
+            typed_ok, got = self._fill(m.el, text)
+            # Close the keyboard THIS step raised, before the next one taps anything.
+            kb = self._dismiss_keyboard()
+            if not typed_ok:
+                return StepResult(
+                    step=s, ok=False,
+                    action=f'could not type "{text}" into "{self._describe(m)}"',
+                    detail=f"The field holds {got!r} after 3 attempts. Submitting a mangled "
+                           f"value reads downstream as bad credentials or failed validation, "
+                           f"so this fails here instead.")
             code = (f'    by_id(driver, "{m.value}").send_keys({text!r})'
                     if m.by == "accessibility_id"
                     else f'    driver.find_element(AppiumBy.IOS_PREDICATE, {m.value!r}).send_keys({text!r})')
+            if kb:
+                code += '\n    driver.execute_script("mobile: hideKeyboard", {"keys": ["Done", "return"]})'
             if m.by == "accessibility_id":
                 self._used_ids.add(m.value)
             return StepResult(step=s, ok=True,
-                              action=f'typed "{text}" into "{self._describe(m)}"', code=code)
+                              action=f'typed "{text}" into "{self._describe(m)}"'
+                                     + (" (keyboard dismissed)" if kb else ""),
+                              code=code)
 
         # TAP / open / select / book / …
         if _TAP.match(s):
@@ -931,6 +944,100 @@ class ScenarioRunner:
 
         # Unrecognised — best effort tap on the whole phrase ("nylai kitchen 2").
         return self._tap_step(s, s, _locator_words(s), inferred=True)
+
+    def _fill(self, el, text: str):
+        """Type *text* into *el* and VERIFY the field actually holds it. (ok, value).
+
+        A bare send_keys is not enough on this app, for two measured reasons:
+
+        * The apps run with noReset, so a field can still hold the PREVIOUS session's
+          value and send_keys APPENDS. That produced a login e-mail of
+          'emp2A@xorstack.rstack.comemp2A@xo@xorst…' — the app answered "Please enter
+          valid email address" and the run was reported as bad credentials.
+        * RN TextInput drops characters mid-burst: send_keys('emp2A@…') was measured
+          leaving 'emA@…' behind, the 'p' and '2' simply swallowed.
+
+        Both look identical downstream — a rejected login — so this clears first, reads
+        the value back, and escalates to character-by-character before giving up. Same
+        approach as cross_app_orchestrator._fill_field, which fixed this for the flows.
+        """
+        def _value():
+            try:
+                return el.get_attribute("value") or ""
+            except Exception:
+                return None
+
+        for attempt in (1, 2, 3):
+            try:
+                el.click()
+                time.sleep(0.2)
+                el.clear()          # no-op on an empty field; essential under noReset
+                time.sleep(0.2)
+            except Exception:
+                pass
+            # ONE CHARACTER AT A TIME, from the first attempt — not as a last resort.
+            # A burst send_keys drops characters on this app's RN TextInputs, and it
+            # does so SILENTLY: get_attribute("value") read back the full string while
+            # the field displayed 'eorstack.com' (six characters of 'emp2A@xorstack.com'
+            # simply gone) and the app answered "Please enter valid email address".
+            # Because the read-back agreed, the retry below never fired. The verifier
+            # cannot be trusted here, so use the input method that actually lands.
+            # ~60ms/char — about 1.2s for an e-mail, against a login that otherwise fails.
+            for ch in text:
+                el.send_keys(ch)
+                time.sleep(0.06)
+            time.sleep(0.3)
+            got = _value()
+            if got is None:
+                return True, text   # cannot read it back — assume it landed
+            if not got or got == text or "\u2022" in got or "\u25cf" in got:
+                return True, got    # match, or a masked secure field
+        return False, got
+
+    def _dismiss_keyboard(self) -> bool:
+        """Close the on-screen keyboard. Returns True if one was up and is now gone.
+
+        A keyboard left open by a `type` step breaks the NEXT step, whichever step that
+        is — so this belongs here, at the source, rather than as a dismiss step the
+        author has to remember before every tap.
+
+        Measured on the iPhone 16 (393x852) against the Business sign-in screen:
+        typing into both fields left the keyboard covering y=561..794 and scrolled the
+        form, and the following `click clickCheckBox` reported [ok] while the box stayed
+        empty. Sign In then stayed disabled, and the run only noticed two steps later at
+        `verify addNewEvent is visible` — 5/6 steps "passed" having done nothing.
+
+        The iPad's landscape keyboard is proportionally much smaller and does not shift
+        that form, which is why the same scenario passes there and fails on the phone.
+
+        Non-fatal: a device that cannot report a keyboard, or refuses to close it, must
+        not fail a step that already typed successfully.
+        """
+        try:
+            kb = self.d.find_elements(AppiumBy.IOS_PREDICATE,
+                                      "type == 'XCUIElementTypeKeyboard'")
+        except Exception:
+            return False
+        if not kb:
+            return False
+        # 'mobile: hideKeyboard' with the return-style keys is what actually closes it on
+        # this build; driver.hide_keyboard() alone was measured leaving it up.
+        for attempt in (
+            lambda: self.d.execute_script(
+                "mobile: hideKeyboard", {"keys": ["Done", "return", "Return", "next", "Go"]}),
+            lambda: self.d.hide_keyboard(),
+        ):
+            try:
+                attempt()
+            except Exception:
+                continue
+            try:
+                if not self.d.find_elements(AppiumBy.IOS_PREDICATE,
+                                            "type == 'XCUIElementTypeKeyboard'"):
+                    return True
+            except Exception:
+                return False
+        return False
 
     def _fuzzy_resolve(self, words: List[str], step: str) -> Optional["Match"]:
         """Self-healing fallback: find the closest visible control by text when the
@@ -1125,6 +1232,74 @@ class ScenarioRunner:
         self._invalidate_source()
         return True
 
+    #: Ticking a checkbox adds no label to the tree, so "did the screen change?" cannot
+    #: see it. Its own pixels are the only cheap evidence, which is why this control gets
+    #: its own path rather than a generic verified-tap.
+    _CHECKBOX_RE = re.compile(r"check\s*box|checkbox|agree|terms", re.I)
+
+    def _looks_like_checkbox(self, phrase: str) -> bool:
+        return bool(self._CHECKBOX_RE.search(phrase or ""))
+
+    def _box_signature(self, rect):
+        """Mean RGB of the checkbox SQUARE (the left end of the row).
+
+        Sampling the whole row would be dominated by the unchanging label text; the
+        square is where the fill appears. Same idea as
+        cross_app_flows._tick_tc_checkbox, which fixed this for the cross-app flows.
+        """
+        try:
+            import io
+            from PIL import Image
+            im = Image.open(io.BytesIO(self.d.get_screenshot_as_png())).convert("RGB")
+            win = self.d.get_window_size()
+            sx, sy = im.width / win["width"], im.height / win["height"]
+            h = rect["height"]
+            x0, y0 = int(rect["x"] * sx), int(rect["y"] * sy)
+            crop = im.crop((x0, y0, int(x0 + h * sx * 1.6), int(y0 + h * sy)))
+            px = list(crop.getdata())
+            if not px:
+                return None
+            n = len(px)
+            return tuple(round(sum(p[i] for p in px) / n) for i in range(3))
+        except Exception:
+            return None
+
+    def _tap_checkbox(self, s: str, phrase: str, words: List[str]) -> StepResult:
+        """Tick a checkbox and CONFIRM it changed, retrying before reporting success."""
+        m = self._exact_id(phrase) or self._resolve(words, prefer_container=True, step=s)
+        if not m:
+            return StepResult(step=s, ok=False, action=f'no checkbox for "{phrase}"',
+                              detail=f"Nothing on screen matches '{phrase}'.")
+        for attempt in (1, 2, 3):
+            try:
+                rect = m.el.rect
+            except Exception:
+                rect = None
+            before = self._box_signature(rect) if rect else None
+            try:
+                m.el.click()
+            except Exception as e:
+                return StepResult(step=s, ok=False, action=f'could not tap "{phrase}"',
+                                  detail=str(e)[:200])
+            self._wait_settle()
+            after = self._box_signature(rect) if rect else None
+            if before is None or after is None:
+                # Cannot see the square (no screenshot / no rect). One click is all we
+                # can honestly do — do not retry blindly and risk toggling it back.
+                return StepResult(step=s, ok=True,
+                                  action=f'tapped "{self._describe(m)}" (state unverified)')
+            if after != before:
+                return StepResult(
+                    step=s, ok=True,
+                    action=f'ticked "{self._describe(m)}" (verified {before} -> {after})'
+                           + ("" if attempt == 1 else f", attempt {attempt}"))
+            m = self._exact_id(phrase) or self._resolve(words, prefer_container=True, step=s) or m
+        return StepResult(
+            step=s, ok=False, action=f'"{phrase}" did not change state',
+            detail="Tapped it 3x and the checkbox pixels never changed, so it is still "
+                   "unticked. A form gated on it will stay disabled and every later step "
+                   "would act on a screen that never advanced.")
+
     def _idb_tap_name(self, name: str) -> bool:
         arr = self._idb_all()
         # Clear the toast BEFORE locating, not just before tapping: this debug
@@ -1158,6 +1333,16 @@ class ScenarioRunner:
         # four more times, which is where 276s of a 336s scenario went.
         # This is not a guess: an exact label match is strictly more precise than
         # the partial match it saves us from computing.
+        # A CHECKBOX must never go down the idb coordinate fast-path. Measured on the
+        # Business sign-in screen: that path tapped 'clickCheckBox', returned True
+        # because the tap command ran, and the step logged [ok] while the box stayed
+        # empty and Sign In stayed disabled — the run then "passed" 5 of 6 steps having
+        # achieved nothing. An Appium element click on the same control does toggle it,
+        # and a checkbox is the one control whose effect is cheap to confirm: its own
+        # pixels change. So resolve it properly and verify the state actually flipped.
+        if phrase and self._looks_like_checkbox(phrase):
+            return self._tap_checkbox(s, phrase, words)
+
         if not m and phrase and not inferred:
             pt = self._idb_element(phrase)
             if pt and self._idb_on_screen(pt) and self._idb_tap_name(phrase):

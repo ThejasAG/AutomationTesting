@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { getWorkflowCoverage, getWorkflowGraph, getWorkflowPath, recreateWorkflow } from '../api';
-import type { Coverage, SpineNode, Handoff } from '../api';
-import { GitBranch, CheckCircle2, Circle, Ban, Loader2, Smartphone, Store, ArrowRight, Sparkles, Play } from 'lucide-react';
+import { getWorkflowCoverage, getWorkflowGraph, getWorkflowPath, recreateWorkflow,
+         getWorkflowDiagram, getWorkflowDelta } from '../api';
+import type { Coverage, SpineNode, Handoff, WorkflowDiagram, WorkflowDelta } from '../api';
+import { GitBranch, CheckCircle2, Circle, Ban, Loader2, Smartphone, Store, ArrowRight, Sparkles, Play, Map, GitCompare } from 'lucide-react';
+import ArchifyFrame from '../components/ArchifyFrame';
 
 function statusColor(status: string, built?: boolean): string {
   if (status === 'manual') return '#6b7280';         // grey = can't automate
@@ -43,6 +45,13 @@ export default function WorkflowPage() {
   const [plan, setPlan] = useState<{ path: { id: string; label: string }[]; scenarios: string[] } | null>(null);
   const [recMsg, setRecMsg] = useState('');
   const [allNodes, setAllNodes] = useState<SpineNode[]>([]);
+  // The Archify map of the SAME catalog. Loaded separately from the lanes above so a
+  // renderer problem degrades to a note instead of blanking the page.
+  const [diagram, setDiagram] = useState<WorkflowDiagram | null>(null);
+  const [diagramLoading, setDiagramLoading] = useState(true);
+  const [baseRef, setBaseRef] = useState('main');
+  const [delta, setDelta] = useState<WorkflowDelta | null>(null);
+  const [deltaLoading, setDeltaLoading] = useState(false);
 
   useEffect(() => {
     Promise.all([getWorkflowCoverage(), getWorkflowGraph()])
@@ -50,6 +59,20 @@ export default function WorkflowPage() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    getWorkflowDiagram()
+      .then(setDiagram)
+      .catch(e => setDiagram({ ok: false, reason: String(e) }))
+      .finally(() => setDiagramLoading(false));
+  }, []);
+
+  const loadDelta = async () => {
+    setDeltaLoading(true);
+    try { setDelta(await getWorkflowDelta(baseRef)); }
+    catch (e) { setDelta({ ok: false, reason: String(e) }); }
+    finally { setDeltaLoading(false); }
+  };
 
   const computePath = async (g: string) => {
     setGoal(g); setRecMsg('');
@@ -121,6 +144,78 @@ export default function WorkflowPage() {
         <div style={{ marginTop: 16, display: 'flex', gap: 16, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
           <span>🟢 built</span><span>🟡 automatable — pending</span><span>⚫ manual / blocked</span>
         </div>
+      </div>
+
+      {/* Interactive map of the SAME catalog (Archify artifact) */}
+      <div className="card" style={{ marginBottom: 24 }}>
+        <h3 style={{ margin: '0 0 4px', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Map size={17} color="var(--accent-primary)" /> Interactive system map
+        </h3>
+        <p style={{ margin: '0 0 14px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+          The same spine, rendered from the same catalog — search nodes, trace a route, and
+          compare roles. Dashed edges are the cross-app handoffs.
+        </p>
+        <ArchifyFrame
+          title="Vyapy cross-app spine"
+          html={diagram?.ok ? diagram.html : undefined}
+          loading={diagramLoading}
+          reason={diagram?.reason}
+        />
+      </div>
+
+      {/* Before / Delta / After — what a change did to the flow */}
+      <div className="card" style={{ marginBottom: 24 }}>
+        <h3 style={{ margin: '0 0 4px', fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <GitCompare size={17} color="var(--accent-primary)" /> What changed about the flow
+        </h3>
+        <p style={{ margin: '0 0 12px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+          The spine is defined in <code>automation/workflow/catalog.py</code>, so a change to it
+          changes this map. Compare a base ref against the working tree.
+        </p>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 }}>
+          <input
+            value={baseRef}
+            onChange={e => setBaseRef(e.target.value)}
+            placeholder="base ref (branch, tag or sha)"
+            style={{ padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border-color)',
+                     background: 'transparent', color: 'inherit', font: 'inherit', width: 260 }}
+          />
+          <button className="btn" onClick={loadDelta} disabled={deltaLoading || !baseRef.trim()}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 16px' }}>
+            {deltaLoading ? <Loader2 size={14} className="spin" /> : <GitCompare size={14} />} Compare
+          </button>
+        </div>
+
+        {delta?.ok && delta.summary && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+            {([['Steps', delta.summary.components], ['Connections', delta.summary.connections],
+               ['Regions', delta.summary.boundaries]] as const).map(([label, c]) => (
+              <div key={label} style={{ border: '1px solid var(--border-color)', borderRadius: 8,
+                                        padding: '7px 11px', fontSize: '0.78rem' }}>
+                <strong>{label}</strong>{' '}
+                <span style={{ color: '#22c55e' }}>+{c.added}</span>{' · '}
+                <span style={{ color: '#ef4444' }}>−{c.removed}</span>{' · '}
+                <span style={{ color: '#eab308' }}>~{c.changed}</span>
+              </div>
+            ))}
+            {!delta.summary.components.added && !delta.summary.components.removed &&
+             !delta.summary.connections.added && !delta.summary.connections.removed && (
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', alignSelf: 'center' }}>
+                No structural change to the flow.
+              </div>
+            )}
+          </div>
+        )}
+
+        {delta && (
+          <ArchifyFrame
+            title="Spine delta"
+            html={delta.ok ? delta.html : undefined}
+            loading={deltaLoading}
+            reason={delta.reason}
+            height={680}
+          />
+        )}
       </div>
 
       {/* Agent reads the workflow to recreate a flow */}

@@ -34,6 +34,67 @@ _SPINE_SCENARIO = {
 }
 
 
+def _built_spine_ids(db: Session) -> frozenset:
+    """Spine step ids that an existing SavedScenario actually covers."""
+    built = {s.name for s in db.query(SavedScenario).all()}
+    return frozenset(sid for sid, name in _SPINE_SCENARIO.items() if name in built)
+
+
+@router.get("/diagram")
+def get_diagram(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """The spine as an interactive Archify artifact (self-contained HTML).
+
+    Additive: /graph still serves the lane data the existing view renders. This is a
+    richer picture of the SAME catalog, so the two cannot drift. Degrades to
+    {"ok": false, "reason": ...} when node/archify is unavailable — the page keeps its
+    existing lanes rather than breaking.
+    """
+    from automation.workflow.archify_cli import render
+    from automation.workflow.archify_ir import build_ir
+    html, reason = render(build_ir(_built_spine_ids(db)))
+    if html is None:
+        return {"ok": False, "reason": reason}
+    return {"ok": True, "html": html}
+
+
+@router.get("/diagram/delta")
+def get_diagram_delta(base_ref: str = "main", head_ref: str = "",
+                      db: Session = Depends(get_db),
+                      current_user=Depends(get_current_user)):
+    """Before / Delta / After for the spine, comparing *base_ref* to *head_ref*.
+
+    The spine is defined in automation/workflow/catalog.py, so a change that edits the
+    catalog changes this diagram — which is exactly the review question "what did this
+    change about the app's flow?". Exact added/removed/changed counts come back
+    alongside the artifact so a PR comment can state facts, not impressions.
+
+    head_ref empty = the WORKING TREE, which is what you want while editing locally. A
+    PR passes its head sha instead: the working tree is not the PR, and diffing a
+    reviewer's uncommitted edits against someone else's base would report changes that
+    belong to neither.
+    """
+    from automation.workflow.archify_cli import compare
+    from automation.workflow.archify_ir import build_ir
+    from automation.workflow.catalog_at_ref import spine_ir_at_ref
+
+    built = _built_spine_ids(db)
+    base_ir, why = spine_ir_at_ref(base_ref, built)
+    if base_ir is None:
+        return {"ok": False, "reason": why}
+    if head_ref.strip():
+        head_ir, why = spine_ir_at_ref(head_ref.strip(), built)
+        if head_ir is None:
+            return {"ok": False, "reason": why}
+    else:
+        head_ir = build_ir(built)
+    summary, html, reason = compare(base_ir, head_ir)
+    if not summary or not summary.get("ok"):
+        return {"ok": False, "reason": reason, "summary": summary}
+    return {"ok": True, "base_ref": base_ref,
+            "head_ref": head_ref.strip() or "working tree",
+            "summary": summary.get("summary"), "html": html}
+
+
 @router.get("/coverage")
 def get_coverage(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """The full coverage matrix + which scenarios are actually built."""
