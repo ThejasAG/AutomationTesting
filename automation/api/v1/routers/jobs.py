@@ -13,6 +13,7 @@ from automation.reporting.engine import reporting_engine
 from automation.database.database import create_ai_recommendation, utc_iso
 from automation.auth.security import require_agent
 from automation.database.config import get_db
+from automation.reports.step_stats import step_stats
 from automation.database.models import TestRun, TestProject, ScenarioResult
 from automation.auth.security import get_current_user
 
@@ -424,6 +425,7 @@ def get_run_scenarios(
         return (int(n) if n else 1_000_000, r.scenario_num or "")
     rows.sort(key=_key)
 
+    _stats = {r.id: step_stats(r.reasons) for r in rows}
     scenarios = [{
         "id": r.id,
         "scenario_num": r.scenario_num,
@@ -433,6 +435,15 @@ def get_run_scenarios(
         "business_status": r.business_status,
         "error": r.error,
         "reasons": r.reasons or [],
+        # Step-level accounting, derived from `reasons` (which already tags every
+        # step [ok]/[FAIL]). "failed at step 7 of 8" and "failed at step 1" both
+        # showed as just "FAIL" before this. None pct = no countable steps ran,
+        # which is NOT the same as 0%.
+        "steps_passed": _stats[r.id].passed,
+        "steps_failed": _stats[r.id].failed,
+        "steps_total": _stats[r.id].total,
+        "steps_pass_pct": _stats[r.id].pass_pct,
+        "steps_summary": _stats[r.id].summary(),
         "launch_time": r.launch_time,
         "screenshot": r.screenshot,          # failure screenshot (data-URI) for the Scenarios tab
         "created_at": utc_iso(r.created_at),

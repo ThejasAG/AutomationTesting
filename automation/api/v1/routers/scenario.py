@@ -31,6 +31,7 @@ class ScenarioRequest(BaseModel):
     steps: List[str]
     device_id: str
     bundle_id: Optional[str] = None      # falls back to the project's stored bundle id
+    env: Optional[str] = None            # 'staging' | 'prod' — translates bundle_id to that env's build
     appium_url: str = "http://127.0.0.1:4723"
     name: str = "scenario"
     save: bool = True                     # write the generated .py into e2e/
@@ -142,6 +143,9 @@ def _resolve_run(req: "ScenarioRequest", db: Session):
         raise HTTPException(status_code=404, detail="Project not found")
 
     bundle_id = req.bundle_id or project.app_bundle_id
+    if bundle_id and req.env:
+        from automation.scenarios.cross_app_flows import bundle_for_env
+        bundle_id = bundle_for_env(bundle_id, req.env)
     if not bundle_id:
         raise HTTPException(
             status_code=400,

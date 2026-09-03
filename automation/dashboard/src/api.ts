@@ -123,6 +123,13 @@ export interface ScenarioResult {
     business_status: string;        // PASS | FAIL | N/A
     error: string | null;
     reasons: string[];
+    // Step-level accounting derived from `reasons` on the server. pass_pct is null
+    // when no countable step ran — which is not the same as 0%.
+    steps_passed: number;
+    steps_failed: number;
+    steps_total: number;
+    steps_pass_pct: number | null;
+    steps_summary: string;
     launch_time: number | null;
     screenshot?: string | null;     // failure screenshot (data-URI), shown in the expanded row
     created_at: string;
@@ -1379,11 +1386,13 @@ export async function runScenario(body: {
     bundle_id?: string;
     name?: string;
     save?: boolean;
+    env?: string;
 }): Promise<ScenarioRunResult> {
     const res = await fetch(`${API_BASE}/scenario/run`, {
         method: 'POST',
         headers: getHeaders(),
-        body: JSON.stringify(body),
+        // Same Staging/Live toggle the cross-app suites use, so one switch governs both.
+        body: JSON.stringify({ env: localStorage.getItem('flowEnv') || 'staging', ...body }),
     });
     return await handleResponse(res);
 }
@@ -1816,5 +1825,42 @@ export async function deployLatestBuild(
 
 export async function getBuildDeployStatus(): Promise<BuildDeployStatus> {
     const res = await fetch(`${API_BASE}/builds/deploy/status`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+// ── UI Inspector ───────────────────────────────────────────────────────────
+export interface InspectorElement {
+    label: string;
+    type: string | null;
+    frame: { x: number; y: number; w: number; h: number };
+    centre: { x: number; y: number };
+}
+export interface InspectorProblem {
+    label: string;
+    frame: { x: number; y: number; w: number; h: number };
+    issues: { kind: string; by?: string; fraction?: number; detail: string }[];
+}
+export interface InspectorTree {
+    udid: string;
+    screen: { width: number; height: number; orientation: 'portrait' | 'landscape' };
+    element_count: number;
+    elements: InspectorElement[];
+    problems: InspectorProblem[];
+    problem_count: number;
+}
+
+export async function getInspectorTree(udid: string, safeMargin = 0): Promise<InspectorTree> {
+    const res = await fetch(
+        `${API_BASE}/inspector/${udid}/tree?safe_margin=${safeMargin}`,
+        { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+/** Screen image plus its PIXEL size — the app reports POINTS, and on a landscape
+ *  device the two are rotated relative to each other, so the caller must scale. */
+export async function getInspectorScreenshot(
+    udid: string,
+): Promise<{ udid: string; width: number; height: number; image: string }> {
+    const res = await fetch(`${API_BASE}/inspector/${udid}/screenshot`, { headers: getHeaders() });
     return await handleResponse(res);
 }

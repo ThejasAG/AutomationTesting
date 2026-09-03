@@ -63,6 +63,24 @@ RN_KNOWN_FIXES: Dict[str, Dict[str, str]] = {
     },
 }
 
+# Packages the app's SOURCE imports but its package.json never declares.
+#
+# RN_KNOWN_FIXES above only corrects versions of dependencies that are already
+# declared ("if pkg in deps"), so an undeclared import slips straight through it.
+# Metro resolves statically, so one of these takes down the WHOLE bundle: the app
+# then serves a valid-looking but truncated bundle with no AppRegistry in it, and
+# the device shows a blank screen or "Module AppRegistry is not a registered
+# callable module". Nothing in that symptom points at a missing package, which is
+# why this costs hours to diagnose by hand.
+RN_REQUIRED_DEPS: Dict[str, Dict[str, str]] = {
+    "0.68": {
+        # App/Utils/videoUploadTracker.js requires it. The require is lazy and
+        # wrapped in try/except, which protects the RUNTIME but not Metro — static
+        # resolution still fails and 500s the bundle.
+        "react-native-compressor": "1.10.3",
+    },
+}
+
 # Only these are worth a registry round-trip — a compatibility conflict with
 # React Native can only come from a package that touches React Native.
 _RN_PKG_RE = re.compile(r"^(@react-native|react-native-|@react-navigation)")
@@ -399,6 +417,11 @@ class AppBuilder:
             if pkg in deps:
                 targets[pkg] = target
 
+        # 1b. Imported-but-undeclared packages. Deliberately NOT gated on
+        # "pkg in deps" — being absent from package.json is the whole failure.
+        for pkg, target in RN_REQUIRED_DEPS.get(rn_key, {}).items():
+            targets.setdefault(pkg, target)
+
         # 2. Registry pass for packages honest enough to declare a peer range.
         self._registry_failures = 0
         self._unresolved = []
@@ -596,6 +619,67 @@ class AppBuilder:
             "https://archives.boost.io/release/1.76.0/source/boost_1_76_0.tar.bz2",
     }
 
+    #: Marks our inserted line so re-running is a no-op and a human reading the app's
+    #: entry file knows what put it there and why.
+    _LOGBOX_MARK = "// platform: LogBox silenced for automated runs"
+
+    def _silence_logbox(self, repo_path: str) -> Optional[str]:
+        """Stop the app's debug LogBox toasts covering its own controls.
+
+        Measured 2026-09-02 on the Vya Business build: the collapsed toasts stack
+        along the bottom and are drawn OVER real controls — 'addNewEvent' (y=723),
+        the lower half of 'saveBtn' (y=685..735) on the iPad, and the whole time-slot
+        row on the phone (slot y=730, toast y=726..774). Tapping any of them opens the
+        LogBox VIEWER instead of the control, and the viewer's own Dismiss button is
+        itself covered, so there is no way out. A booking could not be created by hand
+        OR by automation until this was silenced.
+
+        JS-only: it needs a Metro reload, not a rebuild. Idempotent, and only ever
+        ADDS a line — it never edits or removes existing app code.
+
+        NOTE this touches TRACKED source, unlike the node_modules patches above, so it
+        will show as a modified file in the app repo. That is deliberate and visible:
+        the real fix belongs in the app, and a silent change would hide the fact that
+        the shipped build has controls users cannot tap either.
+        """
+        import re as _re
+        entry = os.path.join(repo_path, "index.js")
+        if not os.path.isfile(entry):
+            return None
+        try:
+            with open(entry) as f:
+                content = f.read()
+        except OSError as e:
+            logger.warning(f"Could not read {entry}: {e}")
+            return None
+
+        if self._LOGBOX_MARK in content or "ignoreAllLogs" in content:
+            return None                                  # already silenced
+
+        m = _re.search(r"^import\s*\{([^}]*)\}\s*from\s*['\"]react-native['\"];",
+                       content, _re.M)
+        if not m:
+            return None                                  # not an entry we understand
+        names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+        if "LogBox" not in names:
+            names.append("LogBox")
+        new_import = "import {" + ", ".join(names) + "} from 'react-native';"
+
+        content = (content[:m.start()] + new_import
+                   + f"\n\n{self._LOGBOX_MARK} — the toasts cover addNewEvent/saveBtn\n"
+                   + "// and the time-slot row, and their own Dismiss button is covered too.\n"
+                   + "LogBox.ignoreAllLogs(true);"
+                   + content[m.end():])
+        try:
+            with open(entry, "w") as f:
+                f.write(content)
+        except OSError as e:
+            logger.warning(f"Could not patch {entry}: {e}")
+            return None
+        msg = "Silenced LogBox in index.js (its toasts cover the app's own controls)"
+        logger.info(msg)
+        return msg
+
     def _patch_dead_podspec_urls(self, repo_path: str) -> Optional[str]:
         """Repoint podspecs whose upstream download host is gone.
 
@@ -746,6 +830,7 @@ class AppBuilder:
             # Older React Native versions ship podspecs pointing at dead hosts;
             # CocoaPods would download an HTML error page and fail the checksum.
             self._patch_dead_podspec_urls(repo_path)
+            self._silence_logbox(repo_path)
 
             logger.info(f"Running pod install in {candidate}")
             ok, out = _run(["pod", "install"], cwd=candidate, timeout=1800)

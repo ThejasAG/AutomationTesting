@@ -203,7 +203,7 @@ export default function ScenariosPage() {
                   <button className="btn" disabled={!!flowBusy}
                     onClick={async () => {
                       setFlowBusy(f.id);
-                      try { await runCrossAppFlow(f.id, 'staging', 'tablet'); }
+                      try { await runCrossAppFlow(f.id, (localStorage.getItem('flowEnv') as 'staging' | 'prod') || 'staging', 'tablet'); }
                       finally { setFlowBusy(null); }
                     }}
                     style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 14px', alignSelf: 'flex-start' }}>

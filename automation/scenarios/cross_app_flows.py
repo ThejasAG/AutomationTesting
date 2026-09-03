@@ -75,10 +75,29 @@ ENV_BUNDLES: Dict[str, Dict[str, str]] = {
     },
 }
 
+def bundle_for_env(bundle_id: str, env: str) -> str:
+    """The same app's bundle id in *env*, or *bundle_id* unchanged if it is not one
+    of ours. Saved scenarios store a fixed bundle, so switching a single scenario
+    between Live and Staging means translating it — the pair is already in
+    ENV_BUNDLES, so look it up there rather than string-munging a "staging" suffix.
+    """
+    for role_map in ENV_BUNDLES.values():
+        for role, bid in role_map.items():
+            if bid == bundle_id:
+                return ENV_BUNDLES.get(env, role_map).get(role, bundle_id)
+    return bundle_id
+
+
 # The consumer whose booking the waiter opens. The Business "My Bookings" screen
 # labels the card with the diner's full name (e.g. "Roopa D"). One-line fix here.
 CONSUMER_NAME = "Roopa"
-STEP_TIMEOUT = 150   # hard per-step ceiling (s): a wedged Appium resolve once hung a run 21 min
+STEP_TIMEOUT = 240   # hard per-step ceiling (s): a wedged Appium resolve once hung a run 21 min.
+# Raised from 150 because real steps on this host now run close to it: measured
+# @consumer_home 85.6s and 'click NylaiKitchen2' 123.3s, both flagged SLOW LOAD.
+# With RAM exhausted (swap 7.3G of 8G) those times swing run to run, so a 150s
+# ceiling made flow_book_demo pass or fail by luck — 2 of 11 runs. This is
+# headroom for a slow machine, NOT permission for a step to hang: a genuinely
+# wedged resolve still dies, just 90s later.
 # Auto-prune failure screenshots: keep them for only the most recent N runs so the DB can't
 # grow without bound (~230 KB/shot). Older runs keep their result + reason, just not the image.
 SCREENSHOT_KEEP_RUNS = 25
@@ -1636,11 +1655,42 @@ class FlowRunner:
     def _idb_tap(self, x, y, udid: str = "") -> bool:
         import subprocess as _sp
         udid = udid or getattr(self, "_cur_udid", "") or self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
+        x, y = self._rotate_for_device(x, y, udid)
         try:
             _sp.run([_IDB, "ui", "tap", "--udid", udid, str(int(x)), str(int(y))], timeout=10)
             return True
         except Exception:
             return False
+
+    def _rotate_for_device(self, x, y, udid: str):
+        """Map an app-space point to the DEVICE space `idb ui tap` expects.
+
+        On the landscape iPad these are not the same space. Measured:
+            app frame     1210 x 834   (landscape, what describe-all reports)
+            screenshot     834 x 1210  (portrait, the physical device)
+            'addNewEvent' app (725, 723)  ->  really at device (723, 485)
+
+        So idb REPORTS rotated coordinates but TAPS in device coordinates, and every
+        coordinate tap on this iPad landed ~240pt away from its target. That is why
+        'addNewEvent' opened nothing, and why @save_appointment kept "tapping Save"
+        while the form sat there — the tap was never on the button. Portrait devices
+        (the phones) have both spaces identical, so this is a no-op there.
+
+            x_dev = y_app        y_dev = app_height_in_device_space - x_app
+        """
+        try:
+            import subprocess as _sp, json as _json
+            raw = _sp.run([_IDB, "ui", "describe-all", "--udid", udid],
+                          capture_output=True, text=True, timeout=15).stdout
+            app = next((e for e in _json.loads(raw or "[]")
+                        if (e.get("type") or "") == "Application"), None)
+            f = (app or {}).get("frame") or {}
+            w, h = f.get("width", 0), f.get("height", 0)
+            if w > h:                      # landscape app -> portrait device
+                return y, w - x
+        except Exception:
+            pass
+        return x, y
 
     def _steppers(self, r: ScenarioRunner):
         """Product quantity steppers on the menu — via idb (fast), not an Appium
@@ -2278,6 +2328,35 @@ class FlowRunner:
         if _scrolls:
             notes.append(f"    · @first_time_slot — scrolled {_scrolls}x to reveal the time slots")
         if slots:
+            # Drop slots the LogBox toast is drawn over. Measured on the PHONE with the
+            # form open: slot 17:00 centre y=730, toast y=726..774 — an idb tap there
+            # opened the LogBox VIEWER instead of selecting the time, so selectedTime
+            # stayed null and Save was silently blocked. (On the iPad the same toast
+            # covers saveBtn instead; _tap_save_btn already aims around it.) Keep the
+            # unfiltered list if EVERY slot is covered — the Appium path below scrolls
+            # the real element into view and may still land it.
+            try:
+                _strips = self._logbox_strips([
+                    {"label": (e.get("AXLabel") or "").strip(),
+                     "x": (e.get("frame") or {}).get("x", 0),
+                     "y": (e.get("frame") or {}).get("y", 0),
+                     "w": (e.get("frame") or {}).get("width", 0),
+                     "h": (e.get("frame") or {}).get("height", 0),
+                     "cx": 0, "cy": 0}
+                    for e in (_json.loads(_sp.run([_IDB, "ui", "describe-all", "--udid", udid],
+                              capture_output=True, text=True, timeout=15).stdout or "[]"))
+                ])
+            except Exception:
+                _strips = []
+            if _strips:
+                _clear = [sl for sl in slots
+                          if not any(t["x"] <= sl[2] <= t["x"] + t["w"]
+                                     and t["y"] <= sl[3] <= t["y"] + t["h"]
+                                     for t in _strips)]
+                if _clear and len(_clear) != len(slots):
+                    notes.append(f"    · @first_time_slot — skipped {len(slots) - len(_clear)} "
+                                 f"slot(s) covered by the LogBox toast")
+                    slots = _clear
             slots.sort()
             from datetime import datetime as _dt
             now_min = _dt.now().hour * 60 + _dt.now().minute
@@ -3521,6 +3600,7 @@ class FlowRunner:
                     if fail_shot is None:      # capture the screen AT this failing step
                         fail_step = f"{step} (step {step_idx}/{total_steps})"
                         fail_shot = self._capture_screenshot()
+                        notes.extend(self._collect_evidence(role))
                     self.on_event({"type": "step", "role": role, "step": step, "ok": False})
                     self._persist(seg, status, notes, time.time() - started)
                     break
@@ -3530,6 +3610,7 @@ class FlowRunner:
                     if fail_shot is None:      # first failing step — screenshot it now
                         fail_step = f"{step} (step {step_idx}/{total_steps})"
                         fail_shot = self._capture_screenshot()
+                        notes.extend(self._collect_evidence(role))
                     # STOP HERE. Steps in a segment are sequential and stateful — each one acts
                     # on the screen the previous one left. Once a step fails, every later step
                     # runs against the wrong screen: they either no-op with a misleading '[ok]
@@ -3549,12 +3630,15 @@ class FlowRunner:
                     if fail_shot is None:
                         fail_step = f"{step} (step {step_idx}/{total_steps}) — app crashed"
                         fail_shot = self._capture_screenshot()
+                        # The crash path is where the .ips report matters most.
+                        notes.extend(self._collect_evidence(role))
                     break
         except Exception as e:
             status = "FAIL"
             notes.append(f"[FAIL] segment error: {e}")
             if fail_shot is None:
                 fail_shot = self._capture_screenshot()
+                notes.extend(self._collect_evidence(role))
         # Flaky summary — a green run with retries is not the same as a clean one.
         if flaky_steps:
             notes.append(f"[flaky] {flaky_steps} step(s) passed only on retry — "
@@ -3563,6 +3647,67 @@ class FlowRunner:
         if status == "FAIL" and fail_step:
             notes.append(f"[where] failed at step: '{fail_step}'")
         self._persist(seg, status, notes, time.time() - started, screenshot=fail_shot)
+
+    def _collect_evidence(self, role: str) -> List[str]:
+        """Why the app failed, in its own words — gathered ONCE at the failing step.
+
+        Three sources, each already reduced to the lines a human reads first:
+          · the app's JS console (Metro log)  — this is where
+            "Invariant Violation: Module AppRegistry is not a registered callable
+            module" sat unread for hours on 2026-09-02 while every run reported only
+            "element not found";
+          · the device log for the app over the last minute;
+          · any crash report for it in the last 10 minutes.
+
+        Returns `[evidence]`-tagged note lines. Never raises and never blocks a run:
+        evidence that fails to collect must not become a second failure. Deliberately
+        bounded — a raw dump attached to a run is the same "app crashed" problem with
+        more scrolling.
+        """
+        import glob
+        from automation.evidence.js_console import read_js_console
+        from automation.evidence.device_log import capture as capture_device_log
+        from automation.evidence.crash_report import recent_for_app
+
+        out: List[str] = []
+        udid = getattr(self, "_cur_udid", "") or self.devices.get(role) or ""
+        # The process name the device log and crash files use is the bundle's last
+        # component (org.vyapy.sarls.vyabusinessipadstaging -> vyabusinessipadstaging),
+        # which matches "VyaBusinessiPad…" case-insensitively.
+        bundle = (self.consumer_bundle if role == "consumer" else self.business_bundle) or ""
+        proc = bundle.rsplit(".", 1)[-1] if bundle else "Vya"
+
+        try:
+            # METRO_LOG_PATH if set, else the most recently written bundler log —
+            # each app repo runs its own on its own port.
+            path = os.getenv("METRO_LOG_PATH") or ""
+            if not path:
+                logs = sorted(glob.glob("/tmp/metro*.log"), key=os.path.getmtime, reverse=True)
+                path = logs[0] if logs else ""
+            for line in read_js_console(path, max_lines=12):
+                out.append(f"    [evidence] js: {line[:220]}")
+        except Exception:
+            pass
+
+        try:
+            for line in capture_device_log(udid, proc, window="90s", max_lines=8):
+                out.append(f"    [evidence] device: {line[:220]}")
+        except Exception:
+            pass
+
+        try:
+            for c in recent_for_app(proc, within_seconds=600):
+                out.append(f"    [evidence] CRASH {c.get('app')} — {c.get('reason')} "
+                           f"({c.get('signal')})")
+                for fr in (c.get("frames") or [])[:4]:
+                    out.append(f"    [evidence]   at {fr[:200]}")
+        except Exception:
+            pass
+
+        if not out:
+            out.append("    [evidence] none found (no JS errors, device errors or crash "
+                       "reports in the failure window)")
+        return out
 
     def _capture_screenshot(self) -> Optional[str]:
         """Grab the current screen as a self-contained data-URI PNG, for failure evidence

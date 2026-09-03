@@ -1150,6 +1150,43 @@ class ScenarioRunner:
         except Exception:
             return False
 
+    def _scroll_into_view(self, phrase: str, max_swipes: int = 4):
+        """Swipe until *phrase* is on screen. Returns its point, or None.
+
+        Only called when idb already located the element off-screen, so this is
+        scrolling toward something known to exist rather than hunting blindly.
+        """
+        # A SAFE BAND, not merely "within the window". Scrolling to the exact edge
+        # put the NylaiKitchen2 card at y=29 — technically on screen, but under the
+        # header, so the tap hit the status bar and the app never navigated while the
+        # step still reported success.
+        def _comfortably_visible(point):
+            try:
+                size = self.d.get_window_size()
+            except Exception:
+                return False
+            return 110 <= point[1] <= size["height"] - 110
+
+        for _ in range(max_swipes):
+            pt = self._idb_element(phrase)
+            if not pt:
+                return None
+            if _comfortably_visible(pt):
+                return pt
+            try:
+                size = self.d.get_window_size()
+                direction = "down" if pt[1] > size["height"] else "up"
+                # 'mobile: scroll', NOT 'mobile: swipe'. A bare swipe is a raw drag on
+                # the whole window: on the consumer home it opened the side drawer
+                # (drawerClose/PROFILEmenu/menuLogout) and the step then burned its
+                # full 150s timeout. scroll targets the scrollable view instead.
+                self.d.execute_script("mobile: scroll", {"direction": direction})
+            except Exception:
+                return None
+            self._wait_settle()
+        pt = self._idb_element(phrase)
+        return pt if pt and _comfortably_visible(pt) else None
+
     def _idb_all(self) -> List[dict]:
         """Every element idb can see, as raw dicts. ~1.6-3.4s, versus ~17s for
         driver.page_source — and idb reports the GenericElement nodes Appium's
@@ -1345,6 +1382,14 @@ class ScenarioRunner:
 
         if not m and phrase and not inferred:
             pt = self._idb_element(phrase)
+            # Found but BELOW THE FOLD. Falling through to the Appium resolver here
+            # is a dead end: this app's tree is deep enough that Appium's snapshot
+            # drops the very GenericElement nodes idb can see, so the step failed with
+            # "No element matches" while the element was plainly in the idb tree —
+            # measured on 'NylaiKitchen2', a restaurant card at y=802 on an 852pt
+            # screen. Scroll it into view instead of giving up.
+            if pt and not self._idb_on_screen(pt):
+                pt = self._scroll_into_view(phrase)
             if pt and self._idb_on_screen(pt) and self._idb_tap_name(phrase):
                 self._wait_settle()
                 return StepResult(step=s, ok=True,

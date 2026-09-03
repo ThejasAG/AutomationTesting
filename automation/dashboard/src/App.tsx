@@ -1,8 +1,9 @@
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
 import type { ReactElement } from 'react';
-import { Boxes, LayoutDashboard, Settings, PlayCircle, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Zap, Workflow, Clapperboard } from 'lucide-react';
+import { Boxes, LayoutDashboard, Settings, PlayCircle, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Zap, Workflow, Clapperboard, Crosshair} from 'lucide-react';
 import DashboardHome from './pages/DashboardHome';
 import ScenariosPage from './pages/ScenariosPage';
+import InspectorPage from './pages/InspectorPage';
 import ReportsPage from './pages/ReportsPage';
 import ProjectsPage from './pages/ProjectsPage';
 import GraphPage from './pages/GraphPage';
@@ -94,6 +95,10 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => {
           <ListChecks size={20} />
           Scenarios
         </NavLink>
+        <NavLink to="/inspector" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <Crosshair size={20} />
+          Inspector
+        </NavLink>
         <NavLink to="/reports" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <FileText size={20} />
           Reports
@@ -128,6 +133,7 @@ function App() {
         
         {/* Protected Routes */}
         <Route path="/" element={<ProtectedRoute><ProtectedLayout><DashboardHome /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/inspector" element={<ProtectedRoute><ProtectedLayout><InspectorPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/projects" element={<ProtectedRoute><ProtectedLayout><ProjectsPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/graph" element={<ProtectedRoute><ProtectedLayout><GraphPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/workflow" element={<ProtectedRoute><ProtectedLayout><WorkflowPage /></ProtectedLayout></ProtectedRoute>} />

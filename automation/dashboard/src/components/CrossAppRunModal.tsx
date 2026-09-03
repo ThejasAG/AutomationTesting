@@ -31,7 +31,10 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
   const [editing, setEditing] = useState<{ flow: CrossAppFlow | null } | null>(null);
   const [flowBusy, setFlowBusy] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [env, setEnv] = useState<FlowEnv>('staging');
+  // Persisted under 'flowEnv' so it also governs single scenario runs (api.ts sends it
+  // as `env`, and the backend maps the bundle via bundle_for_env). One switch, both paths.
+  const [env, setEnv] = useState<FlowEnv>(
+    () => (localStorage.getItem('flowEnv') as FlowEnv) || 'staging');
   const [bizDevice, setBizDevice] = useState<BusinessDevice>('tablet');
 
   useEffect(() => {
@@ -124,7 +127,7 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
               {/* Environment selector: New Staging (STG-* apps) vs Old Vya (prod) */}
               <div style={{ display: 'inline-flex', border: '1px solid var(--border-color)', borderRadius: 20, overflow: 'hidden', marginLeft: 4 }}>
                 {(['staging', 'prod'] as FlowEnv[]).map(e => (
-                  <button key={e} onClick={() => setEnv(e)}
+                  <button key={e} onClick={() => { setEnv(e); localStorage.setItem('flowEnv', e); }}
                     style={{
                       padding: '4px 12px', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer', border: 'none',
                       background: env === e ? 'var(--accent-primary)' : 'transparent',

@@ -50,13 +50,21 @@ function ScenarioRow({ s }: { s: ScenarioResult }) {
         <td style={{ padding: '10px 12px', color: 'var(--danger)', fontSize: '0.8rem', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {s.error || '—'}
         </td>
+        {/* How far it got. A run that fails at step 7 of 8 is a different problem
+            from one that fails at step 1; both used to read just "FAIL". */}
+        <td style={{ padding: '10px 12px', fontFamily: 'monospace', fontSize: '0.8rem',
+                     color: s.steps_pass_pct == null ? 'var(--text-muted)'
+                          : s.steps_pass_pct === 100 ? 'var(--success)'
+                          : s.steps_pass_pct >= 50 ? '#fbbf24' : 'var(--danger)' }}>
+          {s.steps_total ? `${s.steps_passed}/${s.steps_total} · ${s.steps_pass_pct}%` : '—'}
+        </td>
         <td style={{ padding: '10px 12px', fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
           {s.launch_time != null ? `${s.launch_time.toFixed(1)}s` : '—'}
         </td>
       </tr>
       {open && canExpand && (
         <tr style={{ background: 'rgba(0,0,0,0.2)' }}>
-          <td colSpan={8} style={{ padding: '10px 40px 14px' }}>
+          <td colSpan={9} style={{ padding: '10px 40px 14px' }}>
             <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.7 }}>
               {(s.reasons && s.reasons.length ? s.reasons : [s.error || '']).filter(Boolean).map((r, i) => (
                 <li key={i}>{r}</li>
@@ -147,6 +155,7 @@ function ScenariosTab({ runId, active }: { runId: string; active: boolean }) {
               <th style={{ padding: '10px 12px' }}>Consumer</th>
               <th style={{ padding: '10px 12px' }}>Business</th>
               <th style={{ padding: '10px 12px' }}>Error</th>
+              <th style={{ padding: '10px 12px' }}>Steps</th>
               <th style={{ padding: '10px 12px' }}>Launch</th>
             </tr>
           </thead>

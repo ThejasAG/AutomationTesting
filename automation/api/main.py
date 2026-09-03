@@ -188,6 +188,10 @@ v1_router.include_router(runs_router)
 v1_router.include_router(ops_router)
 v1_router.include_router(builds_router, dependencies=[Depends(get_current_user)])
 
+# Live UI inspector. Auth is per-route (get_current_user on the endpoint).
+from automation.api.v1.routers.inspector import router as inspector_router
+v1_router.include_router(inspector_router)
+
 # Mount external routers
 app.include_router(appium_router)
 
