@@ -8,8 +8,15 @@ __pycache__/
 # Node
 node_modules/
 
-# Reports
-reports/
+# Reports — GENERATED report output only.
+# `reports/` matches at ANY depth, so it also swallowed automation/reports/, which is
+# SOURCE (generator.py, step_stats.py). Those were only ever committed via `git add -f`,
+# and a new file there is dropped silently — step_stats.py nearly shipped missing,
+# which would have crashed a fresh install on import. Anchor the rule and re-include
+# the package explicitly.
+/reports/
+!automation/reports/
+!automation/reports/*.py
 
 # Database
 *.db
