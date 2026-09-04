@@ -24,7 +24,8 @@ import sys
 import yaml
 
 from automation.projects.repository import repository_manager as rm
-from automation.api.v1.routers.scenario import _scenario_events, ScenarioRequest
+from automation.scenarios import run_records  # noqa: F401 — backend run bookkeeping
+from automation.scenarios.service import scenario_events, ScenarioRequest
 
 SCENARIO_FILE = os.path.join(os.path.dirname(__file__), "vyapy_full_cross_app.yaml")
 CONSUMER_PROJECT_ID = "bd34a47c-c099-4d36-ac61-810edfff31ca"
@@ -85,7 +86,7 @@ def main():
 
     print("--- Running Consumer steps live ---")
     passed = total = 0
-    for ev in _scenario_events(req, consumer["bundle_id"], consumer_steps, repo_path):
+    for ev in scenario_events(req, consumer["bundle_id"], consumer_steps, repo_path):
         d = json.loads(ev.strip()[6:])
         t = d.get("type")
         if t == "step":

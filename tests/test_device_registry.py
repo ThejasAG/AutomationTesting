@@ -597,7 +597,8 @@ def test_backend_local_run_paths_do_not_get_a_machine_id():
     import inspect
     from automation.api.v1.routers import scenario
     from automation.scenarios import cross_app_orchestrator
-    for mod in (scenario, cross_app_orchestrator):
+    from automation.scenarios import service as scenario_service
+    for mod in (scenario, scenario_service, cross_app_orchestrator):
         src = inspect.getsource(mod)
         assert "machine_for_local_device" not in src, f"{mod.__name__} must stay NULL"
 

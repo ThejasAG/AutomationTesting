@@ -324,7 +324,12 @@ def test_integration_is_limited_to_the_agent_execution_path():
     from automation.agent import main as agent_main
     from automation.api.v1.routers import jobs, scenario, inspector, recorder
 
-    assert "reserve_device" in inspect.getsource(agent_main), "the agent reserves"
+    # Phase 4F.2A moved the CALLER behind HTTP: the agent asks the backend, and the
+    # agents router performs the reservation. (Before 4F.2A the agent called it.)
+    from automation.api.v1.routers import agents as agents_router
+    assert "reserve_my_device" in inspect.getsource(agent_main), "the agent asks over HTTP"
+    assert "reserve_device" not in inspect.getsource(agent_main), "…and not the DB directly"
+    assert "reserve_device" in inspect.getsource(agents_router), "the backend performs it"
     for mod in (jobs, scenario, inspector, recorder):
         assert "reserve_device" not in inspect.getsource(mod), \
             f"{mod.__name__} reservation belongs to a later phase"

@@ -85,24 +85,20 @@ def _persist_test_rows(run_id: str, summary: Dict[str, Any]) -> None:
     """Write one scenario_results row per test so the run shows its steps."""
     if not summary.get("cases"):
         return
-    from automation.database.config import SessionLocal
-    from automation.database.models import ScenarioResult
+    # The backend owns this write — see agent.main.report_scenario_results(). The
+    # key, the fields and the batching are unchanged; only the caller moved.
+    from automation.agent.main import report_scenario_results
 
-    with SessionLocal() as db:
-        for i, c in enumerate(summary["cases"], 1):
-            row = (db.query(ScenarioResult)
-                   .filter_by(run_id=run_id, scenario_num=str(i)).first())
-            if row is None:
-                row = ScenarioResult(run_id=run_id, scenario_num=str(i))
-                db.add(row)
-            row.scenario_name = c["name"][:500]
-            row.status = c["status"]
-            row.consumer_status = "N/A"
-            row.business_status = "N/A"
-            row.error = c["message"] or None
-            row.reasons = [c["message"]] if c["message"] else []
-            row.launch_time = round(c["time"], 1)
-        db.commit()
+    report_scenario_results(run_id, [{
+        "scenario_num": str(i),
+        "scenario_name": c["name"][:500],
+        "status": c["status"],
+        "consumer_status": "N/A",
+        "business_status": "N/A",
+        "error": c["message"] or None,
+        "reasons": [c["message"]] if c["message"] else [],
+        "launch_time": round(c["time"], 1),
+    } for i, c in enumerate(summary["cases"], 1)])
 
 
 class AppiumFramework(TestFramework):

@@ -23,7 +23,7 @@ os.chdir(ROOT)
 
 from appium import webdriver  # noqa: E402
 
-from automation.api.v1.routers.scenario import _apply_speed_settings, _appium_options  # noqa: E402
+from automation.scenarios.service import _apply_speed_settings, _appium_options  # noqa: E402
 from automation.database.config import DATABASE_URL  # noqa: E402
 from automation.intelligence.scenario_runner import ScenarioResult, ScenarioRunner  # noqa: E402
 

@@ -5,6 +5,7 @@ from passlib.context import CryptContext
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+import hashlib
 import os
 import secrets
 
@@ -154,3 +155,88 @@ def require_agent(request: Request = None, x_agent_token: str = Header(default="
     if not secrets.compare_digest(x_agent_token, AGENT_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid agent token")
     return "agent"
+
+
+# ── Per-agent identity (Phase 4F.1) ─────────────────────────────────────────
+# AGENT_TOKEN is a BOOTSTRAP credential: it proves a caller is allowed to
+# register a machine at all. It cannot answer "which machine is this?", because
+# every agent holds the same value — which is why req.agent_id was never
+# authoritative. Registration therefore issues a per-agent credential, and the
+# backend derives identity from that instead of from the request body.
+
+AGENT_CREDENTIAL_HEADER = "X-Agent-Credential"   # not X-Agent-Secret: that name is
+                                                 # already the screen-frame shared secret
+
+
+def hash_agent_credential(secret: str) -> str:
+    """SHA-256 of a credential. Only the hash is ever stored."""
+    return hashlib.sha256((secret or "").encode("utf-8")).hexdigest()
+
+
+def issue_agent_credential() -> tuple:
+    """A fresh (secret, hash) pair. The secret is returned to the agent once."""
+    secret = secrets.token_urlsafe(32)
+    return secret, hash_agent_credential(secret)
+
+
+def authenticated_agent(
+    request: Request = None,
+    x_agent_credential: str = Header(default=""),
+    db: Session = Depends(get_db),
+):
+    """The ExecutionAgent this request actually belongs to, or None.
+
+    Returns None when no credential is presented, so callers can keep their
+    existing behaviour for a local agent that has not re-registered yet. It never
+    returns an agent the caller did not prove it is: identity comes from the
+    credential hash, never from a body field, a path parameter or a hostname.
+    """
+    from automation.database.models import ExecutionAgent
+
+    presented = (x_agent_credential or "").strip()
+    if not presented:
+        return None
+    try:
+        return (db.query(ExecutionAgent)
+                .filter(ExecutionAgent.agent_credential_hash
+                        == hash_agent_credential(presented))
+                .first())
+    except Exception:
+        return None
+
+
+def require_authenticated_agent(agent=Depends(authenticated_agent)):
+    """Like authenticated_agent, but refuses the request when identity is unproven.
+
+    This is what a future /agents/me/... endpoint depends on: `me` must mean the
+    machine that presented a credential, never the machine a request claims to be.
+    """
+    if agent is None:
+        raise HTTPException(
+            status_code=401,
+            detail=(f"An agent credential is required. Present it as "
+                    f"{AGENT_CREDENTIAL_HEADER}; agents receive one from "
+                    f"/agents/register."),
+        )
+    return agent
+
+
+def assert_agent_identity(authenticated, claimed_agent_id: Optional[str]) -> None:
+    """Refuse a request whose claimed identity is not the authenticated one.
+
+    Applied where an agent id still arrives in a body or a path. When no
+    credential was presented the claim is left alone — that is the unchanged
+    local-development path — but a credentialed agent can never act as another.
+    """
+    # `authenticated` is a resolved ExecutionAgent under FastAPI, but a Depends
+    # sentinel when an endpoint function is called directly (tests, internal
+    # callers). Anything without a real string id means "identity not proven",
+    # which is the documented uncredentialed path — not a reason to refuse.
+    authenticated_id = getattr(authenticated, "id", None)
+    if not isinstance(authenticated_id, str) or not claimed_agent_id:
+        return
+    if claimed_agent_id != authenticated_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent identity mismatch: this credential belongs to a different agent.",
+        )

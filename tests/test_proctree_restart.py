@@ -44,6 +44,14 @@ def _crash_spawn(env_extra: dict, job_id: str, kind: str) -> int:
         f"""
         import os, subprocess, sys
         from automation.utils import proctree
+        # 4F.7A: the reaper asks the backend for active jobs. In this harness the
+        # scratch job-state DB stands in for that endpoint, so the classification
+        # path below is exercised exactly as it was when proctree queried directly.
+        from automation.database.config import SessionLocal as _SL
+        from automation.database.models import TestRun as _TR
+        proctree.set_active_jobs_source(lambda: set(
+            str(r[0]) for r in _SL().query(_TR.id).filter(
+                _TR.job_state.in_(tuple(proctree.ACTIVE_JOB_STATES))).all()))
         p = proctree.spawn_tracked(
             [sys.executable, "-c", "import time; time.sleep(120)"],
             job_id={job_id!r}, kind={kind!r},
@@ -64,6 +72,14 @@ def _crash_spawn(env_extra: dict, job_id: str, kind: str) -> int:
 SWEEP_SRC = """
 import json, os, sys
 from automation.utils import proctree
+# 4F.7A: the reaper asks the backend for active jobs. In this harness the
+# scratch job-state DB stands in for that endpoint, so the classification
+# path below is exercised exactly as it was when proctree queried directly.
+from automation.database.config import SessionLocal as _SL
+from automation.database.models import TestRun as _TR
+proctree.set_active_jobs_source(lambda: set(
+    str(r[0]) for r in _SL().query(_TR.id).filter(
+        _TR.job_state.in_(tuple(proctree.ACTIVE_JOB_STATES))).all()))
 
 # Any real signal from the sweep aborts this process and fails the test.
 signals = []
@@ -293,6 +309,14 @@ def test_startup_sweep_is_non_blocking_after_restart(crashed):
         """
         from automation.agent import main as agent_main
         from automation.utils import proctree
+        # 4F.7A: the reaper asks the backend for active jobs. In this harness the
+        # scratch job-state DB stands in for that endpoint, so the classification
+        # path below is exercised exactly as it was when proctree queried directly.
+        from automation.database.config import SessionLocal as _SL
+        from automation.database.models import TestRun as _TR
+        proctree.set_active_jobs_source(lambda: set(
+            str(r[0]) for r in _SL().query(_TR.id).filter(
+                _TR.job_state.in_(tuple(proctree.ACTIVE_JOB_STATES))).all()))
         def boom(**kw):
             raise RuntimeError("registry on fire")
         proctree.sweep_orphans = boom
@@ -468,6 +492,14 @@ def test_identity_change_between_classification_and_signal_blocks_the_reap(stage
         f"""
         import json, os
         from automation.utils import proctree
+        # 4F.7A: the reaper asks the backend for active jobs. In this harness the
+        # scratch job-state DB stands in for that endpoint, so the classification
+        # path below is exercised exactly as it was when proctree queried directly.
+        from automation.database.config import SessionLocal as _SL
+        from automation.database.models import TestRun as _TR
+        proctree.set_active_jobs_source(lambda: set(
+            str(r[0]) for r in _SL().query(_TR.id).filter(
+                _TR.job_state.in_(tuple(proctree.ACTIVE_JOB_STATES))).all()))
 
         real_identity = proctree._proc_identity
         seen = {{}}
@@ -507,6 +539,14 @@ def test_failed_cleanup_keeps_the_registry_entry(staged):
         """
         import json
         from automation.utils import proctree
+        # 4F.7A: the reaper asks the backend for active jobs. In this harness the
+        # scratch job-state DB stands in for that endpoint, so the classification
+        # path below is exercised exactly as it was when proctree queried directly.
+        from automation.database.config import SessionLocal as _SL
+        from automation.database.models import TestRun as _TR
+        proctree.set_active_jobs_source(lambda: set(
+            str(r[0]) for r in _SL().query(_TR.id).filter(
+                _TR.job_state.in_(tuple(proctree.ACTIVE_JOB_STATES))).all()))
         # Pretend the group refuses to die: reap_pid reports failure.
         proctree.reap_pid = lambda pid, timeout=10.0: False
         rep = proctree.sweep_orphans()
@@ -543,6 +583,14 @@ def test_backend_unavailable_never_reaps_even_when_armed(staged):
         """
         import json, os
         from automation.utils import proctree
+        # 4F.7A: the reaper asks the backend for active jobs. In this harness the
+        # scratch job-state DB stands in for that endpoint, so the classification
+        # path below is exercised exactly as it was when proctree queried directly.
+        from automation.database.config import SessionLocal as _SL
+        from automation.database.models import TestRun as _TR
+        proctree.set_active_jobs_source(lambda: set(
+            str(r[0]) for r in _SL().query(_TR.id).filter(
+                _TR.job_state.in_(tuple(proctree.ACTIVE_JOB_STATES))).all()))
         def unavailable():
             raise proctree.SweepUnavailable("connection refused")
         proctree.active_job_ids = unavailable
@@ -608,6 +656,14 @@ time.sleep(120)"""
         f"""
         import os, subprocess, sys
         from automation.utils import proctree
+        # 4F.7A: the reaper asks the backend for active jobs. In this harness the
+        # scratch job-state DB stands in for that endpoint, so the classification
+        # path below is exercised exactly as it was when proctree queried directly.
+        from automation.database.config import SessionLocal as _SL
+        from automation.database.models import TestRun as _TR
+        proctree.set_active_jobs_source(lambda: set(
+            str(r[0]) for r in _SL().query(_TR.id).filter(
+                _TR.job_state.in_(tuple(proctree.ACTIVE_JOB_STATES))).all()))
         p = proctree.spawn_tracked([sys.executable, "-c", {stubborn!r}],
             job_id={CRASHED_JOB!r}, kind="appium",
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

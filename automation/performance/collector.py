@@ -22,6 +22,14 @@ SAMPLE_INTERVAL_S = 2.0
 API_THRESHOLD_MS = 500.0
 FPS_TARGET = 55.0
 
+# Transport bounds. Samples accumulate for the whole run at SAMPLE_INTERVAL_S, so
+# a 3-hour job produces ~5400 of them; the summary's issue list grows with API
+# endpoint cardinality. Both cross the wire now, so both are capped here rather
+# than discovered as a 413 or a truncated column on the backend.
+MAX_SAMPLES = 2000        # ~66 minutes at 2s before thinning starts
+MAX_ISSUES = 50
+MAX_ENDPOINT_CHARS = 500  # PerformanceSummary.slowest_api_endpoint is String(500)
+
 
 def _run(cmd: List[str], timeout: int = 15) -> str:
     try:
@@ -31,6 +39,33 @@ def _run(cmd: List[str], timeout: int = 15) -> str:
     except Exception as e:
         logger.debug("perf cmd failed %s: %s", " ".join(cmd), e)
         return ""
+
+
+def _cap_endpoint(url: Optional[str]) -> Optional[str]:
+    """Bound a URL to the width of the column it lands in."""
+    if url is None:
+        return None
+    return url[:MAX_ENDPOINT_CHARS]
+
+
+def _downsample(samples: List[Dict[str, Any]], limit: int):
+    """Thin a sample series to `limit` points, keeping the run's full time span.
+
+    Returns (samples, downsampled_from) where downsampled_from is None when
+    nothing was dropped.
+
+    Evenly spaced by index rather than truncated: truncation would end the series
+    early, and the end of a long run is exactly where a memory climb or a CPU
+    spike shows up. The first and last samples are always kept so the chart still
+    covers the whole run, and the step is derived from the original length so the
+    result is deterministic for a given input.
+    """
+    total = len(samples)
+    if total <= limit:
+        return list(samples), None
+    # limit-1 evenly spaced picks across the series, plus the final sample.
+    idx = sorted({(i * (total - 1)) // (limit - 1) for i in range(limit - 1)} | {total - 1})
+    return [samples[i] for i in idx], total
 
 
 class PerformanceCollector:
@@ -236,7 +271,7 @@ class PerformanceCollector:
             "api_calls": api.get("total_calls", 0),
             "avg_api_response_ms": round(avg_api, 1) if avg_api else None,
             "slowest_api_ms": slowest.get("ms"),
-            "slowest_api_endpoint": slowest.get("url"),
+            "slowest_api_endpoint": _cap_endpoint(slowest.get("url")),
         }
         summary["issues"] = self._detect_issues(summary, api)
         score = self.calculate_performance_score(summary)
@@ -257,6 +292,11 @@ class PerformanceCollector:
                 issues.append(f"API {ep} took {d['max_ms']:.0f}ms (threshold: {int(API_THRESHOLD_MS)}ms)")
         for f in (api.get("failed") or []):
             issues.append(f"API {f.get('url')} failed with {f.get('status')}")
+        if len(issues) > MAX_ISSUES:
+            # Say how many were dropped. A silently shortened list reads as a
+            # healthier run than it was.
+            omitted = len(issues) - (MAX_ISSUES - 1)
+            issues = issues[:MAX_ISSUES - 1] + [f"+{omitted} more issues"]
         return issues
 
     def calculate_performance_score(self, metrics: dict) -> int:
@@ -284,48 +324,22 @@ class PerformanceCollector:
     def _grade(score: int) -> str:
         return "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
 
-    # ── persistence ──────────────────────────────────────────────────────────
-    def save_to_db(self) -> dict:
-        """Persist per-sample metrics + the summary. Safe to call once at stop."""
-        summary = self.get_summary()
-        try:
-            from automation.database.config import SessionLocal
-            from automation.database.models import PerformanceMetric, PerformanceSummary
-            import uuid as _uuid
-            with SessionLocal() as db:
-                for m in self.metrics:
-                    db.add(PerformanceMetric(
-                        id=str(_uuid.uuid4()), run_id=self.run_id,
-                        timestamp=self._parse_ts(m.get("timestamp")),
-                        cpu_percent=m.get("cpu_percent"), memory_mb=m.get("memory_mb"),
-                        fps=m.get("fps"), network_requests=m.get("network_requests") or 0,
-                        avg_response_ms=m.get("avg_response_ms"),
-                    ))
-                existing = db.query(PerformanceSummary).filter(
-                    PerformanceSummary.run_id == self.run_id).first()
-                if existing:
-                    db.delete(existing)
-                    db.flush()
-                db.add(PerformanceSummary(
-                    id=str(_uuid.uuid4()), run_id=self.run_id,
-                    app_launch_time_s=summary["app_launch_time_s"],
-                    avg_cpu_percent=summary["avg_cpu_percent"],
-                    peak_cpu_percent=summary["peak_cpu_percent"],
-                    avg_memory_mb=summary["avg_memory_mb"],
-                    peak_memory_mb=summary["peak_memory_mb"],
-                    avg_fps=summary["avg_fps"], min_fps=summary["min_fps"],
-                    dropped_frames=summary["dropped_frames"],
-                    api_calls=summary["api_calls"],
-                    avg_api_response_ms=summary["avg_api_response_ms"],
-                    slowest_api_ms=summary["slowest_api_ms"],
-                    slowest_api_endpoint=summary["slowest_api_endpoint"],
-                    performance_score=summary["performance_score"],
-                    grade=summary["grade"], issues=summary["issues"],
-                ))
-                db.commit()
-        except Exception as e:
-            logger.warning("perf save_to_db failed for %s: %s", self.run_id, e)
-        return summary
+    # ── transport ────────────────────────────────────────────────────────────
+    def payload(self) -> dict:
+        """Everything the backend needs to persist this run, and nothing else.
+
+        Pure: no session, no HTTP, no filesystem. The agent posts the result to
+        /runs/{run_id}/performance, which owns the write (Phase 4F.6). The score
+        and grade travel as values because reproducing calculate_performance_score()
+        on the backend would duplicate the collector's own scoring rules.
+        """
+        samples, original = _downsample(self.metrics, MAX_SAMPLES)
+        return {
+            "summary": self.get_summary(),
+            "samples": samples,
+            "sample_interval_s": SAMPLE_INTERVAL_S,
+            "downsampled_from": original,
+        }
 
     @staticmethod
     def _parse_ts(ts):

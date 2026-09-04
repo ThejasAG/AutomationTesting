@@ -382,6 +382,23 @@ class SweepUnavailable(Exception):
     """Active-job state could not be established. Nothing may be classified reapable."""
 
 
+# How this process learns which jobs are still in flight. The AGENT registers a
+# client that asks the backend over its authenticated session (Phase 4F.7A);
+# injected rather than imported so this module reaches neither the database nor
+# an HTTP stack, and so it cannot acquire a second way of authenticating.
+#
+# Nothing registered means we cannot ask, which is "unknown" — never "nothing is
+# running". Running this module's CLI directly therefore classifies nothing as
+# reapable, which is the safe direction.
+_active_jobs_source = None
+
+
+def set_active_jobs_source(source) -> None:
+    """Register a callable returning the ids of jobs the backend still has in flight."""
+    global _active_jobs_source
+    _active_jobs_source = source
+
+
 def active_job_ids() -> set:
     """Job ids the backend considers still in flight.
 
@@ -392,25 +409,18 @@ def active_job_ids() -> set:
     Raises SweepUnavailable if the backend cannot be reached. That is the whole
     point: an unreachable backend means "unknown", never "nothing is running".
     """
+    if _active_jobs_source is None:
+        raise SweepUnavailable("no active-job source registered")
     try:
-        from automation.database.config import SessionLocal
-        from automation.database.models import TestRun
-    except Exception as e:
-        raise SweepUnavailable(f"backend model layer unavailable: {e}") from e
-
-    db = None
-    try:
-        db = SessionLocal()
-        rows = db.query(TestRun.id).filter(TestRun.job_state.in_(tuple(ACTIVE_JOB_STATES))).all()
-        return {str(r[0]) for r in rows}
+        ids = _active_jobs_source()
+    except SweepUnavailable:
+        raise
     except Exception as e:
         raise SweepUnavailable(f"backend job state unreadable: {e}") from e
-    finally:
-        if db is not None:
-            try:
-                db.close()
-            except Exception:
-                pass
+    if isinstance(ids, (str, bytes)) or not isinstance(ids, (set, frozenset, list, tuple)):
+        raise SweepUnavailable(
+            f"backend job state malformed: expected a collection, got {type(ids).__name__}")
+    return {str(i) for i in ids}
 
 
 def _classify(entry: dict, active: set, now: float) -> tuple:

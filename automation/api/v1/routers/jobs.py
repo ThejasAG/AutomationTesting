@@ -12,7 +12,9 @@ import httpx
 from automation.ai.services.execution import AISelfHealingEngine
 from automation.reporting.engine import reporting_engine
 from automation.database.database import create_ai_recommendation, utc_iso
-from automation.auth.security import require_agent
+from automation.auth.security import (require_agent, authenticated_agent,
+                                      assert_agent_identity,
+                                      require_authenticated_agent)
 from automation.database.config import get_db
 from automation.reports.step_stats import step_stats
 from automation.database.models import TestRun, TestProject, ScenarioResult
@@ -56,6 +58,113 @@ def _both_pass_status(consumer: str, business: str, incoming: str) -> str:
     if consumer == "FAIL" or business == "FAIL":
         return "FAIL"
     return incoming
+
+
+def upsert_scenario_result(db: Session, run_id: str, body: "ScenarioResultIn",
+                           *, merge_roles: bool = True) -> ScenarioResult:
+    """Record ONE scenario result — the single implementation behind every writer.
+
+    Keyed on (run_id, scenario_num) and idempotent: resubmitting updates that row
+    rather than adding another. Extracted so the Android bot and the iOS agent
+    cannot drift into two behaviours over one table.
+
+    *merge_roles* is the cross-app behaviour the Vya bot needs: it posts one role
+    per call and the halves merge into a single Scenarios-tab row, failing if
+    either side did. The iOS agent reports a whole scenario at once and passes
+    merge_roles=False, which is precisely what its direct writes did.
+    """
+    row = (
+        db.query(ScenarioResult)
+        .filter_by(run_id=run_id, scenario_num=str(body.scenario_num))
+        .first()
+    )
+    if row is None:
+        row = ScenarioResult(
+            run_id=run_id, scenario_num=str(body.scenario_num),
+            consumer_status="N/A", business_status="N/A", reasons=[],
+        )
+        db.add(row)
+    row.scenario_name = body.scenario_name or row.scenario_name
+
+    if not merge_roles:
+        # Whole-scenario report: the caller already knows the verdict.
+        row.consumer_status = body.consumer_status
+        row.business_status = body.business_status
+        row.reasons = list(body.reasons or [])
+        row.error = body.error or None
+        row.status = body.status
+        if body.launch_time is not None:
+            row.launch_time = body.launch_time
+        db.flush()
+        return row
+
+    role = (body.role or "").strip().lower()
+    if role == "consumer":
+        row.consumer_status = body.status
+    elif role == "business":
+        row.business_status = body.status
+    else:
+        # Android-bridge form: both sides supplied directly.
+        if body.consumer_status != "N/A":
+            row.consumer_status = body.consumer_status
+        if body.business_status != "N/A":
+            row.business_status = body.business_status
+
+    # Merge reasons/errors from each side (role-tagged when we know the role).
+    merged = list(row.reasons or [])
+    for r in (body.reasons or ([body.error] if body.error else [])):
+        tagged = f"[{body.role}] {r}" if body.role else r
+        if r and tagged not in merged:
+            merged.append(tagged)
+    row.reasons = merged
+    fails = [m for m in merged if "FAIL" in m or "fail" in m]
+    row.error = "; ".join(fails) or (body.error if body.status == "FAIL" else row.error)
+    if body.launch_time is not None:
+        row.launch_time = body.launch_time
+
+    row.status = _both_pass_status(row.consumer_status, row.business_status, body.status)
+    db.flush()
+    return row
+
+
+class ScenarioResultsBatchIn(BaseModel):
+    results: List[ScenarioResultIn] = []
+
+
+class PerformanceSampleIn(BaseModel):
+    """One sampling tick. Mirrors PerformanceMetric's columns, nothing more."""
+    timestamp: Optional[str] = None
+    cpu_percent: Optional[float] = None
+    memory_mb: Optional[float] = None
+    fps: Optional[float] = None
+    network_requests: Optional[int] = 0
+    avg_response_ms: Optional[float] = None
+
+
+class PerformanceSummaryIn(BaseModel):
+    """The run's scored summary. Mirrors PerformanceSummary's columns."""
+    app_launch_time_s: Optional[float] = None
+    avg_cpu_percent: Optional[float] = None
+    peak_cpu_percent: Optional[float] = None
+    avg_memory_mb: Optional[float] = None
+    peak_memory_mb: Optional[float] = None
+    avg_fps: Optional[float] = None
+    min_fps: Optional[float] = None
+    dropped_frames: Optional[int] = 0
+    api_calls: Optional[int] = 0
+    avg_api_response_ms: Optional[float] = None
+    slowest_api_ms: Optional[float] = None
+    slowest_api_endpoint: Optional[str] = None
+    performance_score: Optional[int] = None
+    grade: Optional[str] = None
+    issues: Optional[List[str]] = None
+
+
+class PerformanceReportIn(BaseModel):
+    summary: PerformanceSummaryIn
+    samples: List[PerformanceSampleIn] = []
+    sample_interval_s: Optional[float] = None
+    downsampled_from: Optional[int] = None
 
 
 def _recompute_run_status(db: Session, run: TestRun) -> str:
@@ -136,47 +245,8 @@ def post_scenario_result(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    # Upsert ONE row per (run_id, scenario_num) so the Consumer post and the
-    # Business post for the same scenario merge into a single Scenarios-tab row.
-    row = (
-        db.query(ScenarioResult)
-        .filter_by(run_id=run_id, scenario_num=str(body.scenario_num))
-        .first()
-    )
-    if row is None:
-        row = ScenarioResult(
-            run_id=run_id, scenario_num=str(body.scenario_num),
-            consumer_status="N/A", business_status="N/A", reasons=[],
-        )
-        db.add(row)
-    row.scenario_name = body.scenario_name or row.scenario_name
-
-    role = (body.role or "").strip().lower()
-    if role == "consumer":
-        row.consumer_status = body.status
-    elif role == "business":
-        row.business_status = body.status
-    else:
-        # Android-bridge form: both sides supplied directly.
-        if body.consumer_status != "N/A":
-            row.consumer_status = body.consumer_status
-        if body.business_status != "N/A":
-            row.business_status = body.business_status
-
-    # Merge reasons/errors from each side (role-tagged when we know the role).
-    merged = list(row.reasons or [])
-    for r in (body.reasons or ([body.error] if body.error else [])):
-        tagged = f"[{body.role}] {r}" if body.role else r
-        if r and tagged not in merged:
-            merged.append(tagged)
-    row.reasons = merged
-    fails = [m for m in merged if "FAIL" in m or "fail" in m]
-    row.error = "; ".join(fails) or (body.error if body.status == "FAIL" else row.error)
-    if body.launch_time is not None:
-        row.launch_time = body.launch_time
-
-    row.status = _both_pass_status(row.consumer_status, row.business_status, body.status)
-    db.flush()
+    # One implementation for every writer — see upsert_scenario_result().
+    row = upsert_scenario_result(db, run_id, body, merge_roles=True)
 
     overall = _recompute_run_status(db, run)
     db.commit()
@@ -602,6 +672,73 @@ def create_vya_bot_run(
     }
 
 
+@runs_router.post("/{run_id}/performance")
+def post_run_performance(
+    run_id: str,
+    body: PerformanceReportIn,
+    db: Session = Depends(get_db),
+    agent=Depends(require_authenticated_agent),
+):
+    """Record a run's performance samples and summary — the agent's canonical write.
+
+    The collector runs on the machine holding the simulator and used to write
+    these two tables itself. It no longer holds a session: it posts what it
+    measured and the backend owns the write (Phase 4F.6).
+
+    Ownership is server-side: the run must belong to the AUTHENTICATED agent, so
+    a credential for one machine cannot write performance into another machine's
+    run. No client-supplied agent id is consulted.
+
+    Both tables are REPLACED for this run, in one transaction. performance_metrics
+    has no uniqueness constraint, so a retried report would otherwise append a
+    second copy of the whole time series and silently double the chart.
+
+    The score and grade are stored as sent. Recomputing them here would duplicate
+    the collector's scoring rules in a second place, and the collector is the only
+    thing that saw the raw samples.
+    """
+    from automation.database.models import PerformanceMetric, PerformanceSummary
+    import uuid as _uuid
+
+    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"No such run: {run_id}")
+    if run.agent_id and run.agent_id != agent.id:
+        raise HTTPException(status_code=403,
+                            detail="That run is claimed by a different agent.")
+
+    def _ts(raw):
+        try:
+            return datetime.fromisoformat(raw) if raw else datetime.utcnow()
+        except (TypeError, ValueError):
+            return datetime.utcnow()
+
+    db.query(PerformanceMetric).filter(PerformanceMetric.run_id == run_id).delete(
+        synchronize_session=False)
+    written = 0
+    for sample in body.samples:
+        db.add(PerformanceMetric(
+            id=str(_uuid.uuid4()), run_id=run_id,
+            timestamp=_ts(sample.timestamp),
+            cpu_percent=sample.cpu_percent, memory_mb=sample.memory_mb,
+            fps=sample.fps, network_requests=sample.network_requests or 0,
+            avg_response_ms=sample.avg_response_ms,
+        ))
+        written += 1
+
+    existing = (db.query(PerformanceSummary)
+                .filter(PerformanceSummary.run_id == run_id).first())
+    if existing:
+        db.delete(existing)
+        db.flush()
+    fields = body.summary.model_dump()
+    db.add(PerformanceSummary(id=str(_uuid.uuid4()), run_id=run_id, **fields))
+    db.commit()
+
+    # The counts are the confirmation: a 2xx alone never proves the rows landed.
+    return {"run_id": run_id, "samples_written": written, "summary_written": True}
+
+
 @runs_router.get("/{run_id}/performance")
 def get_run_performance(
     run_id: str,
@@ -707,6 +844,7 @@ class JobStatusRequest(BaseModel):
     error_message: Optional[str] = None
     attempts: Optional[int] = None
     flaky_detected: Optional[bool] = None
+    crash_detected: Optional[bool] = None
 
 class EvidenceUploadRequest(BaseModel):
     evidence: Dict[str, Any]
@@ -717,7 +855,8 @@ class StreamRequest(BaseModel):
 
 @router.post("/poll")
 def poll_job(req: PollJobRequest, db: Session = Depends(get_db),
-              _agent=Depends(require_agent)):
+              _agent=Depends(require_agent),
+              authenticated=Depends(authenticated_agent)):
     """Agent asks for the next queued job it can run.
 
     A job is only ever handed out once: it must be strictly ``job_state ==
@@ -736,6 +875,10 @@ def poll_job(req: PollJobRequest, db: Session = Depends(get_db),
     did: the machine predicate widens what is visible, it never narrows the legacy
     path.
     """
+    # A credentialed agent may only poll as itself: claiming another machine's id
+    # would let it take that machine's jobs. Uncredentialed callers are unchanged,
+    # which keeps the existing local workflow working.
+    assert_agent_identity(authenticated, (req.agent_id or "").strip() or None)
     machine_id = (req.agent_id or "").strip() or None
 
     # Strictly queued jobs only, FIFO by created_at, and only jobs this MACHINE is
@@ -799,6 +942,12 @@ def poll_job(req: PollJobRequest, db: Session = Depends(get_db),
                 # platform it cannot know whether to run xcodebuild or gradlew.
                 "platform": (project.platform if project else None) or "ios",
                 "project_name": project.name if project else job.test_suite,
+                # The ONLY TestProject field the scenario runner reads. Sent so the
+                # agent can run planned scenarios without opening a session just to
+                # look it up; `project` is already loaded above, so this costs no
+                # extra query. None for a project that has none — exactly the case
+                # that already failed with "No app bundle id".
+                "app_bundle_id": (project.app_bundle_id if project else None),
                 # The scenarios the planner chose for THIS change. Empty/absent means the
                 # agent falls back to the project's execution.command.
                 "planned_scenarios": job.planned_scenarios or [],
@@ -842,6 +991,11 @@ def update_job_status(job_id: str, req: JobStatusRequest, db: Session = Depends(
         job.flaky_detected = req.flaky_detected
         if req.flaky_detected:
             job.is_flaky = True
+
+    # The agent runs the app, so only the agent can see it crash. The scenario
+    # path used to write this straight to the DB from the agent process.
+    if req.crash_detected is not None:
+        job.crash_detected = req.crash_detected
 
     if req.timeline_event:
         timeline = []
@@ -950,3 +1104,40 @@ def upload_evidence(job_id: str, req: EvidenceUploadRequest, db: Session = Depen
     report_path = reporting_engine.generate_html_report(job_id, {"status": job.status, "duration_ms": job.duration_ms, "logs": []})
         
     return {"status": "ok", "report_path": report_path}
+
+
+@runs_router.post("/{run_id}/scenario-results")
+def post_scenario_results_batch(
+    run_id: str,
+    body: ScenarioResultsBatchIn,
+    db: Session = Depends(get_db),
+    agent=Depends(require_authenticated_agent),
+):
+    """Record a run's scenario results — the iOS agent's canonical write.
+
+    Batch, because both agent-side writers already looped and committed once; a
+    per-result endpoint would multiply HTTP calls for nothing. One request, one
+    transaction, same upsert as the Android bot uses.
+
+    Ownership is server-side: the run must belong to the AUTHENTICATED agent, so
+    a credential for one machine cannot write results into another machine's run.
+    No client-supplied agent id is consulted.
+
+    Deliberately does NOT recompute the run's status. The iOS writers never did,
+    and doing it here would mark a run passed or failed while it is still going.
+    The agent reports its own verdict through the existing status endpoint.
+    """
+    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"No such run: {run_id}")
+    if run.agent_id and run.agent_id != agent.id:
+        raise HTTPException(status_code=403,
+                            detail="That run is claimed by a different agent.")
+
+    written = 0
+    for item in (body.results or []):
+        upsert_scenario_result(db, run_id, item, merge_roles=False)
+        written += 1
+    db.commit()
+    # The count is the confirmation: a 2xx alone never proves the rows landed.
+    return {"run_id": run_id, "written": written}

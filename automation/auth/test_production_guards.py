@@ -52,19 +52,21 @@ def test_production_key_is_never_the_committed_constant():
 def test_agent_token_mismatch_is_rejected():
     from fastapi import HTTPException
     m = _load(APP_ENV="dev", JWT_SECRET_KEY="x" * 64, AGENT_TOKEN="right-token")
-    assert m.require_agent("right-token") == "agent"
+    # Phase 4B added a leading `request` parameter (the loopback check), so the
+    # token must be passed by keyword — a positional call now binds it to request.
+    assert m.require_agent(x_agent_token="right-token") == "agent"
     with pytest.raises(HTTPException) as e:
-        m.require_agent("wrong-token")
+        m.require_agent(x_agent_token="wrong-token")
     assert e.value.status_code == 401
     with pytest.raises(HTTPException):
-        m.require_agent("")          # missing header is not a free pass
+        m.require_agent(x_agent_token="")   # missing header is not a free pass
 
 
 def test_production_without_an_agent_token_refuses_service():
     from fastapi import HTTPException
     m = _load(APP_ENV="production", JWT_SECRET_KEY="x" * 64, AGENT_TOKEN=None)
     with pytest.raises(HTTPException) as e:
-        m.require_agent("anything")
+        m.require_agent(x_agent_token="anything")
     assert e.value.status_code == 503
 
 

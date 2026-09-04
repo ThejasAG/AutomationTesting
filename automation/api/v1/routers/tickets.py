@@ -452,7 +452,8 @@ def run_ticket_scenarios(ticket_id: str) -> None:
     """Run each linked scenario sequentially; set ticket status from the results.
 
     Shared by the /run endpoint and the PR webhook. Never raises."""
-    from automation.api.v1.routers.scenario import run_scenario_headless, ScenarioRequest
+    from automation.scenarios import run_records  # noqa: F401 — backend run bookkeeping
+    from automation.scenarios.service import run_scenario_headless, ScenarioRequest
     try:
         with SessionLocal() as db:
             t = db.query(Ticket).filter(Ticket.id == ticket_id).first()

@@ -109,7 +109,8 @@ def run_pr_autotest(project_id: str, pr_number: int, post_comment: bool = True) 
     from automation.integrations.github import GitHubIntegration
     from automation.intelligence.pr_planner import plan_pr_tests
     from automation.projects.preparation import preparation_service
-    from automation.api.v1.routers.scenario import ScenarioRequest, run_scenario_headless
+    from automation.scenarios import run_records  # noqa: F401 — backend run bookkeeping
+    from automation.scenarios.service import ScenarioRequest, run_scenario_headless
     from automation.api.v1.routers.pull_requests import _owner_repo, _github
 
     with SessionLocal() as db:

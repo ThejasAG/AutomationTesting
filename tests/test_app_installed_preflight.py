@@ -7,7 +7,8 @@ the wrong environment/device pair it almost always is.
 """
 import pytest
 
-from automation.api.v1.routers import scenario as S
+from automation.api.v1.routers import scenario as ROUTER
+from automation.scenarios import service as S
 from automation.projects.builder import app_builder
 
 PHONE = "B1093E61-C510-4E6E-8A60-C2D05D150F64"
@@ -57,13 +58,13 @@ def test_the_check_runs_before_metro_and_webdriveragent():
     """It has to come first — booting, Metro and the WDA build all succeed against a
     device without the app, so checking later wastes ~40s per failed run."""
     import inspect
-    src = inspect.getsource(S._scenario_events)
+    src = inspect.getsource(S.scenario_events)
     assert src.index("_app_missing_detail") < src.index("Starting the JS bundler")
     assert src.index("_app_missing_detail") < src.index("building WebDriverAgent")
 
 
 def test_the_batch_path_checks_too():
     import inspect
-    src = inspect.getsource(S._batch_events)
+    src = inspect.getsource(ROUTER._batch_events)
     assert "_app_missing_detail" in src
     assert src.index("_app_missing_detail") < src.index("Starting Metro")

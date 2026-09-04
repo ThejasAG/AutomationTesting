@@ -228,6 +228,17 @@ class ExecutionAgent(Base):
     # A real agent registering on the same machine adopts the row and clears this,
     # which is the point: one physical Mac, one row, whoever reports it.
     is_backend = Column(Boolean, default=False)
+
+    # Per-agent credential (Phase 4F.1).
+    #
+    # Until now every agent shared one AGENT_TOKEN and announced its own identity
+    # in the request body, so any holder of that token could act as any machine.
+    # Registration now issues a secret unique to this machine; only its SHA-256 is
+    # stored, so the database never holds anything replayable. The backend derives
+    # the agent from the presented credential instead of believing the client.
+    agent_credential_hash = Column(String(64), nullable=True, index=True)
+    agent_credential_issued_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     
     jobs = relationship("TestRun", back_populates="agent")

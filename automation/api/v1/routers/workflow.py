@@ -231,7 +231,8 @@ def recreate(goal: str, db: Session = Depends(get_db), current_user=Depends(get_
     ordered = [by_name[n] for n in scen_names if n in by_name]
 
     def _run():
-        from automation.api.v1.routers.scenario import run_scenario_headless, ScenarioRequest
+        from automation.scenarios import run_records  # noqa: F401 — backend run bookkeeping
+        from automation.scenarios.service import run_scenario_headless, ScenarioRequest
         from automation.database.config import SessionLocal
         for sc in ordered:
             try:

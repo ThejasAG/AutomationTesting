@@ -14,6 +14,7 @@ import textwrap
 from datetime import datetime
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -26,6 +27,7 @@ MACHINE_B = "machine-b"
 UDID_X = "AAAAAAAA-1111-2222-3333-444444444444"
 UDID_Y = "BBBBBBBB-5555-6666-7777-888888888888"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SESSION = []   # the active test session, for helpers that need it
 
 
 @pytest.fixture
@@ -38,6 +40,10 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "SessionLocal", Session)
     monkeypatch.setattr(dm, "_backend_machine_id", None)
     s = Session()
+    from automation.database.models import TestProject
+    s.add(TestProject(id="proj-1", name="Demo", git_url="https://example.com/x.git"))
+    s.commit()
+    _SESSION.clear(); _SESSION.append(s)
     yield s, Session, str(path)
     s.close()
 
@@ -170,7 +176,61 @@ def agent(db, monkeypatch):
     monkeypatch.setattr(agent_main, "_has_test_suite", lambda *a, **k: True)
     monkeypatch.setattr(agent_main, "_run_planned_scenarios", lambda *a, **k: {"status": "passed"})
     monkeypatch.setattr(agent_main.HTTP, "post", lambda *a, **k: type("R", (), {"status_code": 200})())
+
+    # Phase 4F.2A: the agent reaches devices over HTTP, not the database. Route its
+    # calls straight into the REAL router functions against this test DB, so the
+    # test still exercises agent -> backend -> reservation end to end — only the
+    # transport is short-circuited, never the logic being asserted.
+    from automation.api.v1.routers import agents as ar
+    from automation.database.models import DeviceRecord
+
+    class _Agent:                     # what require_authenticated_agent would return
+        id = MACHINE_A
+
+    def _fake_request(method, url, **kwargs):
+        body = kwargs.get("json") or {}
+        tail = url.split("/agents/me", 1)[1]
+        db = Session()
+        try:
+            if method == "GET":
+                udid = tail.rsplit("/", 1)[1]
+                out = ar.get_my_device(udid, db=db, agent=_Agent())
+            elif tail.endswith("/reserve"):
+                did = tail.split("/devices/")[1].split("/")[0]
+                out = ar.reserve_my_device(did, ar.ReservationRequest(**body),
+                                           db=db, agent=_Agent())
+            elif tail.endswith("/activate"):
+                did = tail.split("/devices/")[1].split("/")[0]
+                out = ar.activate_my_reservation(did, ar.ReservationRequest(**body),
+                                                 db=db, agent=_Agent())
+            elif tail.endswith("/reservation"):
+                did = tail.split("/devices/")[1].split("/")[0]
+                out = ar.release_my_reservation(did, ar.ReservationRequest(**body),
+                                                db=db, agent=_Agent())
+            else:
+                raise AssertionError(f"unrouted device call: {method} {url}")
+            return type("R", (), {"status_code": 200, "json": lambda self=None, o=out: o,
+                                  "raise_for_status": lambda self=None: None})()
+        except HTTPException as e:
+            return type("R", (), {"status_code": e.status_code,
+                                  "json": lambda self=None, d=e.detail: {"detail": d},
+                                  "text": str(e.detail),
+                                  "raise_for_status": lambda self=None: None})()
+        finally:
+            db.close()
+
+    monkeypatch.setattr(agent_main.HTTP, "request", _fake_request)
     return agent_main
+
+
+def _seed_run(db, job_id):
+    """The API verifies the run exists and is this agent's — create it."""
+    from automation.database.models import TestRun
+    if db.query(TestRun).filter(TestRun.id == job_id).first() is None:
+        db.add(TestRun(id=job_id, project_id="proj-1", test_suite="s", test_name=job_id,
+                       status="queued", job_state="queued", device_name=UDID_X,
+                       agent_id=MACHINE_A))
+        db.commit()
 
 
 def _run(agent_main, framework, monkeypatch, job_id="run-1", device=UDID_X):
@@ -181,6 +241,7 @@ def _run(agent_main, framework, monkeypatch, job_id="run-1", device=UDID_X):
                         lambda *a, **k: type("P", (), {
                             "ok": True, "steps": [], "error": None, "branch": "main",
                             "project_type": "ios", "validation": None})())
+    _seed_run(_SESSION[0], job_id)
     job = {"job_id": job_id, "project_id": "p1", "git_url": "u", "branch": "main",
            "device_id": device, "platform": "ios", "project_name": "demo",
            "planned_scenarios": [], "is_pr": False}
@@ -421,6 +482,7 @@ def test_stale_recovery_is_not_implemented_yet():
 def test_only_the_agent_path_reserves():
     import inspect
     from automation.api.v1.routers import scenario, inspector, recorder
-    for mod in (scenario, inspector, recorder):
+    from automation.scenarios import service as scenario_service
+    for mod in (scenario, scenario_service, inspector, recorder):
         assert "reserve_device" not in inspect.getsource(mod), \
             f"{mod.__name__} reservation is a later phase"
