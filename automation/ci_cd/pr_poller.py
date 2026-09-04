@@ -77,17 +77,28 @@ def _queue_run(db, project, pr: Dict[str, Any]) -> Optional[str]:
         # never hijacked by whatever sim happens to be booted. PR_TEST_IOS_DEVICE
         # overrides; otherwise honour a real online device; else pick a sensible sim.
         pinned = os.getenv("PR_TEST_IOS_DEVICE", "").strip()
-        if pinned:
-            resolved, _ = app_builder.resolve_ios_device(pinned, prefer_requested=True)
-        else:
-            resolved, _ = app_builder.resolve_ios_device(device.id if device else None)
+        # Resolved from the devices REGISTRY, not the backend's own simctl: this
+        # decides which machine will execute the job, and the backend's local
+        # simulator list cannot answer that for any machine but its own.
+        from automation.device_manager.service import resolve_ios_device_record
+        resolved_machine, resolved, note = resolve_ios_device_record(
+            pinned or (device.id if device else None)
+        )
+        if note:
+            logger.info("PR device resolution: %s", note)
         if resolved:
             device_name = resolved
 
     owner, repo = _owner_repo(project.git_url)
     now = datetime.utcnow()
     run_id = str(uuid.uuid4())
+    # Routing intent comes straight from the resolver: it returned the machine
+    # that owns the device, so nothing has to be reconstructed from provider,
+    # hostname or the udid string. Unresolved stays NULL, as before.
+    machine_id = resolved_machine if resolved else None
+
     database.insert_test_run(db, {
+        "machine_id": machine_id,
         "id": run_id, "project_id": project.id, "test_suite": project.name,
         "test_name": f"PR #{pr['number']}: {pr.get('title') or pr.get('branch')}",
         "status": "queued", "job_state": "queued", "started_at": now, "created_at": now,

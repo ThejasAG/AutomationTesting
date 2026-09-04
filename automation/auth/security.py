@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 import os
@@ -100,15 +100,57 @@ def require_role(allowed_roles: list):
 AGENT_TOKEN = os.getenv("AGENT_TOKEN", "").strip()
 
 
-def require_agent(x_agent_token: str = Header(default="")):
-    """Guard the endpoints only the execution agent is meant to call."""
+# Addresses that mean "this same machine". A caller from any of these is the
+# local agent talking to the local backend over the loopback interface.
+_LOOPBACK_CLIENTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"})
+
+
+def _is_loopback_client(request: Optional[Request]) -> bool:
+    """True only when we can positively identify the caller as loopback.
+
+    Unknown origin counts as remote, not local — an address we cannot read must
+    not be treated as trusted.
+
+    NOTE: this reads the socket peer, so it is accurate for the direct-uvicorn
+    setup used here. Behind a reverse proxy every caller would look like
+    loopback, and the token would have to be required unconditionally.
+    """
+    client = getattr(request, "client", None) if request is not None else None
+    host = getattr(client, "host", None)
+    return host in _LOOPBACK_CLIENTS
+
+
+def require_agent(request: Request = None, x_agent_token: str = Header(default="")):
+    """Guard the endpoints only the execution agent is meant to call.
+
+    A configured AGENT_TOKEN is always enforced. With no token configured the
+    rule depends on where the caller is:
+
+      * loopback, non-production  -> allowed, so local development is unchanged
+      * anything else             -> refused with a configuration error
+
+    The backend is served with `--host 0.0.0.0` (scripts/supervise_backend.sh),
+    so before this check any host on the LAN could register as an agent, claim
+    queued jobs and post results for them. Local-only workflows are unaffected
+    because they arrive on 127.0.0.1.
+    """
     if not AGENT_TOKEN:
         if IS_PRODUCTION:
             raise HTTPException(
                 status_code=503,
                 detail="AGENT_TOKEN is not configured on this server.",
             )
-        return "agent"                      # dev: unauthenticated, as before
+        if not _is_loopback_client(request):
+            # Never invent a token — say plainly what has to be configured.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "AGENT_TOKEN is not configured on this server, so agent "
+                    "requests are only accepted from localhost. Set AGENT_TOKEN "
+                    "on the backend and on every remote agent to allow this."
+                ),
+            )
+        return "agent"                      # dev on loopback: unauthenticated, as before
     if not secrets.compare_digest(x_agent_token, AGENT_TOKEN):
         raise HTTPException(status_code=401, detail="Invalid agent token")
     return "agent"

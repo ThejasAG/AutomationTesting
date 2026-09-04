@@ -9,6 +9,7 @@ import urllib.request
 from typing import Dict, Any, List
 
 from automation.appium_service import wda
+from automation.utils import proctree
 
 APPIUM_LOG_DIR = os.path.abspath(os.path.join("logs", "appium"))
 
@@ -124,8 +125,13 @@ class AppiumProcessManager:
         log_file = open(log_path, "wb")
         logger.info(f"Appium log: {log_path}")
 
-        process = subprocess.Popen(
+        # Spawned into its own process group (see automation/utils/proctree.py).
+        # `cmd` is npx -> node -> appium -> xcodebuild -> WDA runner; terminating the
+        # npx pid alone orphaned everything below it, which is the leak this fixes.
+        process = proctree.spawn_tracked(
             cmd,
+            job_id=run_id,
+            kind="appium",
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
@@ -150,12 +156,20 @@ class AppiumProcessManager:
         if session_id in self.active_sessions:
             session = self.active_sessions[session_id]
             logger.info(f"Terminating Appium server for session {session_id} on port {session.port}")
+            # Kill the whole group (appium AND the xcodebuild/WDA tree under it),
+            # SIGTERM first, SIGKILL after ~10s. Falls back to the plain Popen
+            # teardown only if the process was never registered.
+            if not proctree.reap_pid(session.process.pid, timeout=10.0):
+                try:
+                    session.process.terminate()
+                    session.process.wait(timeout=5)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanly terminate Appium: {e}")
+                    session.process.kill()
             try:
-                session.process.terminate()
                 session.process.wait(timeout=5)
-            except Exception as e:
-                logger.warning(f"Failed to cleanly terminate Appium: {e}")
-                session.process.kill()
+            except Exception:
+                pass
 
             log_file = getattr(session.process, "_log_file", None)
             if log_file is not None:

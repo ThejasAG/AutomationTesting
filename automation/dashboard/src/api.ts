@@ -451,21 +451,9 @@ export interface PerformanceResponse {
         score_change: number | null; better: boolean;
     } } | null;
 }
-export interface PerformanceTrends {
-    trend: { run_id: string; date: string | null; score: number | null; grade: string | null }[];
-    improving: boolean;
-    avg_score: number;
-    regression: { drop: number; from_score: number; to_score: number; run_id: string } | null;
-}
-
 export async function getPerformance(runId: string): Promise<PerformanceResponse | null> {
     const res = await fetch(`${API_BASE}/runs/${runId}/performance`, { headers: getHeaders() });
     if (res.status === 404) return null;
-    return await handleResponse(res);
-}
-
-export async function getPerformanceTrends(projectId: string, limit = 10): Promise<PerformanceTrends> {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/performance-trends?limit=${limit}`, { headers: getHeaders() });
     return await handleResponse(res);
 }
 
@@ -969,7 +957,15 @@ export async function getWorkflowDiagram(): Promise<WorkflowDiagram> {
 /** Before / Delta / After for the spine.
  *  `headRef` empty compares against the WORKING TREE (what you want while editing);
  *  a PR passes its head sha, because the working tree is not the PR. */
-export async function getWorkflowDelta(baseRef = 'main', headRef = ''): Promise<WorkflowDelta> {
+/** Platform refs the flow delta can be built from — i.e. refs whose tree contains
+ *  automation/workflow/catalog.py. Branches of the apps under test are a different
+ *  repository and are deliberately not offered. */
+export async function getWorkflowRefs(): Promise<{ refs: string[]; default: string }> {
+    const res = await fetch(`${API_BASE}/workflow/diagram/refs`, { headers: getHeaders() });
+    return await handleResponse(res);
+}
+
+export async function getWorkflowDelta(baseRef = '', headRef = ''): Promise<WorkflowDelta> {
     const qs = new URLSearchParams({ base_ref: baseRef });
     if (headRef) qs.set('head_ref', headRef);
     const res = await fetch(`${API_BASE}/workflow/diagram/delta?${qs}`, { headers: getHeaders() });
@@ -1863,4 +1859,30 @@ export async function getInspectorScreenshot(
 ): Promise<{ udid: string; width: number; height: number; image: string }> {
     const res = await fetch(`${API_BASE}/inspector/${udid}/screenshot`, { headers: getHeaders() });
     return await handleResponse(res);
+}
+
+// ── Execution agent runner control ──────────────────────────────────────────
+
+export interface RunnerState {
+    running: boolean;
+    pid: number | null;
+    last_log: string;
+    message?: string;
+}
+
+export async function getRunnerState(): Promise<RunnerState> {
+    const res = await fetch(`${API_BASE}/agents/runner`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Could not read agent state');
+    return res.json();
+}
+
+/** Start or stop the execution agent process. The backend runs the same
+ *  start-agent.sh / pid-file teardown the terminal does. */
+export async function setRunnerRunning(on: boolean): Promise<RunnerState> {
+    const res = await fetch(`${API_BASE}/agents/runner/${on ? 'start' : 'stop'}`, {
+        method: 'POST', headers: getHeaders(),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `Could not ${on ? 'start' : 'stop'} the agent`);
+    return body;
 }

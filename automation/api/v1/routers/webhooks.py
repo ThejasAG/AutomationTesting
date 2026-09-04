@@ -253,14 +253,23 @@ async def github_webhook(request: Request):
         device_name = device.id if device else "pending"
         # For iOS, store a device that actually exists on this host (prefer a
         # booted sim) so the run does not fall back at build time.
+        resolved_machine = None
         if platform.lower() == "ios":
-            resolved, _ = app_builder.resolve_ios_device(device.id if device else None)
+            from automation.device_manager.service import resolve_ios_device_record
+            resolved_machine, resolved, _note = resolve_ios_device_record(
+                device.id if device else None
+            )
             if resolved:
                 device_name = resolved
 
         now = datetime.utcnow()
         run_id = str(uuid.uuid4())
+        # Routing intent — only for a device this host actually owns. "pending"
+        # (no device online) and the android-bot literal below resolve to None and
+        # stay NULL rather than being given a machine they do not have.
+        machine_id = resolved_machine
         database.insert_test_run(db, {
+            "machine_id": machine_id,
             "id": run_id,
             "project_id": project.id,
             "test_suite": project.name,

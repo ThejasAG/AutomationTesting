@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import socket
@@ -22,6 +23,9 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from automation.device_manager.discovery.android import AndroidDiscoveryProvider
 from automation.device_manager.discovery.ios import IOSDiscoveryProvider
 from automation.plugins.appium_framework import AppiumFramework
+from automation.utils import proctree
+from automation.device_manager import reservation
+from automation.device_manager.service import device_row_id
 from automation.projects.repository import repository_manager
 from automation.projects.preparation import preparation_service
 
@@ -73,11 +77,36 @@ VIRTUAL_IOS_DEVICE = {
 }
 
 
+def agent_slug() -> str:
+    """Stable per-machine identifier, used to keep synthetic device ids unique.
+
+    The hostname — not the agent id — because the id is minted fresh by
+    /agents/register on every start, and because discover_devices() runs BEFORE
+    registration, when no agent id exists yet. The hostname is available at that
+    point and is the same across restarts, which is exactly what a device id
+    needs to be.
+    """
+    host = socket.gethostname().split(".")[0]
+    slug = re.sub(r"[^a-z0-9-]+", "-", host.lower()).strip("-")
+    return slug or "unknown-host"
+
+
 def get_virtual_device() -> Dict[str, Any]:
-    """Return an OS-appropriate virtual device for pipeline testing."""
-    if platform.system() == "Darwin":
-        return VIRTUAL_IOS_DEVICE
-    return VIRTUAL_ANDROID_DEVICE
+    """An OS-appropriate virtual device for pipeline testing, unique to this host.
+
+    The id used to be the constant "virtual-ios-simulator". Every agent with no
+    real device reported that same id, so two machines would advertise one
+    identity and a job queued for it would go to whichever polled first. The
+    host slug makes the id collision-free while staying stable per machine.
+
+    ponytail: keyed on hostname, so two agents on ONE host still collide — they
+    would also both claim the same real simulators. Give them explicit ids if
+    that ever becomes a real configuration.
+    """
+    base = VIRTUAL_IOS_DEVICE if platform.system() == "Darwin" else VIRTUAL_ANDROID_DEVICE
+    device = dict(base)                      # copy: never mutate the template
+    device["id"] = f"{base['id']}-{agent_slug()}"
+    return device
 
 def discover_devices() -> List[Dict[str, Any]]:
     providers = [AndroidDiscoveryProvider(), IOSDiscoveryProvider()]
@@ -411,6 +440,36 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
         report_status(job_id, "failed", ["Device disconnected before execution."], "Failed", "Device disconnected")
         return
 
+    # ── Reserve the simulator BEFORE anything can drive it ───────────────────
+    # Claiming the TestRun stops two agents taking the same JOB; it says nothing
+    # about two different jobs targeting the same simulator. This does.
+    #
+    # The row is resolved against THIS agent's machine, which is what makes a
+    # legacy job (machine_id NULL) safe: the executing agent supplies the machine,
+    # so the same UDID on another Mac is never reserved and nothing is backfilled.
+    reserved_device_id = None
+    device_row = device_row_id(AGENT_ID, device_id)
+    if device_row:
+        if not reservation.reserve_device(device_row, job_id):
+            # Another run holds this simulator. That is contention, not a test
+            # failure — put the job back on the queue and let it be claimed again
+            # once the device frees, using the existing status mechanism.
+            holder = reservation.get_reservation(device_row)
+            owner = holder.reserved_by if holder else "another run"
+            logger.warning("Device %s is reserved by %s — requeueing job %s",
+                           device_id, owner, job_id)
+            report_status(job_id, "queued",
+                          [f"Device {device_id} is in use by run {owner}; requeued."],
+                          "Waiting for device")
+            # Never executed, so this agent may legitimately pick it up again.
+            _PROCESSED_JOB_IDS.discard(job_id)
+            return
+        reserved_device_id = device_row
+    else:
+        # No registry row for this machine + device. Reservation must never block
+        # work that runs today, so proceed unreserved exactly as before 4E.2.
+        logger.info("No device record for %s on this machine — running unreserved.", device_id)
+
     # Screen capture state — declared here so finally block can always reference it.
     capture_thread: threading.Thread | None = None
     stop_capture_event = threading.Event()
@@ -540,6 +599,11 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
         # entirely and run the project's fixed execution.command — so "smart selection"
         # never reached execution and every PR ran the same suite.
         planned = job.get("planned_scenarios") or []
+        # Execution proper starts here: the repo is prepared, the app is built and
+        # installed, and the next call brings up Appium/WDA and runs the tests.
+        if reserved_device_id:
+            reservation.mark_active(reserved_device_id, job_id)
+
         if planned:
             report_status(job_id, "running",
                           [f"Executing {len(planned)} planned scenario(s) for this change: "
@@ -630,6 +694,25 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
             framework.cleanup(project_id)
         except Exception:
             pass
+        # Reap anything this job spawned into a tracked process group. The happy
+        # path already released the Appium session; this is the backstop for the
+        # error paths, where release_instance() is never reached and Appium plus
+        # its xcodebuild/WDA tree used to survive the job. Only pids recorded for
+        # THIS job_id are touched — see automation/utils/proctree.py.
+        try:
+            reaped = proctree.reap_job(job_id)
+            if reaped:
+                logger.info(f"Reaped {reaped} tracked process group(s) for job {job_id}")
+        except Exception as e:
+            logger.warning(f"Process reap failed for job {job_id}: {e}")
+        # Release the simulator LAST — only once Appium, WDA and the whole process
+        # tree are gone. Freeing it earlier would let the next job start while this
+        # job's processes could still be driving the device.
+        if reserved_device_id:
+            try:
+                reservation.release_device(reserved_device_id, job_id)
+            except Exception as e:
+                logger.warning(f"Device release failed for job {job_id}: {e}")
         # Remove the app so the NEXT job starts clean (opt-in — see FRESH_INSTALL_PER_JOB).
         if FRESH_INSTALL_PER_JOB and job.get("is_pr"):
             try:
@@ -659,6 +742,21 @@ def poll_loop():
             logger.error(f"Poll failed: {e}")
         time.sleep(3)
 
+def _startup_sweep() -> None:
+    """Startup orphan sweep — classification always, reaping only if armed.
+
+    Reaping requires PROC_SWEEP_ENABLED and PROC_SWEEP_ALLOW_REAP both true with
+    PROC_SWEEP_DRY_RUN false; every default is safe, so out of the box this only
+    classifies and logs. Called after registration because deciding what is an
+    orphan needs the backend's job state, and it swallows every exception: an
+    agent that cannot sweep must still be able to run jobs.
+    """
+    try:
+        proctree.log_sweep_report(proctree.sweep_orphans())
+    except Exception as e:
+        logger.warning(f"Orphan sweep (dry-run) skipped: {e}")
+
+
 def main():
     global AGENT_ID
     hostname = socket.gethostname()
@@ -682,6 +780,8 @@ def main():
         
     AGENT_ID = res.json()["id"]
     logger.info(f"Registered successfully. Agent ID: {AGENT_ID}")
+
+    _startup_sweep()
     
     hb_thread = threading.Thread(target=heartbeat_loop, daemon=True)
     hb_thread.start()

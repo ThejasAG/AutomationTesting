@@ -5,6 +5,7 @@ import logging
 from typing import Dict, Any, Optional
 
 from automation.appium_service.providers.base import AppiumProvider
+from automation.utils import proctree
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +14,7 @@ class LocalAppiumProvider(AppiumProvider):
         self.processes: Dict[int, subprocess.Popen] = {}
         self.log_files = {}
         
-    def start_instance(self, port: int, log_path: str) -> bool:
+    def start_instance(self, port: int, log_path: str, run_id: Optional[str] = None) -> bool:
         if port in self.processes:
             return True
             
@@ -22,8 +23,12 @@ class LocalAppiumProvider(AppiumProvider):
             log_handle = open(log_path, "w", encoding="utf-8")
             self.log_files[port] = log_handle
             
-            process = subprocess.Popen(
+            # Own process group, so stop_instance() can take the xcodebuild/WDA
+            # tree down with Appium instead of orphaning it.
+            process = proctree.spawn_tracked(
                 ["appium", "-p", str(port)],
+                job_id=run_id or f"port-{port}",
+                kind="appium",
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 text=True
@@ -47,8 +52,18 @@ class LocalAppiumProvider(AppiumProvider):
     def stop_instance(self, port: int) -> None:
         if port in self.processes:
             process = self.processes[port]
-            process.terminate()
-            process.wait()
+            # SIGTERM the group, SIGKILL survivors after ~10s. Falls back to the
+            # plain parent-only teardown only if the pid was never registered.
+            if not proctree.reap_pid(process.pid, timeout=10.0):
+                try:
+                    process.terminate()
+                    process.wait(timeout=10)
+                except Exception:
+                    process.kill()
+            try:
+                process.wait(timeout=5)
+            except Exception:
+                pass
             del self.processes[port]
             logger.info(f"LocalAppiumProvider: Stopped Appium on port {port}")
             

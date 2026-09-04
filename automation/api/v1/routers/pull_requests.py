@@ -285,8 +285,12 @@ def test_pull(project_id: str, number: int, body: PRTestBody = PRTestBody(),
     device_name = (chosen or (device.id if device else "pending"))
     # For iOS, store a device that actually exists on this host (prefer a booted
     # sim) so the run does not fall back at build time on a stale/foreign UDID.
+    resolved_machine = None
     if platform.lower() == "ios":
-        resolved, _ = app_builder.resolve_ios_device(device_name if device_name != "pending" else None)
+        from automation.device_manager.service import resolve_ios_device_record
+        resolved_machine, resolved, _note = resolve_ios_device_record(
+            device_name if device_name != "pending" else None
+        )
         if resolved:
             device_name = resolved
 
@@ -315,7 +319,10 @@ def test_pull(project_id: str, number: int, body: PRTestBody = PRTestBody(),
 
     now = datetime.utcnow()
     run_id = str(uuid.uuid4())
+    # Routing intent for the simulator chosen above, confirmed against the registry.
+    machine_id = resolved_machine
     database.insert_test_run(db, {
+        "machine_id": machine_id,
         "planned_scenarios": planned or None,
         "id": run_id,
         "project_id": project.id,

@@ -1,4 +1,5 @@
-from sqlalchemy import Column, String, Integer, DateTime, Float, ForeignKey, Text, JSON, Boolean
+from sqlalchemy import (Column, String, Integer, DateTime, Float, ForeignKey, Text, JSON,
+                        Boolean, UniqueConstraint)
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -130,6 +131,15 @@ class TestRun(Base):
     
     # Distributed Execution
     agent_id = Column(String, ForeignKey("execution_agents.id"), nullable=True)
+    # Which MACHINE this run is meant for — durable routing intent, decided at
+    # queue time. Distinct from agent_id, which is the worker that happens to be
+    # executing it right now: a stranded job has its agent_id cleared on reclaim
+    # but must keep its machine_id, or it loses the machine it was routed to.
+    #
+    # Nullable, and NULL is meaningful: "legacy run, match on UDID alone". Every
+    # existing row stays NULL — historical agent ids predate stable machine
+    # identity and are not reliable enough to backfill from.
+    machine_id = Column(String(120), nullable=True, index=True)
     job_state = Column(String, default="queued") # queued, assigned, downloading, preparing, running, collecting_evidence, completed, failed, cancelled
 
     # Which engine ran this: "ios" = Appium/XCUITest, "android" = Vya-agentic-BOT
@@ -212,9 +222,92 @@ class ExecutionAgent(Base):
     restart_count = Column(Integer, default=0)
     uptime_seconds = Column(Integer, default=0)
     is_draining = Column(Boolean, default=False)
+    # True while this machine's row exists only because the BACKEND registered
+    # itself — no execution agent has claimed it yet. The backend never polls, so
+    # a row in that state must not be treated as a worker that can take jobs.
+    # A real agent registering on the same machine adopts the row and clears this,
+    # which is the point: one physical Mac, one row, whoever reports it.
+    is_backend = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     jobs = relationship("TestRun", back_populates="agent")
+
+class DeviceRecord(Base):
+    """A device (simulator or physical) as reported by one machine.
+
+    Named DeviceRecord, not Device, because `automation.device_manager.models.Device`
+    is the pydantic shape the API already returns — the two are different layers and
+    code that touches both should not have to guess which one it holds.
+
+    Uniqueness is (machine_id, udid), NOT udid alone. A UDID identifies a simulator
+    within one Mac's CoreSimulator; it is not a global identifier, and two machines
+    may legitimately report the same one. Keying on udid alone would silently merge
+    two different physical devices into one row the first time a second Mac joined.
+
+    A surrogate `id` is the primary key rather than the composite pair, matching every
+    other table here (String(36) uuid PKs) and keeping a future allocation/reservation
+    table able to reference a device with a single column.
+    """
+    __tablename__ = "devices"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+
+    # The machine that owns the device. For an agent this is execution_agents.id;
+    # for the backend's own simulators it is "local:<hostname>" — see
+    # device_manager.service.local_machine_id().
+    machine_id = Column(String(120), nullable=False, index=True)
+    udid = Column(String(255), nullable=False, index=True)
+
+    hostname = Column(String(255), nullable=True)
+    # Mirrors device_manager.models.Device.provider: an agent id, or "local".
+    provider = Column(String(120), nullable=True)
+
+    name = Column(String(255), nullable=True)
+    manufacturer = Column(String(120), nullable=True)
+    model = Column(String(255), nullable=True)
+    platform = Column(String(50), nullable=True)
+    platform_version = Column(String(50), nullable=True)
+    connection_type = Column(String(50), nullable=True)
+
+    # Last reported status. Never trusted on its own after a restart — freshness is
+    # decided from last_seen against DEVICE_STALE_AFTER, exactly as before.
+    status = Column(String(50), default="UNKNOWN")
+    capabilities = Column(JSON, nullable=True)
+
+    last_seen = Column(DateTime, nullable=True)
+
+    # ── Reservation (Phase 4E.1) ────────────────────────────────────────────
+    # Exclusive use of ONE simulator. The row is the resource: its id already
+    # encodes (machine_id, udid) via the unique constraint below, so locking the
+    # row is exactly locking one physical simulator on one machine — never a
+    # machine-wide lock, so two simulators on one Mac stay independently usable.
+    #
+    # reserved_by is the OWNER and the only thing ownership is decided by. It
+    # holds a TestRun.id: stable across an agent restart and never cleared by
+    # reclaim, unlike agent_id. NULL means available.
+    reserved_by = Column(String(36), nullable=True, index=True)
+    reserved_at = Column(DateTime, nullable=True)
+    # Observability only — 'reserved' (acquired) or 'active' (execution started).
+    # Never consulted to decide ownership; reserved_by is the authority.
+    reserved_state = Column(String(20), nullable=True)
+
+    # Machine-global WDA port for this simulator (Phase 4E.2).
+    #
+    # wda.port_for() kept its map in a module-level dict, so two OS processes each
+    # assigned 8100 to their FIRST device — two different simulators, one port.
+    # Storing it on the row makes the assignment machine-scoped (ports are only
+    # compared within a machine_id) and visible across processes. Allocated once
+    # and kept: a stable port per device is easier to reason about than a pool
+    # that has to be released, and it cannot leak.
+    wda_port = Column(Integer, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("machine_id", "udid", name="uq_devices_machine_udid"),
+    )
+
 
 class ModuleStability(Base):
     __tablename__ = "module_stability"

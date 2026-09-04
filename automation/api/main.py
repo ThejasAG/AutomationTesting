@@ -424,6 +424,18 @@ def _reap_orphaned_runs():
 async def startup_event():
     install_secret_filter()  # Redact tokens/keys from all logs
     initialize_database()
+    # Devices survive a restart now: repopulate the in-memory registry from the
+    # `devices` table before anything reads it. Stored status is not trusted on its
+    # own — freshness is still decided from last_seen, so a device whose agent went
+    # away while the backend was down comes back DISCONNECTED, not ONLINE.
+    try:
+        from automation.device_manager.service import device_service, ensure_backend_machine
+        # This machine's execution_agents row, so backend-discovered simulators are
+        # stored under the same machine_id a co-located agent uses.
+        ensure_backend_machine()
+        device_service.hydrate_from_db()
+    except Exception as e:
+        _log.warning("device hydration skipped: %s", e)
     _reap_orphaned_runs()    # any run still 'running' after a restart is dead
     ops_monitor.start()
     from automation.ci_cd import pr_poller

@@ -3,9 +3,10 @@ import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Loader2, Clock, PlayCircle, CheckCircle2, XCircle, RefreshCw, Smartphone, GitBranch,
+  Power, AlertTriangle,
 } from 'lucide-react';
-import { getRuns } from '../api';
-import type { TestRun } from '../api';
+import { getRuns, getRunnerState, setRunnerRunning } from '../api';
+import type { TestRun, RunnerState } from '../api';
 import { parseServerDate } from '../time';
 
 /** Job queue — what is waiting, what is executing right now, and what finished.
@@ -39,6 +40,134 @@ const ago = (iso?: string | null) => {
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 };
+
+/** The job_state values a run passes through, in order. A queued job is at the
+ *  start of this pipeline and a finished one is off the end of it — so the bar
+ *  answers "how far along is this?", which a status chip alone never did. */
+const STAGES = ['queued', 'assigned', 'downloading', 'preparing', 'running', 'collecting_evidence'];
+const STAGE_LABEL: Record<string, string> = {
+  queued: 'Waiting for an agent',
+  assigned: 'Claimed by agent',
+  downloading: 'Fetching the repo',
+  preparing: 'Installing dependencies',
+  running: 'Executing tests',
+  collecting_evidence: 'Collecting evidence',
+};
+
+/** A job in flight for longer than this is not progressing — the agent that
+ *  claimed it died mid-run. The queue cannot recover it on its own (poll_job
+ *  only hands out `queued`), so it would otherwise read as "running" forever. */
+const STALLED_AFTER_MS = 60 * 60 * 1000;
+
+function JobProgress({ state, color, since }: { state: string; color: string; since?: string | null }) {
+  const i = STAGES.indexOf(state);
+  if (i < 0) return null;
+  // Half a step past the last completed stage: the current one is in progress,
+  // not finished, so the bar must never read 100% while work is still going.
+  const pct = ((i + 0.5) / STAGES.length) * 100;
+  const age = since ? Date.now() - parseServerDate(since).getTime() : 0;
+  const stalled = state !== 'queued' && age > STALLED_AFTER_MS;
+  const bar = stalled ? '#fbbf24' : color;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ height: 4, borderRadius: 4, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: bar, borderRadius: 4, transition: 'width .4s ease' }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: '0.68rem', color: stalled ? '#fbbf24' : 'var(--text-muted)' }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          {stalled && <AlertTriangle size={11} />}
+          {STAGE_LABEL[state] || state}
+          {stalled && ` — stalled, no agent has touched this in ${ago(since)}`}
+        </span>
+        <span>step {i + 1} of {STAGES.length}</span>
+      </div>
+    </div>
+  );
+}
+
+/** On/off for the execution agent — the worker that drains this queue.
+ *  Nothing here runs without it, and until now it could only be started from a
+ *  terminal, so a stopped agent looked exactly like an idle platform. */
+function AgentSwitch({ queued, onChange }: { queued: number; onChange: () => void }) {
+  const [state, setState] = useState<RunnerState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const refresh = useCallback(async () => {
+    try { setState(await getRunnerState()); } catch { /* leave the last known state */ }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    const t = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(t);
+  }, [refresh]);
+
+  const toggle = async () => {
+    if (busy || !state) return;
+    setBusy(true);
+    setError('');
+    try {
+      setState(await setRunnerRunning(!state.running));
+      onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not switch the agent');
+      refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const on = state?.running ?? false;
+  const color = on ? '#34d399' : 'var(--text-muted)';
+
+  return (
+    <div className="card" style={{ padding: '14px 16px', marginBottom: 20, borderLeft: `3px solid ${color}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+        <button onClick={toggle} disabled={busy || !state} title={on ? 'Stop the agent' : 'Start the agent'}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 8, cursor: busy ? 'wait' : 'pointer',
+            border: 'none', background: 'transparent', padding: 0, color: 'inherit',
+          }}>
+          <span style={{
+            width: 46, height: 26, borderRadius: 20, background: on ? '#34d399' : 'rgba(255,255,255,0.12)',
+            position: 'relative', transition: 'background .2s ease', display: 'inline-block', flexShrink: 0,
+          }}>
+            <span style={{
+              position: 'absolute', top: 3, left: on ? 23 : 3, width: 20, height: 20, borderRadius: '50%',
+              background: '#fff', transition: 'left .2s ease',
+            }} />
+          </span>
+          <span style={{ fontWeight: 600, fontSize: '0.9rem', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {busy ? <Loader2 size={14} className="spin" /> : <Power size={14} color={color} />}
+            Agent {busy ? '…' : on ? 'on' : 'off'}
+          </span>
+        </button>
+
+        <div style={{ flex: 1, minWidth: 200, fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+          {on
+            ? <>Polling for jobs{state?.pid ? ` · pid ${state.pid}` : ''}. {queued > 0 ? `Draining ${queued} queued.` : 'Queue is empty.'}</>
+            : <>Stopped — queued jobs will not run until this is on.</>}
+          {state?.last_log && (
+            <div style={{ marginTop: 3, fontFamily: 'monospace', fontSize: '0.68rem', opacity: 0.75, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {state.last_log.slice(-160)}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {!on && queued > 0 && (
+        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 7, fontSize: '0.78rem', color: '#fbbf24' }}>
+          <AlertTriangle size={14} />
+          {queued} job{queued === 1 ? '' : 's'} waiting with the agent off — nothing is draining them.
+        </div>
+      )}
+      {error && (
+        <div style={{ marginTop: 10, fontSize: '0.78rem', color: 'var(--danger)' }}>{error}</div>
+      )}
+    </div>
+  );
+}
 
 export default function JobQueuePage() {
   const navigate = useNavigate();
@@ -97,6 +226,8 @@ export default function JobQueuePage() {
           {error}
         </div>
       )}
+
+      <AgentSwitch queued={bucket(GROUPS[0]).length} onChange={load} />
 
       {loading ? (
         <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)' }}>
@@ -163,6 +294,10 @@ export default function JobQueuePage() {
                           <span>{ago(r.started_at || r.created_at)}</span>
                           {r.attempts && r.attempts > 1 && <span>· {r.attempts} attempts</span>}
                         </div>
+                        {(g.key === 'running' || g.key === 'queued') && (
+                          <JobProgress state={r.job_state || ''} color={g.color}
+                            since={r.started_at || r.created_at} />
+                        )}
                         {r.error_message && (
                           <div style={{ marginTop: 6, fontSize: '0.74rem', color: '#f87171' }}>
                             {r.error_message.slice(0, 180)}

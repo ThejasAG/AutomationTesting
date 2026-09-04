@@ -33,7 +33,8 @@ class RunnerService:
         
     def execute_project(self, project_id: str, device_id: str, run_id: Optional[str] = None, triggered_by: Optional[str] = None) -> str:
         """New orchestrated execution flow."""
-        from automation.device_manager.service import device_service
+        from automation.device_manager.service import (device_service,
+                                                       machine_for_local_device as _machine_for)
         from automation.device_manager.models import DeviceStatus
         
         # 1. Device Safety Check
@@ -89,7 +90,10 @@ class RunnerService:
             "os_version": device.platform_version,
             "platform": device.platform,
             "created_at": now,
-            "triggered_by": triggered_by
+            "triggered_by": triggered_by,
+            # Routing intent. The caller resolved and registered this simulator on
+            # THIS host, so the registry can confirm which machine owns it.
+            "machine_id": _machine_for(device_id),
         }
         
         with SessionLocal() as db:

@@ -1,6 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
 import type { ReactElement } from 'react';
-import { Boxes, LayoutDashboard, Settings, PlayCircle, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Zap, Workflow, Clapperboard, Crosshair} from 'lucide-react';
+import { Boxes, LayoutDashboard, Settings, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Workflow, Clapperboard, Crosshair} from 'lucide-react';
 import DashboardHome from './pages/DashboardHome';
 import ScenariosPage from './pages/ScenariosPage';
 import InspectorPage from './pages/InspectorPage';
@@ -9,12 +9,10 @@ import ProjectsPage from './pages/ProjectsPage';
 import GraphPage from './pages/GraphPage';
 import RunDetails from './pages/RunDetails';
 import SettingsPage from './pages/SettingsPage';
-import AutomationPage from './pages/AutomationPage';
 import PullRequestsPage from './pages/PullRequestsPage';
 import { LoginPage } from './pages/LoginPage';
 import ScriptEditorPage from './pages/ScriptEditorPage';
 import ChatPage from './pages/ChatPage';
-import PerformancePage from './pages/PerformancePage';
 import WorkflowPage from './pages/WorkflowPage';
 import BuildUpdateBell from './components/BuildUpdateBell';
 import JobQueuePage from './pages/JobQueuePage';
@@ -75,10 +73,6 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => {
           <GitBranch size={20} />
           Dependency Graph
         </NavLink>
-        <NavLink to="/automation" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <PlayCircle size={20} />
-          Automation
-        </NavLink>
         <NavLink to="/pull-requests" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <GitPullRequest size={20} />
           Pull Requests
@@ -102,10 +96,6 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => {
         <NavLink to="/reports" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <FileText size={20} />
           Reports
-        </NavLink>
-        <NavLink to="/performance" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <Zap size={20} />
-          Performance
         </NavLink>
         <NavLink to="/chat" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <MessageSquare size={20} />
@@ -137,13 +127,11 @@ function App() {
         <Route path="/projects" element={<ProtectedRoute><ProtectedLayout><ProjectsPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/graph" element={<ProtectedRoute><ProtectedLayout><GraphPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/workflow" element={<ProtectedRoute><ProtectedLayout><WorkflowPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/automation" element={<ProtectedRoute><ProtectedLayout><AutomationPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/pull-requests" element={<ProtectedRoute><ProtectedLayout><PullRequestsPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/scripts" element={<ProtectedRoute><ProtectedLayout><ScriptEditorPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/scenarios" element={<ProtectedRoute><ProtectedLayout><ScenariosPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/queue" element={<ProtectedRoute><ProtectedLayout><JobQueuePage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/reports" element={<ProtectedRoute><ProtectedLayout><ReportsPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/performance" element={<ProtectedRoute><ProtectedLayout><PerformancePage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/chat" element={<ProtectedRoute><ProtectedLayout><ChatPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/run/:id" element={<ProtectedRoute><ProtectedLayout><RunDetails /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><ProtectedLayout><SettingsPage /></ProtectedLayout></ProtectedRoute>} />

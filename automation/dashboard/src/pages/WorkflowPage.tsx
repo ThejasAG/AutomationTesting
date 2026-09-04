@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { getWorkflowCoverage, getWorkflowGraph, getWorkflowPath, recreateWorkflow,
-         getWorkflowDiagram, getWorkflowDelta } from '../api';
+         getWorkflowDiagram, getWorkflowDelta, getWorkflowRefs } from '../api';
 import type { Coverage, SpineNode, Handoff, WorkflowDiagram, WorkflowDelta } from '../api';
 import { GitBranch, CheckCircle2, Circle, Ban, Loader2, Smartphone, Store, ArrowRight, Sparkles, Play, Map, GitCompare } from 'lucide-react';
 import ArchifyFrame from '../components/ArchifyFrame';
@@ -49,8 +49,10 @@ export default function WorkflowPage() {
   // renderer problem degrades to a note instead of blanking the page.
   const [diagram, setDiagram] = useState<WorkflowDiagram | null>(null);
   const [diagramLoading, setDiagramLoading] = useState(true);
-  const [baseRef, setBaseRef] = useState('main');
+  const [baseRef, setBaseRef] = useState('');   // filled from the server's comparable refs
   const [delta, setDelta] = useState<WorkflowDelta | null>(null);
+  const [refs, setRefs] = useState<string[]>([]);
+  const [refsError, setRefsError] = useState('');
   const [deltaLoading, setDeltaLoading] = useState(false);
 
   useEffect(() => {
@@ -66,6 +68,23 @@ export default function WorkflowPage() {
       .catch(e => setDiagram({ ok: false, reason: String(e) }))
       .finally(() => setDiagramLoading(false));
   }, []);
+
+  // Report WHY the ref list is empty. Swallowing the error and showing an empty
+  // list said "no comparable refs found" for a stale page, an expired session and
+  // a real empty repo alike — three very different problems, one wrong message.
+  const loadRefs = useCallback(async () => {
+    try {
+      const r = await getWorkflowRefs();
+      setRefs(r.refs);
+      setRefsError(r.refs.length ? '' : 'This repository has no ref containing catalog.py.');
+      setBaseRef(prev => (prev && r.refs.includes(prev)) ? prev : r.default);
+    } catch (e) {
+      setRefs([]);
+      setRefsError(String(e instanceof Error ? e.message : e));
+    }
+  }, []);
+
+  useEffect(() => { loadRefs(); }, [loadRefs]);
 
   const loadDelta = async () => {
     setDeltaLoading(true);
@@ -170,21 +189,35 @@ export default function WorkflowPage() {
         </h3>
         <p style={{ margin: '0 0 12px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
           The spine is defined in <code>automation/workflow/catalog.py</code>, so a change to it
-          changes this map. Compare a base ref against the working tree.
+          changes this map. Compare a base ref against the working tree — these are
+          branches of the platform repo, not of the app under test.
         </p>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 }}>
-          <input
+          <select
             value={baseRef}
             onChange={e => setBaseRef(e.target.value)}
-            placeholder="base ref (branch, tag or sha)"
             style={{ padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border-color)',
-                     background: 'transparent', color: 'inherit', font: 'inherit', width: 260 }}
-          />
+                     background: 'transparent', color: 'inherit', font: 'inherit', width: 300,
+                     cursor: 'pointer' }}
+          >
+            {refs.length === 0 && <option value="">{refsError ? 'Could not load refs' : 'Loading…'}</option>}
+            {refs.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
           <button className="btn" onClick={loadDelta} disabled={deltaLoading || !baseRef.trim()}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 16px' }}>
             {deltaLoading ? <Loader2 size={14} className="spin" /> : <GitCompare size={14} />} Compare
           </button>
+          {refsError && (
+            <button className="btn" onClick={loadRefs}
+              style={{ padding: '8px 14px' }}>Retry</button>
+          )}
         </div>
+        {refsError && (
+          <div style={{ marginBottom: 14, fontSize: '0.78rem', color: '#fbbf24' }}>
+            Could not load the ref list: {refsError}. If the page has been open a while,
+            reload it — the backend may have restarted since.
+          </div>
+        )}
 
         {delta?.ok && delta.summary && (
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>

@@ -57,8 +57,21 @@ def get_diagram(db: Session = Depends(get_db), current_user=Depends(get_current_
     return {"ok": True, "html": html}
 
 
+@router.get("/diagram/refs")
+def get_comparable_refs(current_user=Depends(get_current_user)):
+    """Platform refs the delta can actually be built from.
+
+    catalog.py was added later than `main`, so `main` cannot be compared — and the
+    branches of the apps under test are a different repository entirely. Both used
+    to fail here with a raw git error.
+    """
+    from automation.workflow.catalog_at_ref import comparable_refs
+    refs = comparable_refs()
+    return {"refs": refs, "default": refs[0] if refs else ""}
+
+
 @router.get("/diagram/delta")
-def get_diagram_delta(base_ref: str = "main", head_ref: str = "",
+def get_diagram_delta(base_ref: str = "", head_ref: str = "",
                       db: Session = Depends(get_db),
                       current_user=Depends(get_current_user)):
     """Before / Delta / After for the spine, comparing *base_ref* to *head_ref*.
@@ -77,10 +90,22 @@ def get_diagram_delta(base_ref: str = "main", head_ref: str = "",
     from automation.workflow.archify_ir import build_ir
     from automation.workflow.catalog_at_ref import spine_ir_at_ref
 
+    from automation.workflow.catalog_at_ref import comparable_refs
+
     built = _built_spine_ids(db)
+    usable = comparable_refs()
+    # Default to a ref that exists rather than to "main", which does not contain
+    # catalog.py and so always failed.
+    base_ref = (base_ref or "").strip() or (usable[0] if usable else "main")
+
     base_ir, why = spine_ir_at_ref(base_ref, built)
     if base_ir is None:
-        return {"ok": False, "reason": why}
+        hint = (f" Comparable refs in this repository: {', '.join(usable[:6])}."
+                if usable else "")
+        return {"ok": False, "reason":
+                f"{why} — base refs must exist in the PLATFORM repository "
+                f"(where automation/workflow/catalog.py lives), not in the repo of "
+                f"the app under test.{hint}"}
     if head_ref.strip():
         head_ir, why = spine_ir_at_ref(head_ref.strip(), built)
         if head_ir is None:

@@ -236,15 +236,42 @@ _ports: Dict[str, int] = {}
 
 
 def port_for(udid: str, preferred: Optional[int] = None) -> int:
-    """A stable WDA port for *udid*. Same device always gets the same port."""
+    """A stable WDA port for *udid*. Same device always gets the same port.
+
+    The assignment is MACHINE-global, not process-global. `_ports` alone gave the
+    first device in every process port 8100, so two processes driving two
+    different simulators on one Mac both asked for 8100 — which is exactly the
+    Consumer + Business case. The registry now holds the allocation, so every
+    process on the machine agrees, and a different Mac is free to reuse the same
+    number for its own device.
+
+    An explicitly *preferred* port still wins outright: the cross-app orchestrator
+    pins 8100/8101 itself, and that behaviour is unchanged.
+    """
     if not udid:
         return preferred or DEFAULT_WDA_PORT
     if preferred is not None:
         _ports[udid] = preferred
         return preferred
-    if udid not in _ports:
-        _ports[udid] = DEFAULT_WDA_PORT + len(_ports)
-    return _ports[udid]
+    if udid in _ports:
+        return _ports[udid]
+
+    # Machine-global allocation, keyed on the device's registry row.
+    try:
+        from automation.device_manager.reservation import wda_port_for_local_device
+        port = wda_port_for_local_device(udid)
+    except Exception as e:                      # registry unavailable
+        logger.warning("[WDA] machine-global port lookup failed for %s: %s", udid, e)
+        port = None
+
+    if port is None:
+        # Unregistered device or no database: fall back to the previous
+        # process-local scheme rather than refusing to run.
+        port = DEFAULT_WDA_PORT + len(_ports)
+        logger.warning("[WDA] no registry port for %s — using process-local %s", udid, port)
+
+    _ports[udid] = port
+    return port
 
 
 def is_healthy(port: int, timeout: float = 3.0) -> bool:

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from datetime import datetime
 import json
@@ -724,11 +725,26 @@ def poll_job(req: PollJobRequest, db: Session = Depends(get_db),
     response is returned, so a second agent polling concurrently can no longer
     see it. Anything already assigned/running/completed/failed/cancelled is
     never returned.
+
+    Machine-aware since Phase 4D.3: a job carrying a ``machine_id`` is only ever
+    offered to that machine. ``req.agent_id`` IS the machine identity — Phase 4D.1
+    made ``execution_agents.id`` stable across restarts and shared by a co-located
+    backend, so no hostname, provider, IP or UDID parsing is involved here.
+
+    ``machine_id IS NULL`` means "legacy run, match on the device alone", which is
+    every run created before 4D.2 (156 of them). Those keep working exactly as they
+    did: the machine predicate widens what is visible, it never narrows the legacy
+    path.
     """
-    # Strictly queued jobs only, FIFO by created_at.
+    machine_id = (req.agent_id or "").strip() or None
+
+    # Strictly queued jobs only, FIFO by created_at, and only jobs this MACHINE is
+    # allowed to run. Filtered in the query rather than in Python so an agent never
+    # loads another machine's jobs in the first place.
     queued_jobs = (
         db.query(TestRun)
         .filter(TestRun.job_state == "queued")
+        .filter(or_(TestRun.machine_id.is_(None), TestRun.machine_id == machine_id))
         .order_by(TestRun.created_at.asc())
         .all()
     )
@@ -745,6 +761,11 @@ def poll_job(req: PollJobRequest, db: Session = Depends(get_db),
             claimed = (
                 db.query(TestRun)
                 .filter(TestRun.id == job.id, TestRun.job_state == "queued")
+                # The same eligibility predicate as the SELECT above, so the atomic
+                # claim itself cannot hand a machine-pinned job to the wrong machine.
+                # The claim mechanism is otherwise untouched.
+                .filter(or_(TestRun.machine_id.is_(None),
+                            TestRun.machine_id == machine_id))
                 .update(
                     {
                         "job_state": "assigned",

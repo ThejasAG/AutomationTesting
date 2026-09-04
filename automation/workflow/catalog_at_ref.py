@@ -56,3 +56,36 @@ def spine_ir_at_ref(ref: str, built_ids: FrozenSet[str] = frozenset()
         return build_ir(built_ids, cat=mod), ""
     except Exception as e:
         return None, f"could not build the spine at {ref}: {type(e).__name__}: {e}"
+
+
+def comparable_refs() -> list:
+    """Refs whose tree actually contains catalog.py, newest-committed first.
+
+    Offering a free-text box invited two failures that look identical to a user
+    but are not: a ref from the wrong repository (the apps under test have their
+    own branches, and this reads the PLATFORM repo), and a real platform ref that
+    predates catalog.py. Listing only refs that can be compared removes both.
+    """
+    try:
+        p = subprocess.run(
+            ["git", "for-each-ref", "--sort=-committerdate",
+             "--format=%(refname:short)", "refs/heads", "refs/remotes"],
+            cwd=_ROOT, capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:
+        logger.warning("could not list refs: %s", e)
+        return []
+    if p.returncode != 0:
+        return []
+
+    refs, seen = [], set()
+    for name in p.stdout.split():
+        short = name[len("origin/"):] if name.startswith("origin/") else name
+        if short in seen or short == "HEAD":
+            continue
+        ok = subprocess.run(["git", "cat-file", "-e", f"{name}:{CATALOG_PATH}"],
+                            cwd=_ROOT, capture_output=True, timeout=10)
+        if ok.returncode == 0:
+            seen.add(short)
+            refs.append(name)
+    return refs
