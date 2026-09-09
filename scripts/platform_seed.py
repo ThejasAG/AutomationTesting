@@ -45,6 +45,26 @@ SEED = Path(__file__).resolve().parents[1] / "seeds" / "platform.json"
 # everything on import. A project is its git_url + branch; a scenario is its name.
 _PROJECT_FIELDS = ("name", "git_url", "default_branch", "platform", "repo_type",
                    "project_type", "app_bundle_id", "app_path", "description", "status")
+def _as_list(value) -> list:
+    """A scenario's steps/covers as a real list.
+
+    Decodes a JSON string exactly ONE level — never recursively, because a
+    legitimate list may itself contain a string that looks like JSON. Anything
+    that does not decode to a list becomes [], the column's own default.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (ValueError, TypeError):
+            return []
+        return decoded if isinstance(decoded, list) else []
+    return []
+
+
 _SCENARIO_FIELDS = ("name", "description", "steps", "covers", "bundle_id", "device_id")
 
 
@@ -101,8 +121,11 @@ def export() -> None:
             "projects": [{f: getattr(p, f, None) for f in _PROJECT_FIELDS} for p in projects],
             "scenarios": [
                 {**{f: getattr(s, f, None) for f in _SCENARIO_FIELDS},
-                 "steps": json.dumps(_redact(
-                     json.loads(s.steps) if isinstance(s.steps, str) else (s.steps or []))),
+                 # A real list, not json.dumps(...). These land in a JSON column,
+                 # so dumping first made SQLAlchemy encode an already-encoded
+                 # string — which is how five rows came to hold '"[…]"'.
+                 "steps": _redact(_as_list(s.steps)),
+                 "covers": _as_list(s.covers),
                  # Store the project's KEY, not its per-machine id.
                  "project_key": _project_key(by_id[s.project_id]) if s.project_id in by_id else None}
                 for s in scenarios
@@ -180,9 +203,10 @@ def do_import(scenarios_only: bool = False) -> None:
                 project_id=proj.id if proj else None,
                 created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
                 **{**{f: row.get(f) for f in _SCENARIO_FIELDS},
-                   "steps": json.dumps(_unredact(
-                       json.loads(row["steps"]) if isinstance(row.get("steps"), str)
-                       else (row.get("steps") or [])))}))
+                   # _as_list() decodes an older seed file's encoded string
+                   # exactly once; a canonical list passes straight through.
+                   "steps": _unredact(_as_list(row.get("steps"))),
+                   "covers": _as_list(row.get("covers"))}))
             have_s.add(name)
             added_s += 1
         db.commit()

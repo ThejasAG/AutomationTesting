@@ -480,8 +480,12 @@ def run_ticket_scenarios(ticket_id: str) -> None:
                 steps=(setup_steps + (sc.steps or [])), name=sc.name, save=False, prepare=False,
             )
             try:
-                with SessionLocal() as db:
-                    out = run_scenario_headless(req, db)
+                # No session across the run. bundle_id is already resolved above
+                # (sc.bundle_id or default_bundle), which is the only thing
+                # resolve_run() would have used a session for — so holding one
+                # open for the length of an Appium run bought nothing and left an
+                # idle-in-transaction connection on PostgreSQL.
+                out = run_scenario_headless(req)
                 if not out.get("ok"):
                     all_passed = False
                 last_run = out.get("run_id") or last_run

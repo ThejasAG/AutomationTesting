@@ -118,6 +118,9 @@ def run_pr_autotest(project_id: str, pr_number: int, post_comment: bool = True) 
         if not project:
             return {"ok": False, "error": "project not found"}
         owner, repo = _owner_repo(project.git_url)
+        # Read it here, inside the short session, so the execution loop below
+        # needs no session at all.
+        project_bundle_id = project.app_bundle_id
         scenarios = [
             {"id": s.id, "name": s.name, "description": s.description, "steps": s.steps or [], "covers": s.covers or []}
             for s in db.query(SavedScenario).filter(
@@ -151,14 +154,17 @@ def run_pr_autotest(project_id: str, pr_number: int, post_comment: bool = True) 
             if not prep.ok:
                 prep_error = (prep.error or "prepare failed")[:200]
             else:
-                with SessionLocal() as db:
-                    for sc in selected:
-                        req = ScenarioRequest(
-                            project_id=project_id, steps=sc["steps"], device_id=device,
-                            name=sc["name"], save=False, prepare=False,
-                        )
-                        outcome = run_scenario_headless(req, db)
-                        results.append({"name": sc["name"], "outcome": outcome})
+                # No session held across the scenario loop. These runs reach
+                # 28 minutes in production; on PostgreSQL that was one
+                # idle-in-transaction connection for the entire duration.
+                for sc in selected:
+                    req = ScenarioRequest(
+                        project_id=project_id, steps=sc["steps"], device_id=device,
+                        bundle_id=project_bundle_id,
+                        name=sc["name"], save=False, prepare=False,
+                    )
+                    outcome = run_scenario_headless(req)
+                    results.append({"name": sc["name"], "outcome": outcome})
 
     comment = _build_comment(plan, results, prepared=not prep_error, prep_error=prep_error)
     posted = False

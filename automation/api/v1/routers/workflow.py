@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from automation.auth.security import get_current_user
 from automation.database.config import get_db
-from automation.database.models import SavedScenario
+from automation.database.models import SavedScenario, TestProject
 from automation.workflow.catalog import (
     SPINE, CONSUMER_FLOW, BUSINESS_FLOW, BRANCH_NODES, CROSS_APP_EDGES,
     WF_EDGES, CATALOG, summary, plan_path, all_nodes,
@@ -230,18 +230,26 @@ def recreate(goal: str, db: Session = Depends(get_db), current_user=Depends(get_
     by_name = {s.name: s for s in scenarios}
     ordered = [by_name[n] for n in scen_names if n in by_name]
 
+    # Resolve each scenario's fallback bundle id BEFORE the thread starts, while a
+    # session is cheap. Holding one open across the Appium runs left an
+    # idle-in-transaction connection for the whole execution on PostgreSQL.
+    fallback_bundles = {}
+    for sc in ordered:
+        if not sc.bundle_id and sc.project_id and sc.project_id not in fallback_bundles:
+            proj = db.query(TestProject).filter(TestProject.id == sc.project_id).first()
+            fallback_bundles[sc.project_id] = proj.app_bundle_id if proj else None
+
     def _run():
         from automation.scenarios import run_records  # noqa: F401 — backend run bookkeeping
         from automation.scenarios.service import run_scenario_headless, ScenarioRequest
-        from automation.database.config import SessionLocal
         for sc in ordered:
             try:
                 req = ScenarioRequest(
                     project_id=sc.project_id or "", device_id=sc.device_id or "",
-                    bundle_id=sc.bundle_id, steps=sc.steps or [],
+                    bundle_id=sc.bundle_id or fallback_bundles.get(sc.project_id),
+                    steps=sc.steps or [],
                     name=f"[workflow] {sc.name}", save=False, prepare=False)
-                with SessionLocal() as _db:
-                    run_scenario_headless(req, _db)
+                run_scenario_headless(req)
             except Exception:
                 pass
 

@@ -126,7 +126,13 @@
     {
       "name": "Browse & add to cart",
       "description": "Open a restaurant, add a product, choose order later",
-      "steps": "[\"Open app\", \"click Nylai Kitchen 2\", \"open menu section\", \"add any product\", \"choose order later\"]",
+      "steps": [
+        "Open app",
+        "click Nylai Kitchen 2",
+        "open menu section",
+        "add any product",
+        "choose order later"
+      ],
       "covers": null,
       "bundle_id": null,
       "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
@@ -135,8 +141,19 @@
     {
       "name": "Business: Assign table + add item + send to kitchen",
       "description": "Building block from the business flow spec (real testIDs). Needs one live tuning pass.",
-      "steps": "[\"click NylaiTestReservedCard\", \"click T0AssignAnyBtn\", \"click AssignTableBtn\", \"click addItemsBtn\", \"click CocaColaItem\", \"click assignToBtn\", \"click selectAll\", \"click assignProductsBtn\", \"click selectAllItemsBtn\", \"click sendItemsBtn\"]",
-      "covers": "[]",
+      "steps": [
+        "click NylaiTestReservedCard",
+        "click T0AssignAnyBtn",
+        "click AssignTableBtn",
+        "click addItemsBtn",
+        "click CocaColaItem",
+        "click assignToBtn",
+        "click selectAll",
+        "click assignProductsBtn",
+        "click selectAllItemsBtn",
+        "click sendItemsBtn"
+      ],
+      "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
       "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
@@ -144,8 +161,17 @@
     {
       "name": "Business: Book event (waiter)",
       "description": "Building block from the business flow spec (real testIDs). Needs one live tuning pass.",
-      "steps": "[\"click addNewEvent\", \"type Nylai in firstName\", \"type Test in lastName\", \"click anyBtn\", \"select the 1st time slot\", \"type 6911234567 in mobileInputBtn\", \"scroll down\", \"click saveBtn\"]",
-      "covers": "[]",
+      "steps": [
+        "click addNewEvent",
+        "type Nylai in firstName",
+        "type Test in lastName",
+        "click anyBtn",
+        "select the 1st time slot",
+        "type 6911234567 in mobileInputBtn",
+        "scroll down",
+        "click saveBtn"
+      ],
+      "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
       "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
@@ -153,8 +179,18 @@
     {
       "name": "Business: Kitchen mark ready",
       "description": "Building block from the business flow spec (real testIDs). Needs one live tuning pass.",
-      "steps": "[\"open app\", \"type ${VYA_BUSINESS_KITCHEN_USER} in emailValue\", \"type ${VYA_BUSINESS_KITCHEN_PASSWORD} in passwordValue\", \"click clickCheckBox\", \"click signInBtn\", \"click inProgressOrderCard\", \"click CocaCola1\", \"click orderReadyBtn\", \"click orderCloseBtn\"]",
-      "covers": "[]",
+      "steps": [
+        "open app",
+        "type ${VYA_BUSINESS_KITCHEN_USER} in emailValue",
+        "type ${VYA_BUSINESS_KITCHEN_PASSWORD} in passwordValue",
+        "click clickCheckBox",
+        "click signInBtn",
+        "click inProgressOrderCard",
+        "click CocaCola1",
+        "click orderReadyBtn",
+        "click orderCloseBtn"
+      ],
+      "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
       "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
@@ -162,8 +198,15 @@
     {
       "name": "Business: Login as waiter",
       "description": "Building block from the business flow spec (real testIDs). Needs one live tuning pass.",
-      "steps": "[\"open app\", \"type ${VYA_BUSINESS_WAITER_USER} in emailValue\", \"type ${VYA_BUSINESS_WAITER_PASSWORD} in passwordValue\", \"click clickCheckBox\", \"click signInBtn\", \"verify addNewEvent is visible\"]",
-      "covers": "[]",
+      "steps": [
+        "open app",
+        "type ${VYA_BUSINESS_WAITER_USER} in emailValue",
+        "type ${VYA_BUSINESS_WAITER_PASSWORD} in passwordValue",
+        "click clickCheckBox",
+        "click signInBtn",
+        "verify addNewEvent is visible"
+      ],
+      "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
       "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
@@ -171,8 +214,16 @@
     {
       "name": "Business: Serve + pay + close (waiter)",
       "description": "Building block from the business flow spec (real testIDs). Needs one live tuning pass.",
-      "steps": "[\"click selectAllItemsBtn\", \"click serveItemsBtn\", \"click notifyPaymentBtn\", \"click Yes\", \"click cashPaymentBtn\", \"click paymentConfirmBtn\", \"click closeTableBtn\"]",
-      "covers": "[]",
+      "steps": [
+        "click selectAllItemsBtn",
+        "click serveItemsBtn",
+        "click notifyPaymentBtn",
+        "click Yes",
+        "click cashPaymentBtn",
+        "click paymentConfirmBtn",
+        "click closeTableBtn"
+      ],
+      "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
       "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
@@ -180,7 +231,11 @@
     {
       "name": "Navigate to wallet",
       "description": "Bottom-tab navigation to the wallet",
-      "steps": "[\"Open app\", \"tap wallet tab\", \"verify wallet\"]",
+      "steps": [
+        "Open app",
+        "tap wallet tab",
+        "verify wallet"
+      ],
       "covers": null,
       "bundle_id": null,
       "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
@@ -189,7 +244,13 @@
     {
       "name": "Preorder a time slot",
       "description": "Reserve a slot at a restaurant",
-      "steps": "[\"Open app\", \"click Nylai Kitchen 2\", \"select 1 hr\", \"select the 2nd time slot\", \"click book now\"]",
+      "steps": [
+        "Open app",
+        "click Nylai Kitchen 2",
+        "select 1 hr",
+        "select the 2nd time slot",
+        "click book now"
+      ],
       "covers": null,
       "bundle_id": null,
       "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
@@ -198,7 +259,15 @@
     {
       "name": "Reach checkout & pay",
       "description": "Full path from home to payment",
-      "steps": "[\"Open app\", \"click Nylai Kitchen 2\", \"open menu section\", \"add any product\", \"go to cart\", \"checkout\", \"pay\"]",
+      "steps": [
+        "Open app",
+        "click Nylai Kitchen 2",
+        "open menu section",
+        "add any product",
+        "go to cart",
+        "checkout",
+        "pay"
+      ],
       "covers": null,
       "bundle_id": null,
       "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
@@ -207,7 +276,11 @@
     {
       "name": "Smoke \u2014 app launches",
       "description": "Home loads without the red screen",
-      "steps": "[\"Open app\", \"verify search bar\", \"verify bottom tabs\"]",
+      "steps": [
+        "Open app",
+        "verify search bar",
+        "verify bottom tabs"
+      ],
       "covers": null,
       "bundle_id": null,
       "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
@@ -216,7 +289,14 @@
     {
       "name": "book a table",
       "description": "",
-      "steps": "[\"click Nylai kitchen 2\", \"select 1 hr\", \"select the 2nd time slot\", \"click book now\", \"select preorder\", \"add items\"]",
+      "steps": [
+        "click Nylai kitchen 2",
+        "select 1 hr",
+        "select the 2nd time slot",
+        "click book now",
+        "select preorder",
+        "add items"
+      ],
       "covers": null,
       "bundle_id": "",
       "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",

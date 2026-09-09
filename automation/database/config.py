@@ -21,9 +21,31 @@ if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite
 
 # For SQLite fallback during early migration tests if Postgres fails
 if DATABASE_URL.startswith("sqlite"):
+    # SQLite is a local file: there is no connection to go stale, and the pool
+    # kwargs below are not merely useless here — in-memory SQLite uses
+    # SingletonThreadPool, which REJECTS pool_size/max_overflow outright. Keep
+    # this branch exactly as it was.
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    engine = create_engine(DATABASE_URL)
+    # A networked database can hand back a connection that died while it sat in
+    # the pool — closed by a firewall, a load balancer, or a server restart.
+    # Without pre_ping that arrives as an OperationalError mid-request instead of
+    # a transparent reconnect, and recycle keeps connections younger than the
+    # idle reapers that usually sit in front of PostgreSQL.
+    #
+    # 5 + 10 is sized for the single uvicorn process this platform actually runs
+    # (scripts/supervise_backend.sh passes no --workers). Adding workers
+    # multiplies this budget per process and must be checked against the
+    # server's max_connections.
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        connect_args={"connect_timeout": 10},
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

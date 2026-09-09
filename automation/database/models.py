@@ -2,9 +2,56 @@ from sqlalchemy import (Column, String, Integer, DateTime, Float, ForeignKey, Te
                         Boolean, UniqueConstraint)
 from sqlalchemy.orm import relationship
 from datetime import datetime
+import json
 import uuid
 
 from .config import Base
+
+from sqlalchemy.types import TypeDecorator
+
+
+class StringList(TypeDecorator):
+    """A JSON list of strings that always reads back as a list.
+
+    Stored exactly as JSON — no schema change, works on SQLite and PostgreSQL
+    alike. What it adds is a guarantee on the Python side: whatever is already
+    in the column, loading it yields a list.
+
+    scripts/platform_seed.py used to json.dumps() into this column, so
+    SQLAlchemy encoded an already-encoded string and five rows came to hold
+    '"[\"open app\", …]"'. Those rows loaded as `str`, and iterating a string
+    yields characters — a 2-step scenario became 20 single-character steps. The
+    seed bug is fixed at its source; this makes the corruption unreachable
+    rather than merely repaired, and heals rows written by any older build.
+
+    Decoding is deliberately ONE level deep. A legitimate list may contain a
+    string that happens to look like JSON, and unwrapping that would destroy
+    real data.
+    """
+
+    impl = JSON
+    cache_ok = True
+
+    @staticmethod
+    def _coerce(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except (ValueError, TypeError):
+                return []
+            return decoded if isinstance(decoded, list) else []
+        return []
+
+    def process_bind_param(self, value, dialect):
+        return self._coerce(value)
+
+    def process_result_value(self, value, dialect):
+        return self._coerce(value)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -479,11 +526,11 @@ class SavedScenario(Base):
     project_id = Column(String(36), ForeignKey("test_projects.id"), nullable=True, index=True)
     bundle_id = Column(String(255), nullable=True)     # overrides the project's bundle id
     device_id = Column(String(255), nullable=True)     # target simulator UDID
-    steps = Column(JSON, default=list)                 # ["tap Book Table", "select date", …]
+    steps = Column(StringList, default=list)           # ["tap Book Table", "select date", …]
     # Screens/modules this scenario exercises (e.g. ["Store", "Cart"]). Used for
     # graph-driven smart test selection: run a scenario only when a PR's affected
     # files touch what it covers.
-    covers = Column(JSON, default=list)
+    covers = Column(StringList, default=list)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
