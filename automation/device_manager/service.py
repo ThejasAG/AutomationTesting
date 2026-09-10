@@ -456,6 +456,7 @@ def resolve_ios_device_record(
     (Phase 4D.1 showed it flips with whichever writer was last), never the
     hostname, and never anything parsed out of a udid.
     """
+    from sqlalchemy import func as sa_func
     from automation.database.config import SessionLocal
     from automation.database.models import DeviceRecord
 
@@ -467,7 +468,14 @@ def resolve_ios_device_record(
             q = q.filter(DeviceRecord.machine_id == machine_id)
 
         if device_id:
+            # A udid is case-insensitive: CoreSimulator reports uppercase, but
+            # values reaching here have been through JSON, seeds and hand editing.
+            # The exact match is tried first so the udid index is still used, and
+            # the case-folded comparison only runs when that misses.
             rows = q.filter(DeviceRecord.udid == device_id).all()
+            if not rows:
+                rows = q.filter(sa_func.upper(DeviceRecord.udid)
+                                == device_id.upper()).all()
             if not rows:
                 return None, None, (
                     f"device {device_id} is not registered"
@@ -494,6 +502,14 @@ def resolve_ios_device_record(
                         f"{name!r} is registered on {len(machines)} machines "
                         f"({', '.join(machines)}) — name a machine to disambiguate"
                     )
+                # Same machine, same name, different udids: naming a machine
+                # cannot separate these, so the caller must name a udid. Returning
+                # rows[0] would make the chosen device depend on row order.
+                udids = sorted(r.udid or "" for r in rows)
+                return None, None, (
+                    f"{len(rows)} simulators named {name!r} are registered on machine "
+                    f"{machines[0]} ({', '.join(udids)}) — name a udid to disambiguate"
+                )
             return rows[0].machine_id, rows[0].udid, None
 
         # No specific device asked for: pick a sensible registered one.

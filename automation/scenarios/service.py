@@ -158,6 +158,72 @@ def set_run_store(store) -> None:
     _run_store = store
 
 
+def _device_registry():
+    """The backend's machine-aware device resolver, or None in the agent.
+
+    Phase 4F.4 keeps this module free of FastAPI, SQLAlchemy and the database so
+    the agent can run it. The backend injects the database half via
+    set_run_store() (automation/scenarios/run_records.py), and device lookups go
+    through that same hook rather than importing the database here.
+
+    None means "no registry in this process" -- the agent's normal state -- and
+    resolution then leaves the selector exactly as it found it.
+    """
+    return getattr(_run_store, "resolve_device", None) if _run_store else None
+
+
+def resolve_device_selector(selector: Optional[str],
+                            machine_id: Optional[str] = None) -> Optional[str]:
+    """The udid to drive, from whatever device a scenario was authored against.
+
+    A scenario written on one Mac stores the udid of the simulator it was
+    authored against; on a second Mac that udid does not exist, which is the
+    platform's largest portability blocker. The stored value is resolved through
+    the SAME machine-aware registry the queue paths use
+    (device_manager.resolve_ios_device_record) -- there is deliberately no second
+    resolver, and nothing here shells out: the local simulator list can only
+    answer for the backend's own Mac, and a udid means nothing without the
+    machine that owns it.
+
+      1. a udid registered to this machine -> returned unchanged (canonical case)
+      2. a udid registered elsewhere       -> its registered NAME, re-resolved here
+      3. a device name                     -> resolved on this machine
+      4. several candidates                -> ScenarioError, never a guess
+      5. no registry in this process       -> unchanged, exactly as before
+
+    Resolution UPGRADES a device id where it can and otherwise gets out of the
+    way: an unreachable registry is not a new way for a run to fail. Only a
+    genuinely ambiguous or contradicted request raises.
+
+    *machine_id* defaults to the machine the registry considers local. Passing it
+    explicitly is how a caller disambiguates one udid existing on two machines.
+    """
+    if not selector or not selector.strip():
+        return selector
+
+    registry = _device_registry()
+    if registry is None:
+        return selector                       # agent: no registry to ask
+
+    sel = selector.strip()
+    try:
+        resolved, note, ambiguous = registry(sel, machine_id)
+    except ScenarioError:
+        raise
+    except Exception as e:                    # registry down: behave as before
+        logger.debug("device registry unavailable, leaving %r alone: %s", sel, e)
+        return selector
+
+    if resolved:
+        if resolved != sel:
+            logger.info("scenario device %r resolved to %s", sel, resolved)
+        return resolved
+    if ambiguous:
+        raise ScenarioError(400, f"could not resolve device {sel!r}: {note}")
+    logger.debug("device %r left as-is: %s", sel, note)
+    return selector
+
+
 def resolve_run(req: "ScenarioRequest", db=None):
     """Validate the request and resolve what execution needs.
 
@@ -183,6 +249,21 @@ def resolve_run(req: "ScenarioRequest", db=None):
     steps = [s for s in req.steps if s.strip()]
     if not steps:
         raise ScenarioError(400, "No scenario steps provided.")
+
+    # Device resolution is a BACKEND concern, gated on the caller passing a
+    # session rather than on _run_store being set. run_records self-registers on
+    # import, so in any process that has imported it -- the test suite, a mixed
+    # deployment -- _run_store is set even when the caller is the agent, and
+    # keying on it would make the agent open the sessions Phase 4F.4a removed.
+    # The agent passes db=None and resolves nothing: it was handed a concrete
+    # device by the job it claimed, and re-resolving it here could only move the
+    # run onto a device the scheduler did not pick.
+    if db is not None:
+        resolved = resolve_device_selector(req.device_id)
+        if resolved and resolved != req.device_id:
+            logger.info("scenario device %r resolved to %s on this machine",
+                        req.device_id, resolved)
+            req.device_id = resolved
 
     repo_path = repository_manager.get_repo_path(req.project_id)
     return bundle_id, steps, repo_path

@@ -135,7 +135,7 @@
       ],
       "covers": null,
       "bundle_id": null,
-      "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
+      "device_id": "iPhone 16 Pro",
       "project_key": "https://github.com/xorstack-admin/vya-consumer.git@main|Consumer App"
     },
     {
@@ -155,7 +155,7 @@
       ],
       "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
-      "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
+      "device_id": "iPad Pro 11-inch (M4)",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
     },
     {
@@ -173,7 +173,7 @@
       ],
       "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
-      "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
+      "device_id": "iPad Pro 11-inch (M4)",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
     },
     {
@@ -192,7 +192,7 @@
       ],
       "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
-      "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
+      "device_id": "iPad Pro 11-inch (M4)",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
     },
     {
@@ -208,7 +208,7 @@
       ],
       "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
-      "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
+      "device_id": "iPad Pro 11-inch (M4)",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
     },
     {
@@ -225,7 +225,7 @@
       ],
       "covers": [],
       "bundle_id": "org.vyapy.sarls.vyabusinessipad",
-      "device_id": "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",
+      "device_id": "iPad Pro 11-inch (M4)",
       "project_key": "https://github.com/xorstack-admin/vya-business.git@main|Buisness App"
     },
     {
@@ -238,7 +238,7 @@
       ],
       "covers": null,
       "bundle_id": null,
-      "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
+      "device_id": "iPhone 16 Pro",
       "project_key": "https://github.com/xorstack-admin/vya-consumer.git@main|Consumer App"
     },
     {
@@ -253,7 +253,7 @@
       ],
       "covers": null,
       "bundle_id": null,
-      "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
+      "device_id": "iPhone 16 Pro",
       "project_key": "https://github.com/xorstack-admin/vya-consumer.git@main|Consumer App"
     },
     {
@@ -270,7 +270,7 @@
       ],
       "covers": null,
       "bundle_id": null,
-      "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
+      "device_id": "iPhone 16 Pro",
       "project_key": "https://github.com/xorstack-admin/vya-consumer.git@main|Consumer App"
     },
     {
@@ -283,7 +283,7 @@
       ],
       "covers": null,
       "bundle_id": null,
-      "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
+      "device_id": "iPhone 16 Pro",
       "project_key": "https://github.com/xorstack-admin/vya-consumer.git@main|Consumer App"
     },
     {
@@ -299,7 +299,7 @@
       ],
       "covers": null,
       "bundle_id": "",
-      "device_id": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
+      "device_id": "iPhone 16 Pro",
       "project_key": "https://github.com/xorstack-admin/vya-consumer.git@main|Consumer App"
     }
   ]
