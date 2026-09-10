@@ -718,22 +718,105 @@ class AppBuilder:
             return msg
         return None
 
+    @staticmethod
+    def _declared_entry_points(meta: Dict[str, Any]) -> List[str]:
+        """The files a package promises for its PRIMARY entry point.
+
+        Deliberately narrow. The first version of this checked `main` and
+        `module` only and missed the reported failure entirely: real axios has
+        `main: "index.js"`, which is present, while the file Metro could not
+        resolve (`dist/browser/axios.cjs`) appears only under `exports["."]`.
+
+        The correction is not "check every path a manifest names". Checking all
+        of `exports` flagged three healthy packages in this platform's own
+        clones — react-day-picker ships no `./examples`, lucide-react no
+        `./dist/cjs/dynamic.js` — because a secondary subpath only has to
+        resolve if something actually imports it. Publishers routinely strip
+        those from the tarball.
+
+        So: `main`/`module`/`react-native`, plus the conditions under
+        `exports["."]` — the paths that decide whether `require('the-package')`
+        works at all, which is the thing a build cannot survive missing.
+        """
+        out: List[str] = []
+
+        def walk(node):
+            if isinstance(node, str):
+                # `*` marks a subpath PATTERN ("./lib/*"), a template Node expands
+                # per import rather than a file that must exist.
+                if node.startswith("./") and "*" not in node:
+                    out.append(node)
+            elif isinstance(node, dict):
+                for v in node.values():
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+
+        for key in ("main", "module", "react-native"):
+            v = meta.get(key)
+            if isinstance(v, str) and v:
+                out.append(v)
+
+        exports = meta.get("exports")
+        if isinstance(exports, str):
+            walk(exports)
+        elif isinstance(exports, dict):
+            # Only the root subpath. "." is the package itself; everything else
+            # ("./styles.css", "./examples") is optional until someone imports it.
+            walk(exports.get("."))
+
+        return out
+
+    def _resolves(self, pkg_dir: str, rel: str) -> bool:
+        """Whether one declared path resolves the way a bundler would.
+
+        Node and Metro both accept an extensionless path, a directory with an
+        index, and a handful of extensions, so a literal isfile() would report
+        false failures on packages that are perfectly fine.
+        """
+        target = os.path.normpath(os.path.join(pkg_dir, rel))
+        if os.path.isfile(target):
+            return True
+        # Metro's own extension list, including the platform variants React
+        # Native resolves ('js/ToolbarAndroid' is shipped only as
+        # ToolbarAndroid.android.js / .ios.js). The reported error printed this
+        # very list; missing them flagged healthy packages as broken.
+        for ext in (".js", ".cjs", ".mjs", ".json", ".ts", ".tsx", ".node",
+                    ".native.js", ".ios.js", ".android.js",
+                    ".native.ts", ".ios.ts", ".android.ts",
+                    ".native.tsx", ".ios.tsx", ".android.tsx",
+                    ".native.json", ".ios.json", ".android.json"):
+            if os.path.isfile(target + ext):
+                return True
+        if os.path.isdir(target):
+            for idx in ("index.js", "index.cjs", "index.mjs", "index.json"):
+                if os.path.isfile(os.path.join(target, idx)):
+                    return True
+            return True          # a directory with no index is still a real dir
+        return False
+
     def _unusable_node_modules(self, repo_path: str) -> List[str]:
         """Dependencies declared in package.json that node_modules cannot resolve.
 
         `os.path.isdir("node_modules")` is not a readiness check. An install that
         was interrupted, or a tree copied between machines, leaves the directory
-        present and each package's package.json in place while the code the
-        `main` field points at is missing. Metro then fails deep inside module
-        resolution with an error that names axios but has nothing to do with it:
+        present and each package's package.json in place while the files those
+        manifests point at are missing. Metro then fails deep inside module
+        resolution with an error that names one package but is really about the
+        tree:
 
             the package `.../node_modules/axios/package.json` was successful ...
             this package itself specifies a `main` module field that could not
-            be resolved ... Indeed, none of these files exist
+            be resolved (`.../node_modules/axios/dist/browser/axios.cjs`)
+            Indeed, none of these files exist
 
-        So resolution is checked the way the bundler checks it: read each
-        package's own `main`/`module` entry point and confirm that file is
-        actually on disk. Returns the names that fail, [] when the tree is sound.
+        Note what that says: Metro calls it a "main module field", but on real
+        axios `main` is index.js and the unresolvable path comes from `exports`.
+        Every entry point a manifest declares is therefore checked, not just the
+        one Metro's wording blames.
+
+        Returns the names that fail, [] when the tree is sound.
         """
         pkg_json = self._read_json(os.path.join(repo_path, "package.json")) or {}
         declared = list((pkg_json.get("dependencies") or {}).keys())
@@ -747,18 +830,13 @@ class AppBuilder:
             if meta is None:
                 broken.append(name)
                 continue
-            # A package with no main/module is legitimate (types-only, or an
-            # index.js resolved by convention) -- only a STATED entry point that
-            # is absent proves the tree is incomplete.
-            entry = meta.get("main") or meta.get("module")
-            if not entry:
-                continue
-            target = os.path.join(pkg_dir, entry)
-            if os.path.isfile(target) or os.path.isdir(target) \
-                    or os.path.isfile(target + ".js") \
-                    or os.path.isfile(os.path.join(target, "index.js")):
-                continue
-            broken.append(name)
+            # A package that declares no entry point at all is legitimate
+            # (types-only, or index.js resolved by convention).
+            missing = [e for e in self._declared_entry_points(meta)
+                       if not self._resolves(pkg_dir, e)]
+            if missing:
+                logger.debug("%s cannot resolve: %s", name, ", ".join(missing[:3]))
+                broken.append(name)
         return broken
 
     def ensure_node_modules(self, repo_path: str) -> Tuple[bool, str]:
@@ -788,6 +866,16 @@ class AppBuilder:
         pm = self.detect_package_manager(repo_path)
         logger.info("%s — installing with %s in %s", why, " ".join(pm), repo_path)
 
+        # KNOWN LIMIT: a package manager that considers the tree already
+        # installed will no-op here (yarn finished a 99-dependency project in
+        # 4.4s on the machine this was reported from) and only re-run
+        # postinstall. That WAS the repair in the reported case -- the tree had
+        # been left mid-postinstall, and patch-package completing fixed it -- but
+        # it is not a rebuild. A tree that needs one gets a clear failure from
+        # the re-verify below rather than a silent bad build; escalating to
+        # `rm -rf node_modules` is deliberately not done here, because destroying
+        # a working tree on a wrong guess costs more than the failure does.
+        # ponytail: install-only repair, add a forced rebuild if a stuck tree recurs
         cmd = pm + ["install"]
         ok, out = _run(cmd, cwd=repo_path, timeout=NPM_INSTALL_TIMEOUT)
         if not ok and pm[0] == "npm" and "ERESOLVE" in (out or ""):
