@@ -718,6 +718,98 @@ class AppBuilder:
             return msg
         return None
 
+    def _unusable_node_modules(self, repo_path: str) -> List[str]:
+        """Dependencies declared in package.json that node_modules cannot resolve.
+
+        `os.path.isdir("node_modules")` is not a readiness check. An install that
+        was interrupted, or a tree copied between machines, leaves the directory
+        present and each package's package.json in place while the code the
+        `main` field points at is missing. Metro then fails deep inside module
+        resolution with an error that names axios but has nothing to do with it:
+
+            the package `.../node_modules/axios/package.json` was successful ...
+            this package itself specifies a `main` module field that could not
+            be resolved ... Indeed, none of these files exist
+
+        So resolution is checked the way the bundler checks it: read each
+        package's own `main`/`module` entry point and confirm that file is
+        actually on disk. Returns the names that fail, [] when the tree is sound.
+        """
+        pkg_json = self._read_json(os.path.join(repo_path, "package.json")) or {}
+        declared = list((pkg_json.get("dependencies") or {}).keys())
+        if not declared:
+            return []
+
+        broken: List[str] = []
+        for name in declared:
+            pkg_dir = os.path.join(repo_path, "node_modules", *name.split("/"))
+            meta = self._read_json(os.path.join(pkg_dir, "package.json"))
+            if meta is None:
+                broken.append(name)
+                continue
+            # A package with no main/module is legitimate (types-only, or an
+            # index.js resolved by convention) -- only a STATED entry point that
+            # is absent proves the tree is incomplete.
+            entry = meta.get("main") or meta.get("module")
+            if not entry:
+                continue
+            target = os.path.join(pkg_dir, entry)
+            if os.path.isfile(target) or os.path.isdir(target) \
+                    or os.path.isfile(target + ".js") \
+                    or os.path.isfile(os.path.join(target, "index.js")):
+                continue
+            broken.append(name)
+        return broken
+
+    def ensure_node_modules(self, repo_path: str) -> Tuple[bool, str]:
+        """Make node_modules usable before anything tries to bundle from it.
+
+        node_modules is gitignored, so a fresh clone on another machine never has
+        one -- and an interrupted install leaves a worse state than none at all,
+        because every existence check passes while resolution fails. Both are
+        repaired the same way: install with the manager that owns the lockfile,
+        then re-verify rather than trusting the exit code.
+
+        Returns ``(ok, message)``. A project that is not a JS project, or whose
+        tree is already sound, is a no-op.
+        """
+        if not os.path.isfile(os.path.join(repo_path, "package.json")):
+            return True, "not a JavaScript project."
+
+        present = os.path.isdir(os.path.join(repo_path, "node_modules"))
+        broken = self._unusable_node_modules(repo_path) if present else []
+        if present and not broken:
+            return True, "node_modules is usable."
+
+        why = ("node_modules is missing" if not present else
+               f"node_modules cannot resolve {len(broken)} dependencies "
+               f"({', '.join(sorted(broken)[:5])}"
+               f"{', …' if len(broken) > 5 else ''})")
+        pm = self.detect_package_manager(repo_path)
+        logger.info("%s — installing with %s in %s", why, " ".join(pm), repo_path)
+
+        cmd = pm + ["install"]
+        ok, out = _run(cmd, cwd=repo_path, timeout=NPM_INSTALL_TIMEOUT)
+        if not ok and pm[0] == "npm" and "ERESOLVE" in (out or ""):
+            # The peer-dependency conflicts every mature RN app carries. This is
+            # how the ecosystem actually installs them; preparation.py takes the
+            # same fallback for the same reason.
+            logger.warning("npm ERESOLVE — retrying with --legacy-peer-deps")
+            ok, out = _run(cmd + ["--legacy-peer-deps"], cwd=repo_path,
+                           timeout=NPM_INSTALL_TIMEOUT)
+
+        # Never trust the exit code alone: a install can report success and still
+        # leave the tree unresolvable, which is the failure this exists to catch.
+        still_broken = self._unusable_node_modules(repo_path)
+        if not os.path.isdir(os.path.join(repo_path, "node_modules")) or still_broken:
+            detail = (f"still cannot resolve: {', '.join(sorted(still_broken)[:8])}"
+                      if still_broken else "node_modules was not created")
+            return False, (
+                f"Dependency install did not produce a usable node_modules — {detail}. "
+                f"Run `{' '.join(cmd)}` in {repo_path} and check its output.\n"
+                f"{(out or '').strip()[-600:]}")
+        return True, f"Installed dependencies ({' '.join(pm)})."
+
     def _ensure_ios_jsbundle(self, repo_path: str) -> Tuple[bool, str]:
         """Generate ios/main.jsbundle if the Xcode project needs it but it's absent.
 
@@ -740,6 +832,14 @@ class AppBuilder:
         bundle_path = os.path.join(ios_dir, "main.jsbundle")
         if not references or os.path.isfile(bundle_path):
             return True, "jsbundle not required."
+
+        # Metro bundles OUT OF node_modules, so it must be usable before we start.
+        # Without this the bundler fails inside module resolution and reports the
+        # first package it could not follow, which reads as a problem with that
+        # package rather than with the tree.
+        deps_ok, deps_msg = self.ensure_node_modules(repo_path)
+        if not deps_ok:
+            return False, deps_msg
 
         entry = next(
             (e for e in ("index.js", "index.ts", "index.tsx")
