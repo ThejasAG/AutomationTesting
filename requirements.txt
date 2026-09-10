@@ -1,9 +1,62 @@
+# Direct runtime dependencies, derived from the actual import graph of
+# automation/, scripts/ and tests/ — not from `pip freeze`. Every entry below is
+# imported by this codebase, or is required at runtime by something that is.
+#
+# The previous version listed 8 packages while the code imported 22: a fresh
+# `pip install -r requirements.txt` produced an environment that could not import
+# its own backend. Version floors are the versions this platform is verified
+# against; they are floors rather than pins so security updates still apply.
+#
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-sqlalchemy
-alembic
-psycopg2-binary
-redis
-python-jose[cryptography]
-passlib[bcrypt]
-python-multipart
-python-dotenv
+# ── Web layer ───────────────────────────────────────────────────────────────
+fastapi>=0.139
+uvicorn>=0.51
+pydantic>=2.13
+
+# ── Database ────────────────────────────────────────────────────────────────
+SQLAlchemy>=2.0.51
+alembic>=1.18                 # no import: the `alembic` CLI owns the schema
+psycopg2-binary>=2.9.12       # no import: SQLAlchemy's driver for postgresql://
+
+# ── Auth ────────────────────────────────────────────────────────────────────
+python-jose[cryptography]>=3.5
+passlib[bcrypt]>=1.7.4
+bcrypt>=5.0
+
+python-multipart>=0.0.32      # no import: FastAPI needs it for the login
+                              # endpoint's OAuth2PasswordRequestForm (auth.py:24).
+                              # Dropping it makes the whole app fail at import.
+
+# ── Configuration ───────────────────────────────────────────────────────────
+python-dotenv>=1.2
+certifi>=2026.6
+
+# ── Mobile automation ───────────────────────────────────────────────────────
+Appium-Python-Client>=5.3
+selenium>=4.45
+
+# ── Repository + project config handling ────────────────────────────────────
+GitPython>=3.1.50
+PyYAML>=6.0
+
+# ── HTTP clients ────────────────────────────────────────────────────────────
+requests>=2.34
+httpx>=0.28
+
+# ── Reporting ───────────────────────────────────────────────────────────────
+Jinja2>=3.1
+Markdown>=3.5                 # reports/generator.py imports it inside generate_html()
+
+# ── Screenshot / visual comparison ──────────────────────────────────────────
+numpy>=2.5
+opencv-python>=5.0
+pillow>=12.0
+
+# ── Tests ───────────────────────────────────────────────────────────────────
+pytest>=9.1
+
+# Deliberately NOT listed:
+#   graphify        optional; hybrid_impact_analyzer.py guards it with a try/except
+#   redis           the service is used, but nothing imports the Python client
+#   python-dateutil declared historically, zero usages
