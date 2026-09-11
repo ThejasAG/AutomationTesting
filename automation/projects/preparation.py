@@ -18,6 +18,7 @@ came from validating before the repo was ready.
 
 import logging
 import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -254,8 +255,23 @@ class ProjectPreparationService:
         try:
             if os.path.exists(rc):
                 with open(rc) as f:
-                    if "nodeLinker" in f.read():
-                        return  # the project made its own choice — respect it
+                    text = f.read()
+                if "nodeLinker" in text:
+                    # Respect the project's own choice -- UNLESS it chose PnP,
+                    # which React Native cannot use. Yarn writes `nodeLinker: pnp`
+                    # itself when it takes that path, so this is as often the
+                    # tool's decision as the team's, and it leaves Metro with no
+                    # node_modules to resolve from.
+                    if not re.search(r"^\s*nodeLinker:\s*pnp\b", text, re.M):
+                        return
+                    logger.warning("[%s] .yarnrc.yml selects Plug'n'Play, which "
+                                   "Metro cannot use — switching to node-modules",
+                                   project_id)
+                    text = re.sub(r"^\s*nodeLinker:.*$", "nodeLinker: node-modules",
+                                  text, count=1, flags=re.M)
+                    with open(rc, "w") as f:
+                        f.write(text)
+                    return
                 with open(rc, "a") as f:
                     f.write("\nnodeLinker: node-modules\n")
             else:
@@ -293,13 +309,30 @@ class ProjectPreparationService:
             # Metro needs a real node_modules tree. Berry projects that omit a
             # .yarnrc.yml would otherwise install to .pnp.cjs and leave
             # node_modules empty.
-            if pm == ["corepack", "yarn"]:
+            # Any Berry invocation, however the version is pinned. This was an
+            # equality check against ["corepack", "yarn"] and silently stopped
+            # matching the moment the Yarn major started being pinned
+            # (["corepack", "yarn@3", "--"]), so the linker was never written and
+            # Yarn fell back to Plug'n'Play — "ESM support for PnP", and a
+            # validation step reporting node_modules as missing because it was.
+            if pm[0] == "corepack":
                 self._ensure_node_modules_linker(project_id, repo_path)
 
             ok, err = self._run_in_repo(project_id, pm + ["install"])
             if ok:
                 return True, None
-            logger.warning(f"[{project_id}] {' '.join(pm)} install failed, trying npm: {err}")
+
+            # Do NOT fall through to npm. npm cannot read a Berry lockfile: it
+            # discards it, re-resolves every caret range to the newest release
+            # and rewrites the file, which is how this project's axios went
+            # 1.7.7 -> 1.20.0 and stopped bundling. A failed yarn install is a
+            # problem to report, not a reason to reach for the tool that
+            # corrupts the tree.
+            return False, (
+                f"`{' '.join(pm + ['install'])}` failed in this project.\n\n"
+                f"Not retried with npm on purpose: this project has a Yarn "
+                f"lockfile, and npm would discard it and re-resolve every "
+                f"version rather than install the ones it pins.\n\n{err or ''}")
 
         # 2. Plain npm install.
         ok, err = self._run_in_repo(project_id, ["npm", "install"])
