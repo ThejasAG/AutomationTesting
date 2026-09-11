@@ -19,6 +19,7 @@ import logging
 import os
 import plistlib
 import re
+import stat
 import subprocess
 import urllib.error
 import urllib.parse
@@ -1275,8 +1276,16 @@ class AppBuilder:
         if patched == text:
             return False
         try:
-            with open(header, "w") as f:
-                f.write(patched)
+            # CocoaPods installs pod sources read-only (0444), so writing needs
+            # the mode restored first -- and put back afterwards, because a
+            # later `pod install` compares what it finds against its manifest.
+            mode = os.stat(header).st_mode
+            os.chmod(header, mode | stat.S_IWUSR)
+            try:
+                with open(header, "w") as f:
+                    f.write(patched)
+            finally:
+                os.chmod(header, mode)
         except OSError as e:
             logger.warning("could not patch folly Time.h: %s", e)
             return False
@@ -1309,7 +1318,12 @@ class AppBuilder:
                 and not self._pods_are_stale(repo_path, candidate)
                 and not self._manifest_out_of_sync(candidate)
             ):
-                return True, "Pods already installed."
+                # Still verify. The folly/clockid_t conflict lives in the
+                # INSTALLED pod source, so a tree that is "already installed"
+                # is exactly the one that carries it -- skipping the check here
+                # meant it only ever ran on a first install, never on the
+                # rebuild where the broken header was already sitting on disk.
+                return True, self._verify_pods(candidate, "Pods already installed.")
 
             # Older React Native versions ship podspecs pointing at dead hosts;
             # CocoaPods would download an HTML error page and fail the checksum.

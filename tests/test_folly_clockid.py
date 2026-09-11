@@ -138,3 +138,52 @@ def test_11_an_unrepairable_header_warns_instead_of_passing_silently(ios, monkey
     out = app_builder._verify_pods(ios, "ok")
     assert "WARNING" in out and "NetOps.cpp" in out, \
         "an unfixable conflict must be named before the build buries it"
+
+
+# ── the two reasons the repair did not actually run ─────────────────────────
+#
+# Shipped in e7af92e and it still failed on the reporting machine. Two separate
+# bugs, both invisible to the tests above because those wrote plain files into
+# a tmp dir and called the repair directly.
+
+def test_12_a_read_only_header_is_still_repaired(ios):
+    """CocoaPods installs pod sources 0444. `open(..., "w")` raised
+    PermissionError, the repair caught it, logged a warning and returned False —
+    so it never worked on a real Pods tree, only on the ones tests created."""
+    import os
+    p = _header(ios, UNPATCHED)
+    os.chmod(p, 0o444)
+    assert app_builder._repair_folly_clockid(ios) is True, \
+        "the repair gave up on a read-only file"
+    assert app_builder._folly_clockid_conflict(ios) is False
+
+
+def test_13_the_original_file_mode_is_restored(ios):
+    """Leaving pod sources writable would make a later `pod install` see a tree
+    that no longer matches what it installed."""
+    import os
+    p = _header(ios, UNPATCHED)
+    os.chmod(p, 0o444)
+    app_builder._repair_folly_clockid(ios)
+    assert oct(os.stat(p).st_mode & 0o777) == "0o444", "the file was left writable"
+
+
+def test_14_pods_already_installed_is_still_verified(ios):
+    """The second bug: `pod install` is SKIPPED when Pods look current, and that
+    early return bypassed the check entirely. A broken header is precisely what
+    an 'already installed' tree is carrying, so the rebuild path — the one that
+    actually failed — never ran it."""
+    _header(ios, UNPATCHED)
+    out = app_builder._verify_pods(ios, "Pods already installed.")
+    assert "repaired" in out
+    assert app_builder._folly_clockid_conflict(ios) is False
+
+
+def test_15_the_skip_path_is_wired_to_the_check(ios):
+    """Structural: the early return must not go back to a bare string."""
+    import inspect
+    src = inspect.getsource(app_builder._pod_install)
+    i = src.index("Pods already installed.")
+    line = src[src.rindex("\n", 0, i):i + 40]
+    assert "_verify_pods" in line, \
+        "the 'already installed' path returns without verifying the pod tree"
