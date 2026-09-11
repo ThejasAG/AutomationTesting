@@ -9,6 +9,9 @@ hand. This does it in one request.
 from __future__ import annotations
 
 import json
+import shutil
+import sys
+import os
 import subprocess
 from typing import Any, Dict, List, Optional
 
@@ -19,12 +22,37 @@ from automation.inspector.overlap import label_of, rect_of, report
 
 router = APIRouter(prefix="/inspector", tags=["Inspector"])
 
-_IDB = "/usr/local/bin/idb"
+def _idb_path() -> str:
+    """The idb executable on THIS machine, or a message saying how to get it.
+
+    Resolution is shared with the scenario runner (scenarios/idb_path.py), which
+    already honours IDB_BINARY and falls back to PATH. This module previously
+    hardcoded /usr/local/bin/idb, which exists under Intel Homebrew and not under
+    Apple Silicon's /opt/homebrew or inside a virtualenv -- so the Inspector
+    worked on the machine it was written on and returned a raw ENOENT naming a
+    path the operator has no reason to recognise on any other.
+    """
+    from automation.scenarios.idb_path import idb_binary
+    found = idb_binary()
+    # idb_binary() ends with a hardcoded default rather than returning nothing,
+    # so "it gave us a string" is not evidence the tool exists. Only a path that
+    # is actually on disk counts; a bare name resolved from PATH already is.
+    if found and (not os.path.isabs(found) or os.path.isfile(found)):
+        return found
+    raise HTTPException(
+        status_code=503,
+        detail="The UI Inspector needs Facebook's idb, which was not found on "
+               "this machine. Install it with:\n"
+               "  brew tap facebook/fb && brew install idb-companion\n"
+               "  pip install fb-idb\n"
+               "Then restart the backend. Set IDB_BINARY to override the path. "
+               "Scenario execution does not use the Inspector and is unaffected.")
 
 
 def _tree(udid: str) -> List[Dict[str, Any]]:
+    idb = _idb_path()
     try:
-        raw = subprocess.run([_IDB, "ui", "describe-all", "--udid", udid],
+        raw = subprocess.run([idb, "ui", "describe-all", "--udid", udid],
                              capture_output=True, text=True, timeout=25).stdout
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Could not read the UI tree: {e}")
