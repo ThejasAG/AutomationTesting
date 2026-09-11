@@ -1294,6 +1294,116 @@ class AppBuilder:
             f"to a path with no spaces (for example {culprit.replace(' ', '-')!r}) "
             f"and re-run.")
 
+    @staticmethod
+    def _obsoleted_frameworks() -> Dict[str, str]:
+        """Frameworks this SDK has REMOVED, read from the SDK itself.
+
+        Apple records the fact in each framework's Swift interface:
+
+            @available(iOS, introduced: 9.0, deprecated: 9.0, obsoleted: 26.0)
+
+        Deriving it beats a hardcoded list, which would be wrong the day the
+        next SDK ships. Objective-C is deliberately not consulted: the ObjC
+        headers still declare these symbols and compile with a deprecation
+        warning -- it is the SWIFT interface that turns them into a hard error,
+        which is why a pod with even one Swift file fails while three pure-ObjC
+        pods using the same framework build fine.
+
+        Returns {framework: "26.0"}; empty when the SDK cannot be read, because
+        a missing warning must never become a failed build.
+        """
+        try:
+            sdk = subprocess.run(["xcrun", "--sdk", "iphonesimulator",
+                                  "--show-sdk-path"], capture_output=True,
+                                 text=True, timeout=20).stdout.strip()
+            ver = subprocess.run(["xcrun", "--sdk", "iphonesimulator",
+                                  "--show-sdk-version"], capture_output=True,
+                                 text=True, timeout=20).stdout.strip()
+        except Exception:
+            return {}
+        if not sdk or not ver:
+            return {}
+        major = ver.split(".")[0]
+        out: Dict[str, str] = {}
+        for mod in glob.glob(os.path.join(sdk, "usr", "lib", "swift",
+                                          "*.swiftmodule")):
+            fw = os.path.basename(mod)[: -len(".swiftmodule")]
+            for iface in glob.glob(os.path.join(mod, "*.swiftinterface")):
+                try:
+                    with open(iface, "r", errors="replace") as f:
+                        if re.search(rf"obsoleted:\s*{re.escape(major)}\.", f.read()):
+                            out[fw] = ver
+                            break
+                except OSError:
+                    continue
+        return out
+
+    def removed_framework_users(self, repo_path: str) -> List[str]:
+        """Warnings for pods that use a framework this SDK has removed.
+
+        Unlike the folly and boost repairs, nothing here can be patched: the
+        symbol is gone from the SDK, so there is no file to edit and no language
+        standard to lower. The dependency has to change.
+
+        What this DOES fix is the diagnosis. The build failed with
+
+            error: 'ALAssetsLibrary' is unavailable in iOS: Use PHPhotoLibrary
+                   from the Photos framework instead
+
+        pointing at Apple's own SDK header, naming no dependency at all -- and
+        four packages referenced the framework while only one actually broke.
+        Finding that took most of a day. This says it in a sentence, before the
+        build starts.
+        """
+        removed = self._obsoleted_frameworks()
+        if not removed:
+            return []
+
+        pods_dir = os.path.join(repo_path, "ios", "Pods")
+        if not os.path.isdir(pods_dir):
+            return []
+
+        warnings: List[str] = []
+        for fw, sdkver in sorted(removed.items()):
+            for pod in sorted(os.listdir(pods_dir)):
+                pod_path = os.path.join(pods_dir, pod)
+                if pod.startswith(("Headers", "Target Support Files",
+                                   "Local Podspecs", "Pods.xcodeproj")) \
+                        or not os.path.isdir(pod_path):
+                    continue
+                # Only a pod carrying Swift reads the .swiftinterface where the
+                # symbol is obsoleted. Pure Objective-C pods using the same
+                # framework still compile, with a deprecation warning.
+                if not glob.glob(os.path.join(pod_path, "**", "*.swift"),
+                                 recursive=True):
+                    continue
+                if not self._references(pod_path, fw):
+                    continue
+                warnings.append(
+                    f"{pod} uses {fw}, which Apple REMOVED in iOS {sdkver} "
+                    f"(the SDK marks it 'obsoleted'). The build will fail "
+                    f"compiling it, with an error naming Apple's header rather "
+                    f"than this pod. Nothing can patch this — the symbol no "
+                    f"longer exists. Update or remove the dependency that pulls "
+                    f"in {pod}.")
+        return warnings
+
+    @staticmethod
+    def _references(pod_path: str, framework: str) -> bool:
+        """Whether a pod's source mentions *framework* at all."""
+        needle = framework.encode()
+        for root, _dirs, files in os.walk(pod_path):
+            for name in files:
+                if not name.endswith((".h", ".m", ".mm", ".swift", ".modulemap")):
+                    continue
+                try:
+                    with open(os.path.join(root, name), "rb") as f:
+                        if needle in f.read():
+                            return True
+                except OSError:
+                    continue
+        return False
+
     def _verify_pods(self, pod_dir: str, out: str) -> str:
         """Checks that run after a SUCCESSFUL pod install.
 
@@ -1574,6 +1684,12 @@ class AppBuilder:
         if space:
             return BuildResult(ok=False, error=space)
 
+        # Frameworks this SDK has removed cannot be patched, so this only
+        # names the pod -- but naming it is the whole point: the compiler error
+        # points at Apple's own header and mentions no dependency.
+        for warning in self.removed_framework_users(repo_path):
+            logger.warning("[removed framework] %s", warning)
+
         # CocoaPods must be resolved before the workspace will build.
         ok, out = self._pod_install(repo_path)
         if not ok:
@@ -1649,7 +1765,10 @@ class AppBuilder:
         ok, out = _run(cmd, cwd=repo_path)
         if not ok:
             return BuildResult(
-                ok=False, error=f"xcodebuild failed.\n{_summarize_xcode_errors(out)}"
+                ok=False,
+                error=(f"xcodebuild failed.\n{_summarize_xcode_errors(out)}"
+                       + ("".join(f"\n\n[platform] {w}" for w in
+                                  self.removed_framework_users(repo_path))))
             )
 
         app = self._find_built_app(derived)
