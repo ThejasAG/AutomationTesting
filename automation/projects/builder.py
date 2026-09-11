@@ -288,7 +288,11 @@ class AppBuilder:
             # globally. On a machine where that is Yarn 1, `corepack yarn` runs
             # Yarn 1, which cannot read this lockfile and silently rewrites it.
             # The version is therefore pinned explicitly from the lockfile.
-            return ["corepack", f"yarn@{self._berry_version(head)}", "--"]
+            # No "--" separator: corepack passes the rest through already, and
+            # Yarn 3 parses the separator as part of the command line, which
+            # makes `-- install` register the install command twice and abort
+            # with "Ambiguous Syntax Error: Cannot find which to pick".
+            return ["corepack", f"yarn@{self._berry_version(head)}"]
         return ["yarn"]
 
     # Berry's lockfile cacheKey identifies the Yarn major that wrote it. Pinning
