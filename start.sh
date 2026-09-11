@@ -20,15 +20,96 @@ ok(){   printf "  \033[1;32m✓\033[0m %s\n" "$*"; }
 warn(){ printf "  \033[1;33m!\033[0m %s\n" "$*"; }
 
 # ── 1. Simulators ────────────────────────────────────────────────────────────
+# Resolved for THIS Mac, never hardcoded. A UDID identifies a simulator inside
+# one Mac's CoreSimulator and means nothing on another, so the previous fallback
+# ("boot these two UDIDs") silently booted nothing on every machine but the one
+# they came from — `2>/dev/null` hid the reason, leaving only "NOT booted".
+#
+# Order of preference:
+#   1. cross_app_config.json, when it exists  (gitignored — per-machine by design)
+#   2. SIM_NAMES, or the platform's seeded device names, resolved by NAME here
+#   3. whatever iPhone this Mac actually has
 say "Simulators"
-SIMS=$(.venv/bin/python -c "import json;d=json.load(open('cross_app_config.json'))['devices'];print(' '.join(sorted(set(d.values()))))" 2>/dev/null)
-[ -z "$SIMS" ] && SIMS="DA24A392-FF1B-4283-A5CE-CDDE0D000D21 D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"
 open -a Simulator 2>/dev/null
-for u in $SIMS; do xcrun simctl boot "$u" 2>/dev/null; done
-sleep 3
-for u in $SIMS; do
-  xcrun simctl list devices booted 2>/dev/null | grep -q "$u" && ok "sim ${u:0:8}… booted" || warn "sim ${u:0:8}… NOT booted"
-done
+
+SIM_NAMES="${SIM_NAMES:-iPhone 16 Pro|iPad Pro 11-inch (M4)}"
+SIMS=$(.venv/bin/python - "$SIM_NAMES" <<'PY' 2>/dev/null
+import json, os, subprocess, sys
+
+def available():
+    """(name, udid, state) for every iPhone/iPad simulator on THIS Mac."""
+    try:
+        out = subprocess.run(["xcrun", "simctl", "list", "devices", "available", "-j"],
+                             capture_output=True, text=True, timeout=20).stdout
+        data = json.loads(out).get("devices") or {}
+    except Exception:
+        return []
+    return [(d.get("name", ""), d["udid"], d.get("state", ""))
+            for devs in data.values() for d in devs
+            if d.get("udid") and d.get("name", "").startswith(("iPhone", "iPad"))]
+
+devices = available()
+by_name = {}
+for name, udid, _state in devices:
+    by_name.setdefault(name, udid)          # first wins: stable across runs
+
+# 1. This machine's own config, when someone has written one.
+picked = []
+try:
+    with open("cross_app_config.json") as f:
+        cfg = set(json.load(f).get("devices", {}).values())
+    here = {u for _n, u, _s in devices}
+    picked = sorted(cfg & here)             # only ones that exist HERE
+except Exception:
+    pass
+
+# 2. Resolve the wanted names against what this Mac has.
+if not picked:
+    for want in (sys.argv[1] if len(sys.argv) > 1 else "").split("|"):
+        want = want.strip()
+        if want and want in by_name:
+            picked.append(by_name[want])
+
+# 3. Nothing matched: boot SOMETHING rather than nothing. Prefer one that is
+#    already booted, then the highest iPhone model number -- reverse-alphabetical
+#    is not "newest" ("iPhone SE" sorts above "iPhone 16 Pro").
+if not picked:
+    def rank(entry):
+        name, _udid, state = entry
+        import re
+        m = re.search(r"iPhone (\d+)", name)
+        return (state != "Booted", -(int(m.group(1)) if m else 0), name)
+    iphones = sorted((d for d in devices if d[0].startswith("iPhone")), key=rank)
+    if iphones:
+        picked = [iphones[0][1]]
+
+print(" ".join(picked))
+PY
+)
+
+if [ -z "$SIMS" ]; then
+  warn "no iOS simulators found on this Mac — install one in Xcode ▸ Settings ▸ Platforms"
+  warn "list what you have: xcrun simctl list devices available"
+else
+  for u in $SIMS; do
+    # Keep stderr: a boot that fails must say why, not vanish.
+    berr=$(xcrun simctl boot "$u" 2>&1)
+    case "$berr" in
+      *"Unable to boot device in current state: Booted"*) : ;;   # already up
+      "") : ;;
+      *) warn "boot $u: $(printf '%s' "$berr" | head -1)" ;;
+    esac
+  done
+  sleep 3
+  for u in $SIMS; do
+    nm=$(xcrun simctl list devices available 2>/dev/null | grep "$u" | sed 's/ (.*//;s/^ *//')
+    if xcrun simctl list devices booted 2>/dev/null | grep -q "$u"; then
+      ok "${nm:-$u} booted"
+    else
+      warn "${nm:-$u} NOT booted"
+    fi
+  done
+fi
 
 # ── 2. Appium ────────────────────────────────────────────────────────────────
 say "Appium :4723"
