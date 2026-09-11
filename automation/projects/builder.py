@@ -283,8 +283,36 @@ class AppBuilder:
         # Berry lockfiles carry a __metadata block; Classic ones never do.
         if "__metadata:" in head:
             # corepack ships the right Yarn per project and is bundled with Node.
-            return ["corepack", "yarn"]
+            # It is NOT enough on its own: with no "packageManager" field in
+            # package.json, corepack falls back to whatever yarn is installed
+            # globally. On a machine where that is Yarn 1, `corepack yarn` runs
+            # Yarn 1, which cannot read this lockfile and silently rewrites it.
+            # The version is therefore pinned explicitly from the lockfile.
+            return ["corepack", f"yarn@{self._berry_version(head)}", "--"]
         return ["yarn"]
+
+    # Berry's lockfile cacheKey identifies the Yarn major that wrote it. Pinning
+    # the exact minor is neither possible nor needed — any Yarn of the right
+    # major reads the lockfile without rewriting it.
+    _BERRY_CACHEKEY_TO_YARN = {"8": "3", "9": "4", "10": "4"}
+
+    def _berry_version(self, lock_head: str) -> str:
+        """The Yarn major that wrote this Berry lockfile, from its cacheKey.
+
+        Running the wrong MAJOR is not cosmetic. Yarn 1 discards a Berry
+        lockfile outright — that is how a project pinned to axios 1.7.7 became
+        axios 1.20.0 and stopped bundling. Even Yarn 4 against a Yarn 3 lockfile
+        rewrites the fsevents patch protocol (`#~builtin` -> `#optional!builtin`)
+        and fails `--immutable`, which is a CI failure on a machine that did
+        nothing wrong.
+
+        Falls back to "stable" when the cacheKey is unknown — a newer Berry we
+        have not seen is still enormously better than Yarn 1.
+        """
+        m = re.search(r"cacheKey:\s*(\d+)", lock_head)
+        if not m:
+            return "stable"
+        return self._BERRY_CACHEKEY_TO_YARN.get(m.group(1), "stable")
 
     def _installed_version(self, repo_path: str, pkg: str) -> Optional[str]:
         data = self._read_json(
@@ -866,6 +894,20 @@ class AppBuilder:
         pm = self.detect_package_manager(repo_path)
         logger.info("%s — installing with %s in %s", why, " ".join(pm), repo_path)
 
+        # A Berry lockfile that a wrong-major Yarn has rewritten is the failure
+        # this whole path exists to prevent, so it is checked rather than
+        # assumed. Yarn 1 leaves no error behind — it just re-resolves every
+        # caret range and writes a v1 lockfile — so the only evidence is the
+        # lockfile's own format changing under us.
+        lock = os.path.join(repo_path, "yarn.lock")
+        before = None
+        if os.path.isfile(lock):
+            try:
+                with open(lock, "r", errors="replace") as f:
+                    before = "__metadata:" in f.read(600)
+            except OSError:
+                pass
+
         # KNOWN LIMIT: a package manager that considers the tree already
         # installed will no-op here (yarn finished a 99-dependency project in
         # 4.4s on the machine this was reported from) and only re-run
@@ -885,6 +927,30 @@ class AppBuilder:
             logger.warning("npm ERESOLVE — retrying with --legacy-peer-deps")
             ok, out = _run(cmd + ["--legacy-peer-deps"], cwd=repo_path,
                            timeout=NPM_INSTALL_TIMEOUT)
+
+        # Did the install just destroy a Berry lockfile? That means the wrong
+        # Yarn major ran, every pinned version has been re-resolved, and the tree
+        # is now WRONG rather than merely incomplete — a state no amount of
+        # re-installing fixes, and one the caller must be told about plainly.
+        if before and os.path.isfile(lock):
+            try:
+                with open(lock, "r", errors="replace") as f:
+                    if "__metadata:" not in f.read(600):
+                        return False, (
+                            f"`{' '.join(cmd)}` rewrote this project's Yarn Berry "
+                            f"lockfile into Yarn 1 format, discarding every pinned "
+                            f"version. The tree is now resolved from scratch and "
+                            f"will not match the one this project was built "
+                            f"against.\n\nRestore it and install with the right "
+                            f"Yarn:\n"
+                            f"  cd {repo_path}\n"
+                            f"  git checkout -- yarn.lock\n"
+                            f"  corepack enable\n"
+                            f"  {' '.join(cmd)}\n\n"
+                            f"Add a \"packageManager\" field to this project's "
+                            f"package.json to stop it recurring.")
+            except OSError:
+                pass
 
         # Never trust the exit code alone: a install can report success and still
         # leave the tree unresolvable, which is the failure this exists to catch.
