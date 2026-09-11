@@ -1181,6 +1181,80 @@ class AppBuilder:
         except OSError:
             return False
 
+    def _folly_cxx_standard(self, pod_dir: str) -> List[str]:
+        """RCT-Folly xcconfigs that pin a C++ standard folly cannot compile at.
+
+        React Native 0.68 ships RCT-Folly.podspec with
+
+            pod_target_xcconfig = { "CLANG_CXX_LANGUAGE_STANDARD" => "c++17" }
+
+        and folly pulls in boost's container_hash/hash.hpp, whose hash_base
+        derives from std::unary_function. That template was deprecated in C++11
+        and REMOVED in C++17, and the iOS 26 SDK's libc++ no longer provides it:
+
+            boost/container_hash/hash.hpp:131:33: error: no template named
+            'unary_function' in namespace 'std'
+
+        The error names boost, but boost's own target compiles fine -- the
+        project-level setting gives it gnu++14. It is the RCT-Folly target,
+        overriding that to c++17, which drags boost's headers into a compile
+        where the symbol is gone.
+
+        Measured, not assumed: folly 2021.06 builds clean at gnu++14 -- all 22
+        objects including json.cpp, zero errors. The c++17 pin is aspirational
+        for that vintage rather than required, so compiling it at the standard
+        it was written for is the fix; patching boost would work around the
+        symptom, and std::unary_function supplies argument_type/result_type
+        typedefs that downstream code expects.
+        """
+        cfg_dir = os.path.join(pod_dir, "Pods", "Target Support Files", "RCT-Folly")
+        bad = []
+        for name in ("RCT-Folly.debug.xcconfig", "RCT-Folly.release.xcconfig"):
+            path = os.path.join(cfg_dir, name)
+            try:
+                with open(path, "r", errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            m = re.search(r"^CLANG_CXX_LANGUAGE_STANDARD\s*=\s*(\S+)", text, re.M)
+            if m and re.search(r"(?:c|gnu)\+\+(1[7-9]|2\d)", m.group(1)):
+                bad.append(path)
+        return bad
+
+    def _repair_folly_cxx_standard(self, pod_dir: str) -> int:
+        """Pin the RCT-Folly target back to gnu++14. Returns files changed.
+
+        Target-level, not project-level: the podspec's own xcconfig overrides
+        anything set on the project, exactly as it already overrides the
+        gnu++14 CocoaPods puts there.
+
+        Pods/ is generated and gitignored, so nothing tracked is touched.
+        """
+        changed = 0
+        for path in self._folly_cxx_standard(pod_dir):
+            try:
+                with open(path, "r", errors="replace") as f:
+                    text = f.read()
+                patched = re.sub(r"^(CLANG_CXX_LANGUAGE_STANDARD\s*=\s*)\S+",
+                                 r"\1gnu++14", text, count=1, flags=re.M)
+                if patched == text:
+                    continue
+                mode = os.stat(path).st_mode
+                os.chmod(path, mode | stat.S_IWUSR)
+                try:
+                    with open(path, "w") as f:
+                        f.write(patched)
+                finally:
+                    os.chmod(path, mode)
+                changed += 1
+            except OSError as e:
+                logger.warning("could not pin folly's C++ standard in %s: %s", path, e)
+        if changed:
+            logger.info("Pinned RCT-Folly to gnu++14 in %d xcconfig(s): boost's "
+                        "std::unary_function is gone from the iOS 26 SDK's C++17 "
+                        "library", changed)
+        return changed
+
     def _verify_pods(self, pod_dir: str, out: str) -> str:
         """Checks that run after a SUCCESSFUL pod install.
 
@@ -1190,6 +1264,14 @@ class AppBuilder:
         turned into a build error thousands of lines later, naming a dependency
         instead of the hook.
         """
+        pinned = self._repair_folly_cxx_standard(pod_dir)
+        if pinned:
+            out += ("\n[platform] RCT-Folly was pinned to gnu++14 in "
+                    f"{pinned} xcconfig(s). React Native 0.68's podspec asks for "
+                    "c++17, where std::unary_function -- which boost's hash.hpp "
+                    "derives from -- no longer exists in the iOS 26 SDK. folly "
+                    "2021.06 compiles clean at gnu++14.")
+
         if self._folly_clockid_conflict(pod_dir):
             if self._repair_folly_clockid(pod_dir):
                 out += ("\n[platform] RCT-Folly Time.h was left unpatched by the "
