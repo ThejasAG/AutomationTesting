@@ -867,6 +867,39 @@ class AppBuilder:
                 broken.append(name)
         return broken
 
+    # Settings a later Yarn writes into .yarnrc.yml that an earlier one rejects
+    # OUTRIGHT — "Usage Error: Unrecognized or legacy configuration settings
+    # found" — before it resolves anything. Pinning the Yarn major cannot help
+    # here: this fails earlier than resolution.
+    _YARN4_ONLY_SETTINGS = (
+        "approvedGitRepositories",
+        "enableGlobalCache",
+        "compressionLevel",
+        "enableHardenedMode",
+        "injectEnvironmentFiles",
+    )
+
+    def _yarnrc_poisoned(self, repo_path: str, want_major: str) -> List[str]:
+        """Settings in .yarnrc.yml that the Yarn we are about to run will reject.
+
+        A machine that once ran Yarn 4 in a repo leaves configuration behind
+        that Yarn 3 refuses to start against, and .yarnrc.yml is typically
+        UNTRACKED — so `git checkout` cannot restore it and the damage outlives
+        every other repair. The raw Yarn error names the setting but not the
+        cause, which reads like a corrupt project rather than a tool-version
+        mismatch.
+        """
+        if want_major not in ("3", "stable"):
+            return []                      # only older Yarn rejects newer keys
+        rc = os.path.join(repo_path, ".yarnrc.yml")
+        try:
+            with open(rc, "r", errors="replace") as f:
+                text = f.read(4000)
+        except OSError:
+            return []
+        return [k for k in self._YARN4_ONLY_SETTINGS
+                if re.search(rf"^\s*{k}\s*:", text, re.M)]
+
     def ensure_node_modules(self, repo_path: str) -> Tuple[bool, str]:
         """Make node_modules usable before anything tries to bundle from it.
 
@@ -892,6 +925,25 @@ class AppBuilder:
                f"({', '.join(sorted(broken)[:5])}"
                f"{', …' if len(broken) > 5 else ''})")
         pm = self.detect_package_manager(repo_path)
+
+        # A .yarnrc.yml left behind by a NEWER Yarn stops an older one before it
+        # resolves anything, so this is checked ahead of the install rather than
+        # diagnosed from its output.
+        want = pm[1].split("@")[1] if len(pm) > 1 and pm[1].startswith("yarn@") else ""
+        bad = self._yarnrc_poisoned(repo_path, want) if want else []
+        if bad:
+            return False, (
+                f"This project's .yarnrc.yml carries settings that Yarn {want} "
+                f"refuses to start against ({', '.join(bad)}). A newer Yarn was "
+                f"run here and rewrote the file; because .yarnrc.yml is usually "
+                f"untracked, `git checkout` will not bring it back.\n\n"
+                f"Remove those lines, leaving the linker Metro needs:\n"
+                f"  cd {repo_path}\n"
+                f"  printf 'nodeLinker: node-modules\\n' > .yarnrc.yml\n"
+                f"  {' '.join(pm)} install\n\n"
+                f"Committing .yarnrc.yml would make this visible in git status "
+                f"instead of a mystery failure.")
+
         logger.info("%s — installing with %s in %s", why, " ".join(pm), repo_path)
 
         # A Berry lockfile that a wrong-major Yarn has rewritten is the failure
