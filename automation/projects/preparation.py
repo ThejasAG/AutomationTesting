@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -734,6 +735,61 @@ preparation_service = ProjectPreparationService()
 
 # ── Background preparation ───────────────────────────────────────────────────
 
+# ── Progress phases ─────────────────────────────────────────────────────────
+#
+# Deliberately a percentage of WORK, not of time. The same project prepares in
+# 20 seconds or 20 minutes depending on what is already cached -- an npm/yarn
+# install and an Xcode build are each capable of dominating the run -- so any
+# ETA would be invented. What CAN be reported honestly is which stage the
+# pipeline has reached, and the UI can say that a slow stage is expected rather
+# than looking hung.
+#
+# Matched on the step text the pipeline already emits, so no call site has to
+# pass a number and the two cannot drift apart.
+PHASES = [
+    (0, "Starting"),
+    (1, "Fetching the repository"),
+    (2, "Reading project configuration"),
+    (3, "Validating"),
+    (4, "Installing dependencies"),
+    (5, "Preparing the simulator"),
+    (6, "Building the app"),
+    (7, "Installing on the device"),
+    (8, "Ready"),
+]
+
+# Stages that routinely take minutes: a cold dependency install and an Xcode
+# build. The UI uses this to explain the wait instead of implying a stall.
+_LONG_PHASES = {4, 6}
+
+_PHASE_PATTERNS = [
+    (1, ("cloning", "clone complete", "already cloned", "pulling", "pull complete",
+         "checking out")),
+    (2, ("detected project type", "automation.yaml")),
+    (3, ("running validation", "warning:")),
+    (4, ("installing dependencies", "dependency install")),
+    (5, ("simulator", "booted")),
+    (6, ("building the ios app", "building the android", "app build")),
+    (7, ("app install", "app launched", "installed on")),
+    (8, ("project ready for execution",)),
+]
+
+
+def _phase_for(msg: str):
+    """The pipeline stage a step message belongs to, or None if it names none.
+
+    Ordered most-specific-last so a message matching several buckets lands on
+    the furthest one; progress only ever moves forward (the caller enforces it),
+    because a late warning from an earlier stage must not drag the bar back.
+    """
+    low = msg.lower()
+    found = None
+    for phase, needles in _PHASE_PATTERNS:
+        if any(n in low for n in needles):
+            found = phase
+    return found
+
+
 class PreparationTracker:
     """Runs prepare_for_execution() off the request thread.
 
@@ -770,12 +826,22 @@ class PreparationTracker:
                 "status": "running",
                 "steps": [],
                 "result": None,
+                "phase": 0,
+                "phase_label": PHASES[0][1],
+                "started_at": time.time(),
+                "started_phase_at": time.time(),
             }
             self._tasks[project_id] = state
 
         def on_step(msg: str) -> None:
             with self._lock:
-                self._tasks[project_id]["steps"].append(msg)
+                t = self._tasks[project_id]
+                t["steps"].append(msg)
+                phase = _phase_for(msg)
+                if phase is not None and phase >= t["phase"]:
+                    t["phase"] = phase
+                    t["phase_label"] = PHASES[phase][1]
+                    t["started_phase_at"] = time.time()
 
         def worker() -> None:
             try:
@@ -821,12 +887,35 @@ class PreparationTracker:
             t = self._tasks.get(project_id)
             if not t:
                 return {"status": "idle", "steps": [], "result": None}
+            done = t["status"] in ("completed", "failed")
+            phase = len(PHASES) - 1 if t["status"] == "completed" else t["phase"]
             return {
                 "task_id": t["task_id"],
                 "project_id": project_id,
                 "status": t["status"],
                 "steps": list(t["steps"]),
                 "result": t["result"],
+                # Phase progress, NOT a time estimate. How long an install or an
+                # Xcode build takes depends entirely on what is already cached --
+                # seconds to twenty minutes for the same project -- so a
+                # percentage of TIME would be invented. This is a percentage of
+                # WORK: which of the pipeline's stages has been reached.
+                "phase": phase,
+                "phase_count": len(PHASES),
+                "phase_label": (
+                    "Done" if t["status"] == "completed"
+                    else "Failed" if t["status"] == "failed"
+                    else t["phase_label"]
+                ),
+                "percent": 100 if t["status"] == "completed"
+                           else int(round(100 * phase / (len(PHASES) - 1))),
+                "elapsed_seconds": int(time.time() - t["started_at"]),
+                "phase_elapsed_seconds": (
+                    0 if done else int(time.time() - t["started_phase_at"])
+                ),
+                # The stages that typically dominate the wall clock, so the UI can
+                # say "this one is slow" instead of looking stalled.
+                "phase_is_long": phase in _LONG_PHASES and not done,
             }
 
 

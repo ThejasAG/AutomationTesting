@@ -1190,6 +1190,18 @@ export interface PreparationTask {
     status: 'idle' | 'running' | 'completed' | 'failed';
     steps: string[];
     result: PreparationResult | null;
+    /** Progress through the pipeline's stages. NOT a time estimate: a cold
+     *  install or an Xcode build can take seconds or twenty minutes, so any ETA
+     *  would be invented. percent is the share of STAGES completed. */
+    phase?: number;
+    phase_count?: number;
+    phase_label?: string;
+    percent?: number;
+    elapsed_seconds?: number;
+    phase_elapsed_seconds?: number;
+    /** True while in a stage that routinely takes minutes, so the UI can say
+     *  so rather than look stalled. */
+    phase_is_long?: boolean;
 }
 
 /** Starts the full pipeline (clone→build→install app) in the background. */

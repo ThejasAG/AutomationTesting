@@ -155,7 +155,18 @@ export default function ProjectsPage() {
 
   // Live progress of the background preparation (clone → deps → build → install).
   const [progress, setProgress] = useState<
-    { project: Project; steps: string[]; status: PreparationTask['status'] } | null
+    {
+      project: Project;
+      steps: string[];
+      status: PreparationTask['status'];
+      percent?: number;
+      phaseLabel?: string;
+      phase?: number;
+      phaseCount?: number;
+      elapsed?: number;
+      phaseElapsed?: number;
+      phaseIsLong?: boolean;
+    } | null
   >(null);
 
   const refresh = async () => {
@@ -293,7 +304,8 @@ export default function ProjectsPage() {
     if (!device) return alert('No device connected. Connect a device or boot a simulator first.');
 
     setBusyFor(p.id, 'preparing');
-    setProgress({ project: p, steps: [], status: 'running' });
+    setProgress({ project: p, steps: [], status: 'running', percent: 0,
+                  phaseLabel: 'Starting', phase: 0, phaseCount: 9, elapsed: 0 });
 
     try {
       await startPreparation(p.id, { device_id: device.id, generate_yaml: generateYaml });
@@ -303,7 +315,13 @@ export default function ProjectsPage() {
         const timer = setInterval(async () => {
           try {
             const t = await getPreparationStatus(p.id);
-            setProgress({ project: p, steps: t.steps, status: t.status });
+            setProgress({
+              project: p, steps: t.steps, status: t.status,
+              percent: t.percent, phaseLabel: t.phase_label,
+              phase: t.phase, phaseCount: t.phase_count,
+              elapsed: t.elapsed_seconds, phaseElapsed: t.phase_elapsed_seconds,
+              phaseIsLong: t.phase_is_long,
+            });
             if (t.status === 'completed' || t.status === 'failed') {
               clearInterval(timer);
               resolve(t);
@@ -648,9 +666,60 @@ export default function ProjectsPage() {
       {/* ── Live preparation progress (clone → deps → build → install app) ── */}
       {progress && (
         <Modal title={`Preparing ${progress.project.name}`} onClose={() => setProgress(null)}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, color: 'var(--text-secondary)' }}>
-            <Loader2 size={15} className="spin" />
-            Building and installing the app — a cold build can take several minutes.
+          {/* Stage progress. Deliberately NOT an ETA: a cold install or Xcode
+              build runs anywhere from seconds to twenty minutes depending on
+              what is cached, so a predicted time would be a guess presented as
+              a fact. The bar shows how far through the pipeline's stages the
+              run has got, and names the stage it is in. */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                {progress.status === 'running' && <Loader2 size={14} className="spin" />}
+                <span>{progress.phaseLabel ?? 'Starting'}</span>
+                {progress.phase != null && progress.phaseCount != null && (
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                    step {Math.min(progress.phase + 1, progress.phaseCount)} of {progress.phaseCount}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {progress.elapsed != null && progress.elapsed > 0 && (
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem', fontVariantNumeric: 'tabular-nums' }}>
+                    {Math.floor(progress.elapsed / 60)}m {progress.elapsed % 60}s
+                  </span>
+                )}
+                <span style={{
+                  color: progress.status === 'failed' ? '#f85149' : 'var(--text-secondary)',
+                  fontSize: '0.85rem', fontVariantNumeric: 'tabular-nums', minWidth: 38, textAlign: 'right',
+                }}>
+                  {progress.percent ?? 0}%
+                </span>
+              </div>
+            </div>
+
+            <div style={{ height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 999, overflow: 'hidden' }}>
+              <div style={{
+                height: '100%',
+                width: `${Math.max(2, Math.min(100, progress.percent ?? 0))}%`,
+                borderRadius: 999,
+                background: progress.status === 'failed' ? '#f85149'
+                          : progress.status === 'completed' ? '#3fb950'
+                          : 'linear-gradient(90deg, #388bfd, #58a6ff)',
+                transition: 'width 400ms ease',
+              }} />
+            </div>
+
+            {/* A slow stage must read as "expected", not "hung". */}
+            <div style={{ marginTop: 6, color: 'var(--text-muted)', fontSize: '0.78rem', minHeight: 16 }}>
+              {progress.status === 'failed'
+                ? 'Stopped here — see the log below.'
+                : progress.phaseIsLong
+                  ? `This stage normally takes several minutes${
+                      progress.phaseElapsed && progress.phaseElapsed > 30
+                        ? ` — ${Math.floor(progress.phaseElapsed / 60)}m ${progress.phaseElapsed % 60}s so far`
+                        : ''}.`
+                  : progress.status === 'completed' ? 'Finished.' : '\u00a0'}
+            </div>
           </div>
           <div style={{ background: '#0d1117', borderRadius: 6, padding: 12, fontFamily: 'monospace', fontSize: '0.75rem', color: '#c9d1d9', maxHeight: 320, overflowY: 'auto' }}>
             {progress.steps.length === 0
