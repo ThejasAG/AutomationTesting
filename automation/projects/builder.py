@@ -114,6 +114,41 @@ def _build_env() -> dict:
     return env
 
 
+def _script_phase_context(out: str, limit: int = 25) -> List[str]:
+    """The lines a failed run-script phase actually printed.
+
+    Xcode reports the phase that failed but not why: the reason is whatever the
+    script wrote to stdout before it exited, which sits far above the summary
+    among everything else the build emitted. Anything that looks like a real
+    diagnostic is pulled out -- a bare "warning:" is not one, and neither are
+    the deployment-target lines that dominate these logs.
+    """
+    keep, noise = [], (
+        "IPHONEOS_DEPLOYMENT_TARGET", "deployment target", "Run script build phase",
+    )
+    for line in out.splitlines():
+        s = line.strip()
+        if not s or any(n in s for n in noise):
+            continue
+        low = s.lower()
+        # Substring, not prefix: the shell prefixes its own diagnostics
+        # ("env: node: No such file or directory", "sh: line 3: ..."), so
+        # anchoring at the start of the line misses exactly the messages that
+        # explain a failed script phase.
+        if (any(low.startswith(pfx) for pfx in
+                ("error", "fatal", "traceback", "throw ", "env:", "sh:",
+                 "/bin/sh:", "node:"))
+                or any(n in low for n in
+                       ("no such file", "not found", "permission denied",
+                        "command failed", "cannot find", "is not defined",
+                        "nonzero exit code", ": line "))):
+            if s not in keep:
+                keep.append(s)
+    return keep[-limit:] if keep else ["(the script produced no recognisable "
+                                       "diagnostic — run the build directly to "
+                                       "see its full output)"]
+
+
 def _summarize_xcode_errors(out: str) -> str:
     """Pull the real errors out of an xcodebuild log.
 
@@ -122,17 +157,44 @@ def _summarize_xcode_errors(out: str) -> str:
     error — under noise, which is exactly what makes a build failure
     undiagnosable from the dashboard.
     """
-    errors, failed_cmds = [], []
+    errors, failed_cmds, script_fails = [], [], []
     for line in out.splitlines():
         stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip warnings explicitly: "warning: ... error:" is not an error, and
+        # the deployment-target ones outnumber everything else by thousands.
+        # Whichever label comes FIRST is the line's severity: xcodebuild puts
+        # it right after the source location, so a warning that merely quotes
+        # the word "error:" in its text is still a warning.
+        w, e = stripped.find("warning:"), stripped.find("error:")
+        if w != -1 and (e == -1 or w < e):
+            continue
         if "error:" in stripped and stripped not in errors:
             errors.append(stripped)
         elif stripped.startswith("The following build commands failed"):
             failed_cmds.append(stripped)
+        elif stripped.startswith("PhaseScriptExecution") and stripped not in script_fails:
+            # A run-script phase (React Native's codegen, CocoaPods' own hooks)
+            # fails with no compiler error at all -- the reason is in the
+            # script's own output, and naming the phase is what lets anyone
+            # find it.
+            script_fails.append(stripped)
+
+    if not errors and script_fails:
+        return "\n".join([
+            "A build script phase failed (no compiler error):",
+            *[f"  {s}" for s in script_fails[:6]],
+            "",
+            "The reason is in that script's own output, above the summary:",
+            *[f"  {ln}" for ln in _script_phase_context(out)],
+        ])
 
     if not errors:
-        # No recognisable compiler error — fall back to the tail so nothing is lost.
-        return out.strip()[-1500:]
+        # Nothing recognisable — the tail is still better than nothing, but say
+        # so rather than presenting warnings as if they were the failure.
+        tail = out.strip()[-1500:]
+        return f"No compiler error found in the build log. Last output:\n{tail}"
 
     summary = ["Build errors:", *[f"  {e}" for e in errors[:12]]]
     if len(errors) > 12:
@@ -149,7 +211,15 @@ def _run(cmd, cwd=None, timeout=BUILD_TIMEOUT) -> Tuple[bool, str]:
         )
         out = (res.stdout or "") + (res.stderr or "")
         if res.returncode != 0:
-            return False, out.strip()[-2500:]
+            # Keep the WHOLE log. Truncating here happens before any caller can
+            # read it, and an Xcode build emits megabytes of `warning:` lines --
+            # so a tail-slice reliably cuts every `error:` line and leaves the
+            # deployment-target warnings that mean nothing. That is what made
+            # build failures unreadable from the dashboard: the summariser was
+            # searching a window the errors had already been cut out of.
+            # Callers summarise; trimming for display is their job, not this
+            # function's.
+            return False, out.strip()
         return True, out
     except FileNotFoundError:
         return False, f"Command not found: {cmd[0]}. Ensure it is on the platform's PATH."
