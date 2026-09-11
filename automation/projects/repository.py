@@ -356,8 +356,18 @@ class RepositoryManager:
             # modified (reverting it costs a multi-minute `pod install --repo-update`
             # on every run). Rebase refuses to start with unstaged changes, so without
             # this the pull fails on exactly the repos the reset was tuned for.
+            # Fully qualify the ref. `pull --rebase origin <name>` lets git
+            # interpret <name> loosely -- a tag of the same name, or a value that
+            # somehow carries whitespace, can resolve to more than one ref and
+            # produce "Cannot rebase onto multiple branches", which reads like a
+            # repository problem rather than a bad argument.
+            ref = branch.strip()
+            if not ref or len(ref.split()) != 1:
+                raise RuntimeError(
+                    f"refusing to pull: branch name is not a single ref ({branch!r})")
             res = self._run_git(
-                ["-c", "rebase.autoStash=true", "pull", "--rebase", "origin", branch],
+                ["-c", "rebase.autoStash=true", "pull", "--rebase", "origin",
+                 f"refs/heads/{ref}"],
                 cwd=repo_path,
             )
             if res.returncode != 0:
@@ -366,9 +376,21 @@ class RepositoryManager:
                 self._run_git(["rebase", "--abort"], cwd=repo_path)
                 self._restore_venv(repo_path, stashed_venv)
                 stashed_venv = None
-                logger.error(f"Pull (rebase) failed: {res.stderr}")
+                # Log the WHOLE thing. The 400-char cap below is for the dashboard,
+                # but git puts the decisive detail in the lines it prints FIRST --
+                # one "-> FETCH_HEAD" per ref -- so a truncated copy can hide
+                # whether a rebase failure was onto one branch or several, which is
+                # the difference between a bad branch name and a bad refspec.
+                logger.error("Pull (rebase) failed in %s\n"
+                             "  command: git pull --rebase origin %r\n"
+                             "  stdout: %s\n  stderr: %s",
+                             repo_path, branch, res.stdout, res.stderr)
+                detail = res.stderr.strip()
+                # Keep the LAST 400 chars, not the first: git's fatal: line is at
+                # the end, and it is the part that says what actually went wrong.
                 raise RuntimeError(
-                    f"git pull --rebase failed: {res.stderr.strip()[:400]}"
+                    f"git pull --rebase failed: "
+                    f"{detail if len(detail) <= 400 else '…' + detail[-400:]}"
                 )
         except RuntimeError:
             raise
