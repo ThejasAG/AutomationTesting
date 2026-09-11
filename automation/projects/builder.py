@@ -1110,6 +1110,110 @@ class AppBuilder:
         except OSError:
             return False
 
+    def _verify_pods(self, pod_dir: str, out: str) -> str:
+        """Checks that run after a SUCCESSFUL pod install.
+
+        CocoaPods exiting 0 does not mean the Podfile's post_install hooks did
+        what they were written to do -- they are shelled-out commands whose
+        failures it does not surface. Each check here is a case where that gap
+        turned into a build error thousands of lines later, naming a dependency
+        instead of the hook.
+        """
+        if self._folly_clockid_conflict(pod_dir):
+            if self._repair_folly_clockid(pod_dir):
+                out += ("\n[platform] RCT-Folly Time.h was left unpatched by the "
+                        "Podfile's post_install hook and has been repaired: its "
+                        "clockid_t typedef conflicts with the iOS 26 SDK.")
+            else:
+                out += ("\n[platform] WARNING: RCT-Folly Time.h still declares "
+                        "clockid_t, which the iOS 26 SDK also defines. The build "
+                        "will fail compiling NetOps.cpp. The Podfile's "
+                        "post_install hook did not apply and could not be "
+                        "repaired automatically.")
+        return out
+
+    def _folly_clockid_conflict(self, pod_dir: str) -> bool:
+        """True when RCT-Folly still declares its own clockid_t.
+
+        RCT-Folly 2021.06.28 (React Native 0.68) carries
+
+            #if !FOLLY_HAVE_CLOCK_GETTIME && (defined(__MACH__) || defined(_WIN32))
+            typedef uint8_t clockid_t;
+
+        and the iOS 26 SDK now defines clockid_t as an enum, so compiling
+        NetOps.cpp fails with "typedef redefinition with different types".
+
+        Projects of this era solve it in their own Podfile post_install, which
+        rewrites the guard above so TARGET_OS_IPHONE sets
+        FOLLY_HAVE_CLOCK_GETTIME and the typedef is never reached. That hook is
+        a shelled-out `sed`, and CocoaPods reports success whether or not it
+        did anything — so a header that silently went unpatched surfaces
+        thousands of lines later as a compile error that names folly rather
+        than the hook that was supposed to fix it.
+        """
+        header = os.path.join(pod_dir, "Pods", "RCT-Folly", "folly",
+                              "portability", "Time.h")
+        try:
+            with open(header, "r", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return False                     # not an RN 0.68-era project
+        if "typedef uint8_t clockid_t" not in text:
+            return False                     # newer folly: nothing to guard
+        # Patched headers force the macro on for iOS, which makes the guard
+        # around the typedef false.
+        return not re.search(r"TARGET_OS_IPHONE", text)
+
+    def _repair_folly_clockid(self, pod_dir: str) -> bool:
+        """Apply the guard the project's own post_install hook meant to apply.
+
+        Not a new workaround: RN 0.68-era Podfiles already carry
+
+            sed -i -e $'s/__IPHONE_13_0/__IPHONE_14_0/' .../folly/portability/Time.h
+
+        whose effect is to leave `(TARGET_OS_IPHONE)` in the condition that sets
+        FOLLY_HAVE_CLOCK_GETTIME, so folly's own clockid_t typedef is skipped on
+        iOS. The hook is a shelled-out sed and fails silently -- a different
+        shell, a read-only Pods tree, a BSD/GNU sed difference -- and CocoaPods
+        reports success regardless. This re-applies the same edit to the same
+        line, and is a no-op when the hook worked.
+
+        Pods/ is generated, gitignored and rewritten by every `pod install`, so
+        nothing tracked is touched.
+        """
+        header = os.path.join(pod_dir, "Pods", "RCT-Folly", "folly",
+                              "portability", "Time.h")
+        try:
+            with open(header, "r", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return False
+
+        # The project's sed: __IPHONE_13_0 -> __IPHONE_14_0.
+        patched = text.replace("__IPHONE_13_0", "__IPHONE_14_0")
+
+        # Some copies differ enough that the rename alone leaves the typedef
+        # reachable. Force the macro directly in that case -- same outcome, and
+        # it is what the rename exists to achieve.
+        if "TARGET_OS_IPHONE" not in patched:
+            patched = patched.replace(
+                "#if !FOLLY_HAVE_CLOCK_GETTIME && (defined(__MACH__) || defined(_WIN32))",
+                "#if !FOLLY_HAVE_CLOCK_GETTIME && !TARGET_OS_IPHONE && "
+                "(defined(__MACH__) || defined(_WIN32))",
+                1)
+
+        if patched == text:
+            return False
+        try:
+            with open(header, "w") as f:
+                f.write(patched)
+        except OSError as e:
+            logger.warning("could not patch folly Time.h: %s", e)
+            return False
+        logger.info("Patched RCT-Folly Time.h: clockid_t conflicts with the iOS "
+                    "26 SDK and the Podfile's post_install had not applied")
+        return True
+
     def _pod_install(self, repo_path: str) -> Tuple[bool, str]:
         """Run `pod install` in whichever directory actually holds the Podfile.
 
@@ -1145,7 +1249,7 @@ class AppBuilder:
             logger.info(f"Running pod install in {candidate}")
             ok, out = _run(["pod", "install"], cwd=candidate, timeout=1800)
             if ok:
-                return True, out
+                return True, self._verify_pods(candidate, out)
 
             # A stale local spec repo (or a Podfile whose constraints moved) makes
             # a plain `pod install` fail — CocoaPods itself tells you to retry with
@@ -1156,7 +1260,7 @@ class AppBuilder:
                     ["pod", "install", "--repo-update"], cwd=candidate, timeout=2700
                 )
                 if ok:
-                    return True, out
+                    return True, self._verify_pods(candidate, out)
 
             # A Podfile.lock that has drifted from the Podfile makes CocoaPods
             # demand `pod update <pod>` — and fixing one pod just surfaces the
