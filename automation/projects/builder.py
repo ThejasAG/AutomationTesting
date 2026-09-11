@@ -1231,8 +1231,22 @@ class AppBuilder:
             return False                     # not an RN 0.68-era project
         if "typedef uint8_t clockid_t" not in text:
             return False                     # newer folly: nothing to guard
-        # Patched headers force the macro on for iOS, which makes the guard
-        # around the typedef false.
+
+        # Discriminate on the SHAPE of the iOS clause, not on whether
+        # TARGET_OS_IPHONE appears -- it appears in BOTH forms, which is why an
+        # earlier version of this check reported every unpatched header as
+        # already fixed:
+        #
+        #   unpatched  (TARGET_OS_IPHONE && (__IPHONE_OS_VERSION_MIN_REQUIRED
+        #                                     < __IPHONE_10_0))
+        #   patched    (TARGET_OS_IPHONE)
+        #
+        # The version gate is false on any modern deployment target, so
+        # FOLLY_HAVE_CLOCK_GETTIME is never set, the guard below stays true, and
+        # the typedef compiles straight into the SDK's enum.
+        if re.search(r"TARGET_OS_IPHONE\s*&&\s*\(?\s*__IPHONE_OS_VERSION_MIN_REQUIRED",
+                     text):
+            return True
         return not re.search(r"TARGET_OS_IPHONE", text)
 
     def _repair_folly_clockid(self, pod_dir: str) -> bool:
@@ -1260,8 +1274,20 @@ class AppBuilder:
         except OSError:
             return False
 
-        # The project's sed: __IPHONE_13_0 -> __IPHONE_14_0.
-        patched = text.replace("__IPHONE_13_0", "__IPHONE_14_0")
+        # Drop the version gate, leaving a bare (TARGET_OS_IPHONE) -- which is
+        # exactly what React Native's own react_native_pods.rb does, and what
+        # produces the header shape found on machines where this builds.
+        #
+        # Note the Podfile's __IPHONE_13_0 -> __IPHONE_14_0 sed is a no-op on
+        # this folly version: that string appears zero times in
+        # RCT-Folly 2021.06.28. RN's patch is the one that does the work, and it
+        # is the one that silently fails -- an unquoted path in its shell
+        # command breaks on a directory name containing a space.
+        patched = re.sub(
+            r"TARGET_OS_IPHONE\s*&&\s*\(?\s*__IPHONE_OS_VERSION_MIN_REQUIRED\s*<\s*"
+            r"__IPHONE_\d+_\d+\s*\)?",
+            "TARGET_OS_IPHONE", text)
+        patched = patched.replace("__IPHONE_13_0", "__IPHONE_14_0")
 
         # Some copies differ enough that the rename alone leaves the typedef
         # reachable. Force the macro directly in that case -- same outcome, and

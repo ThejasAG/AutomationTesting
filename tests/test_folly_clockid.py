@@ -22,31 +22,52 @@ import pytest
 
 from automation.projects.builder import app_builder
 
-# The header as folly ships it — the typedef is reachable.
+# RCT-Folly 2021.06.28.00-v2 EXACTLY as it ships, copied from a real Pods tree.
+#
+# The earlier fixture here was hand-written and, crucially, omitted
+# TARGET_OS_IPHONE from the unpatched form. Every test passed while the detector
+# was broken in the field: it asked whether TARGET_OS_IPHONE was PRESENT, and
+# that token appears in BOTH forms — bare when patched, inside a version gate
+# when not. So it declared every real unpatched header already fixed.
+#
+# Fixtures for this file must come from a real header, not from memory.
 UNPATCHED = """#pragma once
-#if __MACH__ && (MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_12)
-#define FOLLY_HAVE_CLOCK_GETTIME 1
+#include <time.h>
+
+#if __MACH__ &&                                                       \\
+        ((!defined(TARGET_OS_OSX) || TARGET_OS_OSX) &&                \\
+         (MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_12)) || \\
+    (TARGET_OS_IPHONE && (__IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_10_0))
+
+#ifdef FOLLY_HAVE_CLOCK_GETTIME
+#undef FOLLY_HAVE_CLOCK_GETTIME
 #endif
 
+#define FOLLY_HAVE_CLOCK_GETTIME 1
+#define FOLLY_FORCE_CLOCK_GETTIME_DEFINITION 1
+
+#endif
+
+// These aren't generic implementations, so we can only declare them on
+// platforms we support.
 #if !FOLLY_HAVE_CLOCK_GETTIME && (defined(__MACH__) || defined(_WIN32))
 #define CLOCK_REALTIME 0
+#define CLOCK_MONOTONIC 1
+
 typedef uint8_t clockid_t;
 extern "C" int clock_gettime(clockid_t clk_id, struct timespec* ts);
+extern "C" int clock_getres(clockid_t clk_id, struct timespec* ts);
 #endif
 """
 
 # The header after the Podfile's post_install has run — TARGET_OS_IPHONE forces
 # the macro on, so the typedef is dead code. Copied from a working machine.
-PATCHED = """#pragma once
-#if __MACH__ && ((!defined(TARGET_OS_OSX) || TARGET_OS_OSX) && \\
-    (MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_12)) || (TARGET_OS_IPHONE)
-#define FOLLY_HAVE_CLOCK_GETTIME 1
-#endif
-
-#if !FOLLY_HAVE_CLOCK_GETTIME && (defined(__MACH__) || defined(_WIN32))
-typedef uint8_t clockid_t;
-#endif
-"""
+# The same file after React Native's own react_native_pods.rb has run: the
+# version gate is stripped, leaving a bare (TARGET_OS_IPHONE). Copied from a
+# machine where this project builds.
+PATCHED = UNPATCHED.replace(
+    "(TARGET_OS_IPHONE && (__IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_10_0))",
+    "(TARGET_OS_IPHONE)")
 
 
 def _header(pod_dir, text):
