@@ -1339,70 +1339,57 @@ class AppBuilder:
         return out
 
     def removed_framework_users(self, repo_path: str) -> List[str]:
-        """Warnings for pods that use a framework this SDK has removed.
+        """Pods that LINK a framework this SDK has removed.
 
-        Unlike the folly and boost repairs, nothing here can be patched: the
-        symbol is gone from the SDK, so there is no file to edit and no language
-        standard to lower. The dependency has to change.
+        Linkage, not mention. The first version of this searched pod sources for
+        the framework name and blamed FBSDKCoreKit, which was wrong twice over:
+        its Swift files never import AssetsLibrary, and the only reference is a
+        dynamic lookup by name (fbsdkdfl_ALAssetsLibraryClass) that the linker
+        never sees. Acting on that would have meant removing a dependency for a
+        problem it does not cause.
 
-        What this DOES fix is the diagnosis. The build failed with
+        A podspec's `frameworks` field is what actually puts -framework on the
+        link line, so that is what is read.
 
-            error: 'ALAssetsLibrary' is unavailable in iOS: Use PHPhotoLibrary
-                   from the Photos framework instead
-
-        pointing at Apple's own SDK header, naming no dependency at all -- and
-        four packages referenced the framework while only one actually broke.
-        Finding that took most of a day. This says it in a sentence, before the
-        build starts.
+        Nothing here is repairable -- the symbol is gone from the SDK -- and in
+        practice a removed framework is usually NOT what fails the build: the
+        Objective-C headers still compile with a deprecation warning, and the
+        real blocker on this project turned out to be boost's std::unary_function
+        instead. So this is advisory, and says so.
         """
         removed = self._obsoleted_frameworks()
         if not removed:
             return []
 
-        pods_dir = os.path.join(repo_path, "ios", "Pods")
-        if not os.path.isdir(pods_dir):
-            return []
-
-        warnings: List[str] = []
-        for fw, sdkver in sorted(removed.items()):
-            for pod in sorted(os.listdir(pods_dir)):
-                pod_path = os.path.join(pods_dir, pod)
-                if pod.startswith(("Headers", "Target Support Files",
-                                   "Local Podspecs", "Pods.xcodeproj")) \
-                        or not os.path.isdir(pod_path):
+        specs = glob.glob(os.path.join(repo_path, "ios", "Pods",
+                                       "Local Podspecs", "*.podspec.json"))
+        specs += glob.glob(os.path.join(repo_path, "node_modules", "*",
+                                        "*.podspec"))
+        warnings = []
+        seen = set()
+        for spec in specs:
+            try:
+                with open(spec, "r", errors="replace") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            pod = os.path.basename(spec).split(".podspec")[0]
+            for fw, sdkver in sorted(removed.items()):
+                # Only a declared framework dependency reaches the link line.
+                if not re.search(rf'(?:"frameworks"\s*:|\.frameworks?\s*=)[^\n]*'
+                                 rf'{re.escape(fw)}', text):
                     continue
-                # Only a pod carrying Swift reads the .swiftinterface where the
-                # symbol is obsoleted. Pure Objective-C pods using the same
-                # framework still compile, with a deprecation warning.
-                if not glob.glob(os.path.join(pod_path, "**", "*.swift"),
-                                 recursive=True):
+                if (pod, fw) in seen:
                     continue
-                if not self._references(pod_path, fw):
-                    continue
+                seen.add((pod, fw))
                 warnings.append(
-                    f"{pod} uses {fw}, which Apple REMOVED in iOS {sdkver} "
-                    f"(the SDK marks it 'obsoleted'). The build will fail "
-                    f"compiling it, with an error naming Apple's header rather "
-                    f"than this pod. Nothing can patch this — the symbol no "
-                    f"longer exists. Update or remove the dependency that pulls "
-                    f"in {pod}.")
+                    f"{pod} links {fw}, which Apple removed in iOS {sdkver}. "
+                    f"This is advisory: the Objective-C headers still compile "
+                    f"with a deprecation warning, so it may not be what fails "
+                    f"the build. If a Swift file imports {fw} the build cannot "
+                    f"succeed and the dependency has to change -- nothing can "
+                    f"patch a symbol the SDK no longer ships.")
         return warnings
-
-    @staticmethod
-    def _references(pod_path: str, framework: str) -> bool:
-        """Whether a pod's source mentions *framework* at all."""
-        needle = framework.encode()
-        for root, _dirs, files in os.walk(pod_path):
-            for name in files:
-                if not name.endswith((".h", ".m", ".mm", ".swift", ".modulemap")):
-                    continue
-                try:
-                    with open(os.path.join(root, name), "rb") as f:
-                        if needle in f.read():
-                            return True
-                except OSError:
-                    continue
-        return False
 
     def _verify_pods(self, pod_dir: str, out: str) -> str:
         """Checks that run after a SUCCESSFUL pod install.
