@@ -2632,18 +2632,32 @@ class FlowRunner:
         Appium's rect DOES track the live scroll position though, so compute the
         swipe from it and verify after each one. Two swipes covered 1216 -> 396.
         """
-        try:
-            W = r.d.get_window_size()
-        except Exception:
+        # Every Appium call here is BOUNDED. _swipe_element and appium_click already
+        # are; this one was not, and it is the only unbounded path @open_reservation
+        # can take. A wedged WDA parks in find_elements/rect on this app's huge tree
+        # with no ceiling of its own, so the step burned its full 240s and was killed
+        # by the segment watchdog -- reported as "step hung", which names the symptom
+        # and hides that a single resolve was the thing stuck.
+        import concurrent.futures as _fut
+
+        def _bounded(fn, secs: float = 30.0, default=None):
+            ex = _fut.ThreadPoolExecutor(max_workers=1)
+            try:
+                return ex.submit(fn).result(timeout=secs)
+            except Exception:
+                return default
+            finally:
+                # wait=False: never block on a worker that is still stuck in WDA.
+                ex.shutdown(wait=False)
+
+        W = _bounded(lambda: r.d.get_window_size())
+        if not W:
             return False
         safe = (label or "").replace('"', "")
         for _ in range(tries):
-            try:
-                els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
-                if not els:
-                    return False
-                rc = els[0].rect
-            except Exception:
+            rc = _bounded(lambda: (r.d.find_elements(
+                AppiumBy.IOS_PREDICATE, f'label == "{safe}"') or [None])[0].rect)
+            if not rc:
                 return False
             top, h = rc["y"], rc["height"]
             if 90 <= top and top + h <= W["height"] - 90:
@@ -2652,12 +2666,11 @@ class FlowRunner:
             step = max(-420, min(420, dy))        # cap per swipe so we cannot overshoot wildly
             from_y = W["height"] * (0.72 if step > 0 else 0.28)
             to_y = max(80, min(W["height"] - 80, from_y - step))
-            try:
-                r.d.execute_script("mobile: dragFromToForDuration",
-                                   {"duration": 0.6, "fromX": W["width"] // 2,
-                                    "fromY": int(from_y), "toX": W["width"] // 2,
-                                    "toY": int(to_y)})
-            except Exception:
+            if _bounded(lambda: r.d.execute_script(
+                    "mobile: dragFromToForDuration",
+                    {"duration": 0.6, "fromX": W["width"] // 2,
+                     "fromY": int(from_y), "toX": W["width"] // 2,
+                     "toY": int(to_y)}) or True, 45.0) is None:
                 return False
             time.sleep(1.0)
         return False
@@ -2961,14 +2974,27 @@ class FlowRunner:
             def _do():
                 els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
                 if not els:
-                    return False
+                    return "no element matched that exact label"
                 els[0].click()
-                return True
+                return ""
+            # Report WHY, not just that it failed. "(WDA click)" cannot tell a 30s
+            # timeout from a stale element from a label that no longer resolves, and
+            # those need different fixes -- the first is a wedged WDA, the second a
+            # board that re-rendered under us, the third a status suffix that moved.
+            ex = _fut.ThreadPoolExecutor(max_workers=1)
             try:
-                with _fut.ThreadPoolExecutor(max_workers=1) as ex:
-                    return ex.submit(_do).result(timeout=30)
-            except Exception:
+                why = ex.submit(_do).result(timeout=30)
+                self._last_click_error = why
+                return not why
+            except _fut.TimeoutError:
+                self._last_click_error = ("WDA did not answer within 30s "
+                                          "(wedged resolve on this tree)")
                 return False
+            except Exception as e:
+                self._last_click_error = f"{type(e).__name__}: {str(e)[:90]}"
+                return False
+            finally:
+                ex.shutdown(wait=False)
 
         # Find the diner's assignable card. The card's PRESENCE is the real "loaded" signal —
         # the previous version gated on a separate "bookings_loaded" check and relaunched the app
@@ -3071,8 +3097,8 @@ class FlowRunner:
                 notes.append(f"    · {what} — '{label[:36]}' could not be brought into the "
                              f"viewport horizontally; clicking anyway")
             if not appium_click(label):
-                notes.append(f"[FAIL] {what} — found '{label[:40]}' but could not open it "
-                             f"(WDA click)")
+                notes.append(f"[FAIL] {what} — found '{label[:40]}' but could not open it: "
+                             f"{getattr(self, '_last_click_error', '') or 'WDA click failed'}")
                 return False
             notes.append(f"    [card search] clicked target {label[:40]!r}")
             for _ in range(6):                    # ~9s for the summary to render
