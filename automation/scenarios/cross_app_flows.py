@@ -3973,8 +3973,22 @@ class FlowRunner:
                     ("business", self._business_udid(), self.business_bundle)]
         missing = []
         for role, udid, bundle in required:
-            got = subprocess.run(["xcrun", "simctl", "get_app_container", udid, bundle],
-                                 capture_output=True, text=True, timeout=30)
+            # A slow simctl must not fail the run. simctl is shared with Xcode and
+            # goes to its knees under concurrent builds -- measured on this machine
+            # at >120s for three get_app_container calls, and `simctl list devices`
+            # timing out at 15s in the same window. This check is an EARLY WARNING
+            # about a missing app; treating "simctl did not answer" as "the app is
+            # not installed" turns a busy machine into a failed run that never ran
+            # a step, which is exactly what it did.
+            try:
+                got = subprocess.run(["xcrun", "simctl", "get_app_container", udid, bundle],
+                                     capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                self.on_event({"type": "log",
+                               "message": f"preflight: could not verify {role} app {bundle} "
+                                          f"— simctl did not answer in 30s (busy machine); "
+                                          f"continuing, the session will report a missing app"})
+                continue
             if got.returncode != 0 or not got.stdout.strip():
                 missing.append(f"{bundle} ({self.env} {role}) is not installed on {udid}")
             else:
@@ -4047,6 +4061,9 @@ class FlowRunner:
                                   f"(WDA built up front — C-App→B-App switch is now instant)"})
 
     def run(self) -> None:
+        # Local, like every other method here — subprocess is not a module-level
+        # import in this file, and the crash-reporting below names TimeoutExpired.
+        import subprocess
         self.on_event({"type": "start", "run_id": self.run_id, "flow": self.flow["id"]})
         crashed = None
         try:
@@ -4073,6 +4090,24 @@ class FlowRunner:
                     else:
                         run.status = "failed" if any(r.status == "FAIL" for r in rows) else "passed"
                     run.job_state = run.status
+                    # Persist WHY. This wrote status and nothing else, so a run that
+                    # died in preflight -- before any segment could produce a row --
+                    # reached the dashboard as "FAILED" with no RCA, no timeline and
+                    # no message, and the summary guessed it was "currently running".
+                    # The reason was in the backend log the whole time and never got
+                    # to the person reading the report.
+                    if crashed is not None and hasattr(run, "error_message"):
+                        detail = str(crashed).strip() or type(crashed).__name__
+                        if isinstance(crashed, subprocess.TimeoutExpired):
+                            # Name the tool, not the Python exception: this is
+                            # almost always simctl being starved by concurrent
+                            # builds, not the run doing anything wrong.
+                            detail = (f"{type(crashed).__name__}: a simulator command "
+                                      f"did not return in time — {detail}")
+                        run.error_message = f"{type(crashed).__name__}: {detail}"[:2000]
+                    elif not rows and hasattr(run, "error_message"):
+                        run.error_message = ("The run produced no scenario results — it "
+                                             "failed before any segment executed.")
                     run.completed_at = datetime.utcnow()
                     db.commit()
                 # Auto-prune: keep failure screenshots for only the most recent runs.
