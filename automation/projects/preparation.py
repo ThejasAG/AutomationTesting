@@ -634,6 +634,18 @@ class ProjectPreparationService:
         # Point automation.yaml at the artifact so Appium installs/launches it too.
         self._set_yaml_app_path(repo_path, result.artifact_path, step)
 
+        # Remove the old copy FIRST. `simctl install` does not replace a container
+        # that was built from a different derived-data path — it adds a second one
+        # under the same bundle id, and `simctl launch`/`listapps` then resolve that
+        # id to whichever container iOS picks, not the one just installed. That is
+        # how a June build and a September build ended up installed side by side and
+        # a run drove the stale one: a debug build carries no main.jsbundle, so the
+        # wrong container against the wrong Metro renders an empty root view.
+        if result.bundle_id:
+            step(f"Removing any previously installed {result.bundle_id}...")
+            _, un_out = app_builder.uninstall(device_id, result.bundle_id, platform)
+            step(un_out)
+
         step(f"Installing the app on {device_id}...")
         ok, out = app_builder.install(device_id, result.artifact_path, platform)
         if not ok:
