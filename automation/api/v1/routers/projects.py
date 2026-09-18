@@ -492,6 +492,10 @@ class ValidateBody(BaseModel):
     device_id: Optional[str] = None
     # When true, a missing automation.yaml is generated instead of failing.
     generate_yaml: bool = False
+    # Check out this branch before preparing. Without it the pipeline prepares
+    # whatever happens to be checked out, so picking a branch on the card and
+    # pressing Execute silently built the previous one.
+    branch: Optional[str] = None
 
 
 @router.post("/{project_id}/validate")
@@ -515,6 +519,7 @@ def validate_project(
         project_id,
         device_id=body.device_id,
         auto_generate_yaml=body.generate_yaml,
+        branch=body.branch,
     )
     return result.to_dict()
 
@@ -536,7 +541,8 @@ def start_preparation(
     """
     _get_project_or_404(project_id, db)
     return preparation_tracker.start(
-        project_id, device_id=body.device_id, generate_yaml=body.generate_yaml
+        project_id, device_id=body.device_id, generate_yaml=body.generate_yaml,
+        branch=body.branch,
     )
 
 

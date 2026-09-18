@@ -1229,7 +1229,7 @@ export interface PreparationTask {
 /** Starts the full pipeline (clone→build→install app) in the background. */
 export async function startPreparation(
     id: string,
-    opts: { device_id?: string; generate_yaml?: boolean } = {},
+    opts: { device_id?: string; generate_yaml?: boolean; branch?: string } = {},
 ): Promise<PreparationTask> {
     const res = await fetch(`${API_BASE}/projects/${id}/prepare`, {
         method: 'POST',
@@ -1237,6 +1237,7 @@ export async function startPreparation(
         body: JSON.stringify({
             device_id: opts.device_id ?? null,
             generate_yaml: opts.generate_yaml ?? false,
+            branch: opts.branch ?? null,
         }),
     });
     return handleResponse(res);

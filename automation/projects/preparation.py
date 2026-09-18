@@ -36,6 +36,8 @@ from automation.projects.detector import (
 )
 from automation.projects.builder import app_builder
 from automation.projects.repository import repository_manager
+from automation.projects import setup_measure as measure
+from automation.projects.setup_report import PENDING as PENDING_STATUS, SetupReport
 from automation.utils.validator import EnvironmentValidator, ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,9 @@ class PreparationResult:
     validation: Optional[ValidationResult] = None
     # True when automation.yaml is missing — the dashboard offers to generate it.
     needs_automation_yaml: bool = False
+    # Measured setup report (stage timings, sizes, counts). None when preparation
+    # bailed out before any stage was recorded.
+    report: Optional["SetupReport"] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -71,6 +76,7 @@ class PreparationResult:
             "error": self.error,
             "needs_automation_yaml": self.needs_automation_yaml,
             "validation": self.validation.to_dict() if self.validation else None,
+            "setup_report": self.report.to_dict() if self.report else None,
         }
 
 
@@ -200,7 +206,7 @@ class ProjectPreparationService:
     # ── Dependency install ───────────────────────────────────────────────────
 
     def install_dependencies(
-        self, project_id: str, project_type: str
+        self, project_id: str, project_type: str, stage=None
     ) -> "tuple[bool, Optional[str]]":
         """Install dependencies appropriate to the detected project type.
 
@@ -223,7 +229,7 @@ class ProjectPreparationService:
             return ok, None if ok else f"pip install -r {req_file} failed. See server logs."
 
         if project_type == ProjectType.REACT_NATIVE:
-            return self._install_node_deps(project_id, repo_path)
+            return self._install_node_deps(project_id, repo_path, stage=stage)
 
         if project_type == ProjectType.FLUTTER:
             return self._run_in_repo(project_id, ["flutter", "pub", "get"])
@@ -283,7 +289,7 @@ class ProjectPreparationService:
             logger.warning(f"[{project_id}] Could not write .yarnrc.yml: {e}")
 
     def _install_node_deps(
-        self, project_id: str, repo_path: str
+        self, project_id: str, repo_path: str, stage=None
     ) -> "tuple[bool, Optional[str]]":
         """Install JS dependencies, tolerating the peer-dependency conflicts that
         are endemic to real React Native apps.
@@ -319,7 +325,13 @@ class ProjectPreparationService:
             if pm[0] == "corepack":
                 self._ensure_node_modules_linker(project_id, repo_path)
 
-            ok, err = self._run_in_repo(project_id, pm + ["install"])
+            if stage is not None:
+                # Same command, but streamed so the install can be measured while
+                # it runs rather than only after it returns.
+                ok, out = measure.measure_js_install(stage, repo_path, pm + ["install"])
+                err = None if ok else out
+            else:
+                ok, err = self._run_in_repo(project_id, pm + ["install"])
             if ok:
                 return True, None
 
@@ -336,7 +348,11 @@ class ProjectPreparationService:
                 f"version rather than install the ones it pins.\n\n{err or ''}")
 
         # 2. Plain npm install.
-        ok, err = self._run_in_repo(project_id, ["npm", "install"])
+        if stage is not None:
+            ok, out = measure.measure_js_install(stage, repo_path, ["npm", "install"])
+            err = None if ok else out
+        else:
+            ok, err = self._run_in_repo(project_id, ["npm", "install"])
         if ok:
             return True, None
 
@@ -433,10 +449,53 @@ class ProjectPreparationService:
                 error=f"Project {project_id} not found and no git_url supplied.",
             )
 
+        # The measured report. Stages are recorded around the SAME calls the
+        # pipeline already makes, so the report can never describe work that did
+        # not run.
+        import os as _os
+
+        report = SetupReport(project_name=project_name or project_id)
+        repo_path_early = repository_manager.get_repo_path(project_id)
+        report.disk_free_before = measure.disk_free(
+            repo_path_early if _os.path.isdir(repo_path_early)
+            else _os.path.dirname(repo_path_early) or "/")
+        repo_existed = _os.path.isdir(_os.path.join(repo_path_early, ".git"))
+        if repo_existed:
+            report.warm, report.reuse = measure.observe_state(repo_path_early)
+
+        # 0. Environment — reused wholesale from the existing doctor rather than
+        # re-shelling every tool here.
+        env_stage = report.stage("environment", "Environment validation").start()
+        try:
+            from automation.projects import macos_environment as _env
+            report.host = _env.detect_host()
+            env_stage.complete()
+        except Exception as e:                       # never fail setup on reporting
+            env_stage.fail(str(e), classification="ENVIRONMENT")
+            logger.warning("[%s] environment detection failed: %s", project_id, e)
+
         # 1-3. Clone / pull / checkout.
-        sync = self.sync_repository(project_id, git_url, branch, on_step=on_step)
+        clone_stage = report.stage("clone", "Repository preparation")
+        sync_holder: Dict[str, Any] = {}
+
+        def _do_sync():
+            res = self.sync_repository(project_id, git_url, branch, on_step=on_step)
+            sync_holder["result"] = res
+            return res.ok, "\n".join(res.steps) + ("\n" + (res.error or ""))
+
+        measure.measure_clone(clone_stage, repo_path_early, _do_sync, repo_existed)
+        sync = sync_holder["result"]
         if not sync.ok:
+            sync.report = report
             return sync
+
+        try:
+            from automation.projects import macos_environment as _env2
+            report.project = _env2.detect_project(repo_path_early)
+        except Exception:
+            pass
+        if report.warm is None:
+            report.warm, report.reuse = measure.observe_state(repo_path_early)
 
         steps = list(sync.steps)
 
@@ -475,6 +534,7 @@ class ProjectPreparationService:
                     steps=steps,
                     error="automation.yaml not found.",
                     needs_automation_yaml=True,
+                    report=report,
                 )
 
         # 6. Type-aware validation.
@@ -498,6 +558,7 @@ class ProjectPreparationService:
                 steps=steps,
                 error=f"Validation failed: {reasons}",
                 validation=validation,
+                report=report,
             )
 
         for w in validation.warnings:
@@ -505,7 +566,48 @@ class ProjectPreparationService:
 
         # 7. Install dependencies.
         step("Installing dependencies...")
-        deps_ok, deps_err = self.install_dependencies(project_id, project_type)
+        js_stage = report.stage("js", "JS dependencies")
+        decl = measure.declared_dependency_count(repo_path)
+        if decl.get("dependencies") is not None:
+            js_stage.metrics["Declared (deps)"] = decl["dependencies"]
+            js_stage.metrics["Declared (dev)"] = decl["devDependencies"]
+
+        # Was the tree already there? Needed to report a SKIPPED install honestly
+        # rather than as a suspiciously fast one.
+        _nm = os.path.join(repo_path, "node_modules")
+        _nm_present_before = os.path.isdir(_nm) and bool(os.listdir(_nm))
+
+        deps_ok, deps_err = self.install_dependencies(
+            project_id, project_type, stage=js_stage)
+
+        # A non-JS project never touches the JS stage; drop it rather than
+        # leaving an empty "pending" row in the report.
+        if js_stage.status == PENDING_STATUS:
+            report.stages.remove(js_stage)
+        elif _nm_present_before and js_stage.status == "completed":
+            js_stage.notes.append(
+                "node_modules was already present — the package manager "
+                "reconciled it rather than installing from empty")
+
+        # 7b. Platform-injected dependencies: always reported, including "0".
+        if project_type == ProjectType.REACT_NATIVE:
+            plan = app_builder.platform_dependency_plan(repo_path)
+            measure.report_platform_deps(
+                report.stage("platform_deps", "Platform dependencies"),
+                plan["injected"], plan["skipped"])
+            for pkg in plan["injected"]:
+                step(f"Platform dependency injected: {pkg}")
+            for pkg in plan["skipped"]:
+                step(f"Platform dependency skipped ({pkg}): no source import detected")
+
+            # 7c. Patches. A patch that the platform's own injection has just
+            # disabled is reported as such, not left for the reader to spot.
+            patch_stage = report.stage("patches", "Patches")
+            patch_stage._injection_conflicts = measure.patches_conflicting_with_injection(
+                repo_path, plan["injected"])
+            measure.measure_patches(patch_stage, repo_path)
+            for msg in patch_stage._injection_conflicts:
+                step(f"WARNING: {msg}")
 
         # A "successful" install can still carry a warning worth seeing (e.g. peer
         # conflicts bypassed) — surface it instead of hiding it behind success.
@@ -528,6 +630,7 @@ class ProjectPreparationService:
                 steps=steps,
                 error=f"Dependency installation failed: {(deps_err or '').strip()[:300]}",
                 validation=validation,
+                report=report,
             )
 
         # 8. Build the app and install it on the target device.
@@ -548,6 +651,7 @@ class ProjectPreparationService:
                     ok=False, project_type=project_type, branch=sync.branch,
                     clone_status=CLONED, steps=steps,
                     error=f"No usable iOS simulator: {note}", validation=validation,
+                    report=report,
                 )
             if note:
                 step(f"⚠ {note}")
@@ -560,11 +664,14 @@ class ProjectPreparationService:
                     ok=False, project_type=project_type, branch=sync.branch,
                     clone_status=CLONED, steps=steps,
                     error=boot_msg, validation=validation,
+                    report=report,
                 )
         if device_id:
             build_ok, build_err = self._build_and_install(
-                project_id, repo_path, platform, device_id, project_name, step
+                project_id, repo_path, platform, device_id, project_name, step,
+                setup_report=report,
             )
+            report.disk_free_after = measure.disk_free(repo_path)
             if not build_ok:
                 return PreparationResult(
                     ok=False,
@@ -574,9 +681,18 @@ class ProjectPreparationService:
                     steps=steps,
                     error=f"App build/install failed: {(build_err or '')[:300]}",
                     validation=validation,
+                    report=report,
                 )
         else:
             step("No device selected — skipping app build/install.")
+
+        if report.disk_free_after is None:
+            report.disk_free_after = measure.disk_free(repo_path)
+
+        # The whole measured report, into the step log. Plain text with no cursor
+        # control, so the saved log reads exactly as the terminal did.
+        for line in report.render().splitlines():
+            step(line)
 
         step("Project ready for execution.")
         self._update_project(project_id, clone_status=READY)
@@ -588,6 +704,7 @@ class ProjectPreparationService:
             clone_status=READY,
             steps=steps,
             validation=validation,
+            report=report,
         )
 
     def _build_and_install(
@@ -598,6 +715,7 @@ class ProjectPreparationService:
         device_id: str,
         project_name: str,
         step: Callable[[str], None],
+        setup_report=None,
     ) -> "tuple[bool, Optional[str]]":
         """Build the app, install it on the device, launch it, and record the
         artifact path in automation.yaml as ``environment.app``."""
@@ -626,17 +744,42 @@ class ProjectPreparationService:
                 # A broken preflight must never be why a build does not happen.
                 logger.warning("preflight failed to run: %s", e)
 
+        # CocoaPods, measured. Runs the builder's own _pod_install — the same
+        # call build_ios would make — so pod timing/size is attributable instead
+        # of hidden inside the build stage. `pod install` only; never pod update.
+        if platform == "ios" and setup_report is not None:
+            pods_stage = setup_report.stage("pods", "CocoaPods")
+            pods_ok = measure.measure_pods(
+                pods_stage, repo_path, lambda: app_builder._pod_install(repo_path))
+            for line in pods_stage.render():
+                step(line)
+            if not pods_ok:
+                self._update_project(project_id, build_status="build_failed",
+                                     build_error=pods_stage.error)
+                return False, pods_stage.error
+
         step(f"Building the {platform} app (this can take several minutes)...")
         self._update_project(project_id, build_status="building", build_error=None)
+
+        build_stage = (setup_report.stage("build", f"{platform} build").start()
+                       if setup_report is not None else None)
 
         # Pass the target device so iOS builds only the arch we will install onto.
         result = app_builder.build(repo_path, platform, device_id=device_id)
 
         if result.skipped:
+            if build_stage is not None:
+                build_stage.skip("no native app to build for this platform")
             step("No native app to build for this platform — skipping.")
             return True, None
 
         if not result.ok:
+            if build_stage is not None:
+                from automation.projects.setup_report import classify_failure
+                build_stage.fail(
+                    (result.error or "")[-4000:],
+                    classification=classify_failure(result.error or ""),
+                    remedy="See the Xcode errors above; they name the failing target.")
             step("App build FAILED.")
             for line in (result.error or "").splitlines()[-20:]:
                 if line.strip():
@@ -646,6 +789,13 @@ class ProjectPreparationService:
             )
             return False, result.error
 
+        if build_stage is not None:
+            app = result.artifact_path or ""
+            build_stage.complete(**{
+                "Artifact": os.path.basename(app) or measure.UNAVAILABLE,
+                "Artifact size": measure.human_bytes(measure.dir_size(app)),
+                "Bundle id": result.bundle_id or measure.UNAVAILABLE,
+            })
         step(f"Build succeeded: {os.path.basename(result.artifact_path)}")
         self._update_project(
             project_id,
@@ -850,6 +1000,7 @@ class PreparationTracker:
         project_id: str,
         device_id: Optional[str] = None,
         generate_yaml: bool = False,
+        branch: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             existing = self._tasks.get(project_id)
@@ -887,6 +1038,7 @@ class PreparationTracker:
                     device_id=device_id,
                     auto_generate_yaml=generate_yaml,
                     on_step=on_step,
+                    branch=branch,
                 )
                 payload = result.to_dict()
                 with self._lock:

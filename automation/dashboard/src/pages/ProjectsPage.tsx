@@ -351,7 +351,14 @@ export default function ProjectsPage() {
                   phaseLabel: 'Starting', phase: 0, phaseCount: 9, elapsed: 0 });
 
     try {
-      await startPreparation(p.id, { device_id: device.id, generate_yaml: generateYaml });
+      // The card's Branch picker decides what gets built. Without this the
+      // pipeline prepared whatever was already checked out, so choosing a branch
+      // and pressing Execute silently rebuilt the previous one.
+      await startPreparation(p.id, {
+        device_id: device.id,
+        generate_yaml: generateYaml,
+        branch: pickedBranch[p.id],
+      });
 
       // Poll until the pipeline finishes, streaming its steps into the modal.
       const task = await new Promise<PreparationTask>((resolve, reject) => {
