@@ -1738,7 +1738,58 @@ class AppBuilder:
                     f"the build. If a Swift file imports {fw} the build cannot "
                     f"succeed and the dependency has to change -- nothing can "
                     f"patch a symbol the SDK no longer ships.")
+
+        # The advisory above has always said a Swift import is the fatal case;
+        # it just never looked for one. It did not, and so blamed
+        # react-native-blob-util -- which ships no Swift at all -- for a
+        # SwiftExplicitDependencyCompileModuleFromInterface failure that
+        # react-native-compressor caused with `import AssetsLibrary`.
+        warnings.extend(self._swift_importers_of_removed_frameworks(repo_path, removed))
         return warnings
+
+    def _swift_importers_of_removed_frameworks(
+        self, repo_path: str, removed: Dict[str, str]) -> List[str]:
+        """Dependencies whose SWIFT sources import a framework the SDK dropped.
+
+        This is the unrecoverable case. A Swift `import X` needs a module to
+        compile against; when the SDK no longer ships one the build fails at
+        SwiftExplicitDependencyCompileModuleFromInterface and no patch can help.
+        An Objective-C `#import <X/X.h>` is not equivalent -- those headers are
+        still present and compile with a deprecation warning.
+        """
+        found: List[str] = []
+        node_modules = os.path.join(repo_path, "node_modules")
+        if not os.path.isdir(node_modules):
+            return found
+
+        patterns = {fw: re.compile(rf"^\s*import\s+{re.escape(fw)}\s*$", re.M)
+                    for fw in removed}
+        for pkg in sorted(os.listdir(node_modules)):
+            ios_dir = os.path.join(node_modules, pkg, "ios")
+            if not os.path.isdir(ios_dir):
+                continue
+            for root, _dirs, files in os.walk(ios_dir):
+                for name in files:
+                    if not name.endswith(".swift"):
+                        continue
+                    try:
+                        with open(os.path.join(root, name), "r", errors="replace") as f:
+                            text = f.read()
+                    except OSError:
+                        continue
+                    for fw, rx in patterns.items():
+                        if rx.search(text):
+                            rel = os.path.relpath(os.path.join(root, name),
+                                                  os.path.join(node_modules, pkg))
+                            found.append(
+                                f"BUILD BLOCKED [APPLICATION DEPENDENCY] {pkg}: "
+                                f"{rel} has `import {fw}`, and Apple removed {fw} "
+                                f"in iOS {removed[fw]}. A Swift import needs a "
+                                f"module that no longer exists, so this cannot be "
+                                f"patched or worked around -- {pkg} must be "
+                                f"upgraded or replaced.")
+                            break
+        return found
 
     def _verify_pods(self, pod_dir: str, out: str) -> str:
         """Checks that run after a SUCCESSFUL pod install.

@@ -601,6 +601,31 @@ class ProjectPreparationService:
     ) -> "tuple[bool, Optional[str]]":
         """Build the app, install it on the device, launch it, and record the
         artifact path in automation.yaml as ``environment.app``."""
+        # Preflight BEFORE xcodebuild. A build reports the last thing that broke,
+        # and unrelated problems mask each other — a stale pod manifest, an
+        # unapplied patch and an incompatible dependency all end as "xcodebuild
+        # failed", so fixing whichever surfaced just promotes the next. This says
+        # up front which layer a failure belongs to, and on a machine that differs
+        # from a working one it names the difference.
+        #
+        # Read-only and non-fatal: it never blocks a build, because a check that
+        # can veto is a check that gets bypassed. A genuine blocker still has to
+        # come from the build itself.
+        if platform == "ios":
+            try:
+                from automation.projects.macos_environment import doctor
+                report = doctor(repo_path)
+                for check in report.failures + report.warnings:
+                    step(f"[preflight] {check.status} {check.category}: "
+                         f"{check.name} — {check.detail}")
+                    if check.fix:
+                        step(f"[preflight]   → {check.fix}")
+                if report.ok and not report.warnings:
+                    step("[preflight] environment and project checks passed.")
+            except Exception as e:
+                # A broken preflight must never be why a build does not happen.
+                logger.warning("preflight failed to run: %s", e)
+
         step(f"Building the {platform} app (this can take several minutes)...")
         self._update_project(project_id, build_status="building", build_error=None)
 
