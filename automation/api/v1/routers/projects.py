@@ -372,6 +372,23 @@ def delete_project(
 
 # ── Repository management ─────────────────────────────────────────────────────
 
+@router.get("/branches-for-url")
+def list_branches_for_url(git_url: str):
+    """Branches for a repo URL, for the Register Project form.
+
+    The project does not exist yet there, so there is no id to ask by — and that
+    form is exactly where a branch was typed blind.
+    """
+    branches = repository_manager.list_remote_branches(git_url)
+    if not branches:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not read branches from {git_url} — check the URL and "
+                   "that credentials are configured.",
+        )
+    return {"branches": branches, "default": branches[0]}
+
+
 @router.get("/{project_id}/branches")
 def list_branches(project_id: str, db: Session = Depends(get_db)):
     """Every branch on the project's remote, default first.

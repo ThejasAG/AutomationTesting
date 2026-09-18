@@ -1142,8 +1142,30 @@ export async function deleteProject(id: string, deleteLocal: boolean): Promise<v
 }
 
 /** Clone the repository. force=true performs a full re-clone. */
-export async function cloneProject(id: string, force = false): Promise<Project> {
-    const res = await fetch(`${API_BASE}/projects/${id}/clone?force=${force}`, {
+export interface BranchList {
+    branches: string[];
+    default: string;
+    current: string | null;
+}
+
+/** Branches on the project's remote, default first. Reads the remote, so it
+ *  answers before the project has ever been cloned. */
+export async function getProjectBranches(id: string): Promise<BranchList> {
+    const res = await fetch(`${API_BASE}/projects/${id}/branches`, { headers: getHeaders() });
+    return handleResponse(res);
+}
+
+/** Branches for a repo URL — for the Register form, where no project id exists yet. */
+export async function getBranchesForUrl(gitUrl: string): Promise<{ branches: string[]; default: string }> {
+    const res = await fetch(`${API_BASE}/projects/branches-for-url?git_url=${encodeURIComponent(gitUrl)}`,
+        { headers: getHeaders() });
+    return handleResponse(res);
+}
+
+export async function cloneProject(id: string, force = false, branch?: string): Promise<Project> {
+    const qs = new URLSearchParams({ force: String(force) });
+    if (branch) qs.set('branch', branch);
+    const res = await fetch(`${API_BASE}/projects/${id}/clone?${qs}`, {
         method: 'POST',
         headers: getHeaders(),
     });

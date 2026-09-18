@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   getProjects, addProject, updateProject, deleteProject,
-  cloneProject, pullProject,
+  cloneProject, pullProject, getProjectBranches, getBranchesForUrl,
   startPreparation, getPreparationStatus,
   getGroups, addGroup, deleteGroup,
   getDevices, startRun,
@@ -267,10 +267,48 @@ export default function ProjectsPage() {
     }
   };
 
+  // Branches per project, fetched on demand: this consumer repo has 489 of them,
+  // so they are read when a card's picker is first opened, not for every card on
+  // page load.
+  const [branches, setBranches] = useState<Record<string, string[]>>({});
+  const [pickedBranch, setPickedBranch] = useState<Record<string, string>>({});
+  const [loadingBranches, setLoadingBranches] = useState<string | null>(null);
+  const [pickedDevice, setPickedDevice] = useState<Record<string, string>>({});
+  const [formBranches, setFormBranches] = useState<string[]>([]);
+  const [loadingFormBranches, setLoadingFormBranches] = useState(false);
+
+  const loadFormBranches = async () => {
+    const url = form.git_url.trim();
+    if (!url || loadingFormBranches) return;
+    setLoadingFormBranches(true);
+    try {
+      const res = await getBranchesForUrl(url);
+      setFormBranches(res.branches);
+    } catch {
+      setFormBranches([]);   // a bad/unreachable URL just means no suggestions
+    } finally {
+      setLoadingFormBranches(false);
+    }
+  };
+
+  const loadBranches = async (p: Project) => {
+    if (branches[p.id]) return;
+    setLoadingBranches(p.id);
+    try {
+      const res = await getProjectBranches(p.id);
+      setBranches(b => ({ ...b, [p.id]: res.branches }));
+      setPickedBranch(s => ({ ...s, [p.id]: s[p.id] ?? (res.current || res.default) }));
+    } catch (e: any) {
+      alert(`Could not list branches: ${e.message}`);
+    } finally {
+      setLoadingBranches(null);
+    }
+  };
+
   const doClone = async (p: Project, force = false) => {
     setBusyFor(p.id, force ? 're-cloning' : 'cloning');
     try {
-      await cloneProject(p.id, force);
+      await cloneProject(p.id, force, pickedBranch[p.id]);
       await refresh();
     } catch (e: any) {
       alert(`Clone failed: ${e.message}`);
@@ -300,7 +338,12 @@ export default function ProjectsPage() {
    *  blocking on one long request.
    */
   const doExecute = async (p: Project, generateYaml = false, runAfter = true) => {
-    const device = devices.find(d => d.platform?.toLowerCase() === p.platform) ?? devices[0];
+    // The card's Device picker wins; "Auto" falls back to the first device on the
+    // project's platform, which is what this always did.
+    const chosen = pickedDevice[p.id];
+    const device = (chosen && devices.find(d => d.id === chosen))
+      ?? devices.find(d => d.platform?.toLowerCase() === p.platform)
+      ?? devices[0];
     if (!device) return alert('No device connected. Connect a device or boot a simulator first.');
 
     setBusyFor(p.id, 'preparing');
@@ -456,10 +499,23 @@ export default function ProjectsPage() {
 
             <div style={{ display: 'flex', gap: 16 }}>
               <div style={{ flex: 1 }}>
-                <label style={{ display: 'block', marginBottom: 8, color: 'var(--text-secondary)' }}>Default Branch</label>
+                <label style={{ display: 'block', marginBottom: 8, color: 'var(--text-secondary)' }}>
+                  Default Branch
+                  {formBranches.length > 0 && (
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> · {formBranches.length} on remote</span>
+                  )}
+                </label>
+                {/* Branches load once a repo URL is present — before the project
+                    exists there is no id to ask by, so this reads the URL itself. */}
                 <input required value={form.default_branch}
+                  list="register-branches"
                   onChange={e => setForm({ ...form, default_branch: e.target.value })}
-                  style={inputStyle} placeholder="main" />
+                  onFocus={loadFormBranches}
+                  style={inputStyle}
+                  placeholder={loadingFormBranches ? 'Loading branches…' : 'main'} />
+                <datalist id="register-branches">
+                  {formBranches.map(b => <option key={b} value={b} />)}
+                </datalist>
               </div>
               <div style={{ flex: 1 }}>
                 <label style={{ display: 'block', marginBottom: 8, color: 'var(--text-secondary)' }}>Platform</label>
@@ -598,6 +654,53 @@ export default function ProjectsPage() {
                     {p.clone_error}
                   </div>
                 )}
+
+                {/* Branch + device pickers. Both feed the buttons below: clone
+                    checks out the chosen branch, and a run installs onto the
+                    chosen device instead of whichever simulator happens to be up. */}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', fontSize: 13 }}>
+                    <GitBranch size={13} /> Branch
+                  </label>
+                  <input
+                    list={`branches-${p.id}`}
+                    value={pickedBranch[p.id] ?? p.current_branch ?? p.default_branch ?? ''}
+                    onFocus={() => loadBranches(p)}
+                    onChange={e => setPickedBranch(s => ({ ...s, [p.id]: e.target.value }))}
+                    placeholder={loadingBranches === p.id ? 'Loading branches…' : 'Type to search…'}
+                    style={{ ...inputStyle, width: 260, padding: '6px 10px', fontSize: 13 }}
+                  />
+                  {/* A datalist keeps this searchable AND typeable — 489 branches is
+                      far too many for a plain <select>, and a name can still be
+                      pasted in for a branch pushed since the list was fetched. */}
+                  <datalist id={`branches-${p.id}`}>
+                    {(branches[p.id] ?? []).map(b => <option key={b} value={b} />)}
+                  </datalist>
+                  {branches[p.id] && (
+                    <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                      {branches[p.id].length} branches
+                    </span>
+                  )}
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', fontSize: 13, marginLeft: 8 }}>
+                    <Smartphone size={13} /> Device
+                  </label>
+                  <select
+                    value={pickedDevice[p.id] ?? ''}
+                    onChange={e => setPickedDevice(s => ({ ...s, [p.id]: e.target.value }))}
+                    style={{ ...inputStyle, width: 240, padding: '6px 10px', fontSize: 13 }}
+                  >
+                    <option value="">Auto (first available)</option>
+                    {devices
+                      .filter(d => d.platform?.toLowerCase() === p.platform?.toLowerCase())
+                      .map(d => (
+                        <option key={d.id} value={d.id}>
+                          {d.name}{d.platform_version ? ` · ${d.platform_version}` : ''}
+                          {d.status ? ` · ${d.status}` : ''}
+                        </option>
+                      ))}
+                  </select>
+                </div>
 
                 {/* Action buttons */}
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
