@@ -372,19 +372,48 @@ def delete_project(
 
 # ── Repository management ─────────────────────────────────────────────────────
 
+@router.get("/{project_id}/branches")
+def list_branches(project_id: str, db: Session = Depends(get_db)):
+    """Every branch on the project's remote, default first.
+
+    Reads the remote directly, so it answers for a project that has never been
+    cloned — which is exactly when the branch needs choosing. The dashboard
+    offers these instead of asking someone to type a branch from memory: a typo
+    otherwise surfaces only when the clone fails.
+    """
+    project = _get_project_or_404(project_id, db)
+    branches = repository_manager.list_remote_branches(project.git_url)
+    if not branches:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not read branches from {project.git_url} — "
+                   "check the URL and that credentials are configured.",
+        )
+    return {
+        "branches": branches,
+        "default": branches[0],
+        "current": project.current_branch or project.default_branch,
+    }
+
+
 @router.post("/{project_id}/clone")
 def clone_repository(
     project_id: str,
     force: bool = False,
+    branch: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """Clone the repository. ``force=true`` performs a full re-clone."""
+    """Clone the repository. ``force=true`` performs a full re-clone.
+
+    ``branch`` checks out that branch instead of the project's default — the
+    dashboard passes whichever one was picked from ``GET /branches``.
+    """
     project = _get_project_or_404(project_id, db)
 
     result = preparation_service.sync_repository(
         project_id,
         project.git_url,
-        project.default_branch or "main",
+        branch or project.default_branch or "main",
         force_reclone=force,
     )
     if result.ok:

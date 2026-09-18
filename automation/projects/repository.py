@@ -5,7 +5,7 @@ import sys
 import tempfile
 import yaml
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from automation.projects.config import AutomationYamlConfig
 
@@ -54,6 +54,30 @@ class RepositoryManager:
     def remote_branch_exists(self, git_url: str, branch: str) -> bool:
         res = self._run_git(["ls-remote", "--heads", git_url, branch])
         return res.returncode == 0 and bool(res.stdout.strip())
+
+    def list_remote_branches(self, git_url: str) -> List[str]:
+        """Every branch on the remote, default first, then alphabetical.
+
+        So the dashboard can offer a list to pick from instead of asking someone to
+        type a branch name from memory: this consumer repo has 100+ branches, and a
+        typo is only discovered when the clone fails with "Remote branch not found".
+
+        Reads the remote without cloning, so it works for a project that has never
+        been cloned — which is exactly when the branch has to be chosen.
+        """
+        res = self._run_git(["ls-remote", "--heads", git_url])
+        if res.returncode != 0:
+            return []
+        branches = sorted(
+            line.split("refs/heads/", 1)[1].strip()
+            for line in res.stdout.splitlines()
+            if "refs/heads/" in line
+        )
+        default = self.get_remote_default_branch(git_url)
+        if default and default in branches:
+            branches.remove(default)
+            branches.insert(0, default)
+        return branches
 
     def resolve_branch(self, git_url: str, branch: str) -> str:
         """Return *branch* when the remote has it, else the remote's default.
