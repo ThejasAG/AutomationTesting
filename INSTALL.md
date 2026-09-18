@@ -25,7 +25,23 @@ brew tap facebook/fb && brew install idb-companion && pipx install fb-idb
 > to build WebDriverAgent at all. Removing it makes every run fail with
 > `xcodebuild failed with code 70`, and nothing points at the cause.
 
-**Check:** `xcodebuild -showsdks | grep iphonesimulator` prints an SDK.
+### Which iOS version do I need?
+
+**Whichever one your Xcode already installed.** Any iOS **16 through 26** runtime
+works — see `ios-support.json`. You do not need to match anyone else's version, and
+you should not download an extra runtime to do so.
+
+Nothing pins a version: the platform finds a simulator your Mac actually has
+(preferring one already booted, else an available iPhone) and boots it for you. Test
+capabilities deliberately omit `platformVersion`, because Appium treats it as an
+*exact* match — a pinned `18.3` is why a Mac shipping only iOS 26 used to fail to
+start a session at all, even though the tests run fine on 26.
+
+Leave `PR_TEST_IOS_DEVICE` empty in `.env` (step 3) so this auto-selection applies. A
+simulator UDID only exists on the Mac it came from.
+
+**Check:** `xcodebuild -showsdks | grep iphonesimulator` prints an SDK, and
+`bash scripts/doctor.sh` reports an iOS runtime in the supported range.
 
 ---
 

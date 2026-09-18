@@ -528,6 +528,45 @@ def list_flows() -> List[Dict[str, Any]]:
 _AMOUNT_RE = re.compile(r'[€]\s*([\d]{1,6}(?:[.,]\d{2}))|(?<![\d.])(\d{1,6}\.\d{2})\s*€?')
 
 
+# Live in-process flow runs, by run_id -> the Event that asks one to stop.
+#
+# The Stop button used to be COSMETIC for these runs: `stop_run` wrote
+# status='stopped' to the database and nothing else, while the daemon thread kept
+# driving the simulators to the end of the flow. Two visible consequences: the
+# devices stayed busy long after the user thought the run was over, and the
+# thread's own `finally` later overwrote 'stopped' with passed/failed — so a
+# stopped run un-stopped itself.
+#
+# A thread cannot be safely killed in Python, and killing this one would be wrong
+# anyway: it holds live Appium sessions that must be quit() or the simulator is
+# left wedged for the next run. So cancellation is COOPERATIVE — the runner checks
+# this Event between steps and segments and unwinds through its normal finally,
+# quitting every driver on the way out.
+_ACTIVE_FLOW_RUNS: Dict[str, "threading.Event"] = {}
+_ACTIVE_FLOW_RUNS_LOCK = threading.Lock()
+
+
+def request_flow_stop(run_id: str) -> bool:
+    """Ask an in-process flow run to stop. True if one was live to be asked.
+
+    Returns False for a run that is queued, already finished, or executing on a
+    distributed agent rather than in this process — the caller still marks the
+    database, which is what stops those.
+    """
+    with _ACTIVE_FLOW_RUNS_LOCK:
+        ev = _ACTIVE_FLOW_RUNS.get(run_id)
+    if ev is None:
+        return False
+    ev.set()
+    return True
+
+
+def flow_run_is_active(run_id: str) -> bool:
+    """Whether this process is currently running that flow."""
+    with _ACTIVE_FLOW_RUNS_LOCK:
+        return run_id in _ACTIVE_FLOW_RUNS
+
+
 class FlowRunner:
     """Execute one flow's segments in order, switching device/app/account."""
 
@@ -548,6 +587,13 @@ class FlowRunner:
         self._runners: Dict[str, ScenarioRunner] = {}
         self._biz_account: Optional[str] = None
         self._biz_metro_ready = False
+        # Set by request_flow_stop() when the user presses Stop. Checked between
+        # steps and segments; never kills the thread (see _ACTIVE_FLOW_RUNS).
+        self._cancel = threading.Event()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
 
     # -- session management --------------------------------------------------
     def _business_udid(self) -> str:
@@ -1028,12 +1074,29 @@ class FlowRunner:
             n = self._clear_logbox()
             if n:
                 notes.append(f"[ok] @book_appointment — cleared {n} LogBox overlay(s)")
-            btn = next((e for e in self._idb_els()
-                        if e.get("label") == "bookAppoitment"), None)
+            # POLL for the button; do not judge on one snapshot. BOOK NOW renders only
+            # after the chosen time slot has been committed, and on a loaded host that
+            # commit is slow — the preceding @first_time_slot has been measured at
+            # 114.2s. A single idb read taken the instant the slot step returned found
+            # no button and failed the flow outright, on a screen where BOOK NOW did
+            # appear moments later. ~24s of polling costs nothing when it is already
+            # there (first read wins) and saves the run when the app is merely slow.
+            btn = None
+            for _try in range(12):
+                btn = next((e for e in self._idb_els()
+                            if e.get("label") == "bookAppoitment"), None)
+                if btn:
+                    if _try:
+                        notes.append(f"[ok] @book_appointment — BOOK NOW appeared after "
+                                     f"~{_try * 2}s")
+                    break
+                time.sleep(2)
             if btn:
                 self._idb_tap(btn["cx"], btn["cy"])
             elif attempt == 1:
-                notes.append("[FAIL] @book_appointment — BOOK NOW is not on screen")
+                notes.append("[FAIL] @book_appointment — BOOK NOW is not on screen "
+                             "(polled ~24s). On screen: "
+                             f"{[e['label'] or e['id'] for e in self._idb_els() if e['label'] or e['id']][:16]}")
                 return False
             # Give the dialog a moment; the app re-renders after committing the slot.
             for _ in range(5):
@@ -3075,10 +3138,18 @@ class FlowRunner:
         OPENED = ("selectAllItemsBtn", "addItemsBtn", "assignToBtn",
                   "closeEventModal", "sendToKitchenBtn",
                   "AssignTableBtn", "closeModal")
+        # ...but 'addItemsBtn' ALSO sits on the ADD NEW ITEM sheet, which is a
+        # different screen that happens to share the marker. A run that mis-tapped
+        # its way onto that sheet therefore satisfied opened() and every later step
+        # ran against the sheet. These ids exist ONLY on the sheet, so their presence
+        # means the order summary is NOT what is in front of us.
+        NOT_ORDER_SCREEN = ("addNewItemClose", "addNewItemInput", "addNewItemAll")
 
         def opened() -> bool:
             els = self._idb_els()
             seen = {e["id"] for e in els} | {e["label"] for e in els}
+            if any(m in seen for m in NOT_ORDER_SCREEN):
+                return False
             return any(m in seen for m in OPENED) or self._table_modal_up()
 
         for attempt in (1, 2):
@@ -3097,10 +3168,27 @@ class FlowRunner:
                 notes.append(f"    · {what} — '{label[:36]}' could not be brought into the "
                              f"viewport horizontally; clicking anyway")
             if not appium_click(label):
-                notes.append(f"[FAIL] {what} — found '{label[:40]}' but could not open it: "
-                             f"{getattr(self, '_last_click_error', '') or 'WDA click failed'}")
-                return False
-            notes.append(f"    [card search] clicked target {label[:40]!r}")
+                # A WEDGED WDA is not a missing card. The card search above already
+                # reported this one at a known x ('RoopaDcardReserved@x=208') — idb
+                # sees it and can tap it by coordinate without WDA answering at all.
+                # Without this, a 30s WDA stall failed the whole segment while the
+                # card sat in plain view, and the kitchen/serve segments after it
+                # then ran against the wrong screen.
+                _err = getattr(self, "_last_click_error", "") or "WDA click failed"
+                _hit = next((e for e in self._idb_els()
+                             if e["label"].strip() == label and e["w"] > 0 and e["h"] > 0),
+                            None)
+                if _hit and not self._occluding(_hit, self._idb_els()):
+                    self._idb_tap(_hit["cx"], _hit["cy"])
+                    time.sleep(0.8)
+                    notes.append(f"    [card search] WDA failed ({_err}); tapped "
+                                 f"{label[:40]!r} by idb coordinate instead")
+                else:
+                    notes.append(f"[FAIL] {what} — found '{label[:40]}' but could not open it: "
+                                 f"{_err}")
+                    return False
+            else:
+                notes.append(f"    [card search] clicked target {label[:40]!r}")
             for _ in range(6):                    # ~9s for the summary to render
                 time.sleep(1.5)
                 if opened():
@@ -3410,6 +3498,33 @@ class FlowRunner:
         time.sleep(1.2)
         return not ({"Dismiss", "Minimize"} <= {e["label"].strip() for e in self._idb_els(udid)})
 
+    # The ADD NEW ITEM sheet, by the ids that exist ONLY while it is up.
+    _ADD_ITEM_SHEET = ("addNewItemClose", "addNewItemInput", "addNewItemAll")
+
+    def _dismiss_add_item_sheet(self, udid: str = "") -> bool:
+        """Close a stray ADD NEW ITEM sheet. Returns True only if it WAS up and is now gone.
+
+        This sheet is modal: while it is open nothing behind it is reachable, so a step
+        that opened it by accident (a fuzzy heal of serveItemsBtn -> addItemsBtn did
+        exactly that) does not merely fail itself — it takes every following step in the
+        segment down with it, each burning the full STEP_TIMEOUT. Closing it puts the
+        order summary back in front and lets the segment carry on.
+        """
+        els = self._idb_els(udid)
+        ids = {e["id"] for e in els} | {e["label"].strip() for e in els}
+        if not any(m in ids for m in self._ADD_ITEM_SHEET):
+            return False
+        btn = next((e for e in els
+                    if e["id"] == "addNewItemClose"
+                    or e["label"].strip() == "addNewItemClose"), None)
+        if not btn:
+            return False
+        self._idb_tap(btn["cx"], btn["cy"], udid)
+        time.sleep(1.2)
+        after = self._idb_els(udid)
+        ids_after = {e["id"] for e in after} | {e["label"].strip() for e in after}
+        return not any(m in ids_after for m in self._ADD_ITEM_SHEET)
+
     def _smart_click(self, r: ScenarioRunner, step: str):
         """For a 'click <id>' step, tap the element DIRECTLY by accessibility id —
         fast and reliable on this app's huge tree (the fuzzy resolver + depth-capped
@@ -3526,6 +3641,24 @@ class FlowRunner:
                             return True, f"tapped {cand} by id (after clearing LogBox)", False
                         except Exception:
                             continue
+            # ...or a stray ADD NEW ITEM sheet is covering the order summary. Same
+            # shape of problem as the LogBox viewer: the id is not missing, it is
+            # behind a modal. Close it and try the real id once more, BEFORE handing
+            # the step to the fuzzy resolver — healing against a modal's contents is
+            # what opened this sheet in the first place.
+            if self._dismiss_add_item_sheet():
+                for cand in self._id_candidates(ident):
+                    try:
+                        again = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, cand)
+                    except Exception:
+                        continue
+                    for e in again:
+                        try:
+                            e.click(); time.sleep(0.6)
+                            return True, (f"tapped {cand} by id (after closing the "
+                                          f"ADD NEW ITEM sheet)"), False
+                        except Exception:
+                            continue
 
         # Fast-path for 'type <val> in <fieldId>': type directly by accessibility id (the same
         # mechanism login uses) instead of the fuzzy resolver + its retry/backoff, which is slow
@@ -3553,7 +3686,18 @@ class FlowRunner:
         raw = res.action if res.ok else (res.detail or res.action or "failed")
         return res.ok, (str(raw).splitlines()[0] if raw else "")[:140], flaky
 
-    def _run_segment(self, seg: Dict[str, Any]) -> None:
+    def _run_segment(self, seg: Dict[str, Any]) -> bool:
+        """Run one role's segment. Returns True if it PASSed, False if it did not.
+
+        The caller uses the return value to stop the flow: segments are even MORE
+        stateful than the steps inside them (segment N+1 acts on the app state
+        segment N left behind), so continuing past a failure does not just waste
+        time — it invents results. A real run failed @open_reservation in the
+        waiter segment (the order was never sent to the kitchen) and the kitchen
+        segment then reported PASS, because it found a STALE queued order from an
+        earlier run and marked it Ready. A green segment after a red one is a lie,
+        and it also logged out of waiter mid-diagnosis and destroyed the screen
+        the failure needed to be read from."""
         import concurrent.futures as _fut
         role = seg["role"]
         notes: List[str] = []
@@ -3573,8 +3717,16 @@ class FlowRunner:
                     notes.append("[where] failed at step: 'login' (could not sign in)")
                     self._persist(seg, "FAIL", notes, time.time() - started,
                                   screenshot=self._capture_screenshot())
-                    return
+                    return False
             for step_idx, step in enumerate(seg["steps"], 1):
+                # Stop was pressed. Check BEFORE starting a step, not during: a step
+                # can run for STEP_TIMEOUT (240s), and starting one now means the
+                # user waits that out after asking to stop.
+                if self.cancelled:
+                    notes.append(f"[stopped] stopped by user before step "
+                                 f"{step_idx}/{total_steps}: '{step}'")
+                    self._persist(seg, "STOPPED", notes, time.time() - started)
+                    return False
                 # Show the step as "currently running" before it executes so the
                 # Live Steps panel says what it's doing right now, not just what's done.
                 notes.append(f"▶ {step}")
@@ -3673,6 +3825,7 @@ class FlowRunner:
         if status == "FAIL" and fail_step:
             notes.append(f"[where] failed at step: '{fail_step}'")
         self._persist(seg, status, notes, time.time() - started, screenshot=fail_shot)
+        return status == "PASS"
 
     def _collect_evidence(self, role: str) -> List[str]:
         """Why the app failed, in its own words — gathered ONCE at the failing step.
@@ -4066,14 +4219,64 @@ class FlowRunner:
         import subprocess
         self.on_event({"type": "start", "run_id": self.run_id, "flow": self.flow["id"]})
         crashed = None
+        # Make this run stoppable. Registered BEFORE preflight — that is where a
+        # run spends its first few minutes (WDA can take ~3min to compile), and a
+        # Stop pressed during it must not be silently dropped.
+        with _ACTIVE_FLOW_RUNS_LOCK:
+            _ACTIVE_FLOW_RUNS[self.run_id] = self._cancel
         try:
             self._preflight()
-            for seg in self.flow["segments"]:
-                self._run_segment(seg)
+            segments = self.flow["segments"]
+            for i, seg in enumerate(segments):
+                if self.cancelled:
+                    for skipped in segments[i:]:
+                        self._persist(skipped, "SKIPPED",
+                                      ["[skipped] not run — the run was stopped by the user."],
+                                      0.0)
+                    break
+                if self._run_segment(seg):
+                    continue
+                if self.cancelled:
+                    # Stopped mid-segment, not a real failure. _run_segment has
+                    # already persisted that segment as STOPPED; mark the rest.
+                    for skipped in segments[i + 1:]:
+                        self._persist(skipped, "SKIPPED",
+                                      ["[skipped] not run — the run was stopped by the user."],
+                                      0.0)
+                    break
+                # STOP THE FLOW. A cross-app segment hands the next one a state:
+                # the waiter sends the order the kitchen then marks Ready. Once a
+                # segment fails that handoff never happened, so every later segment
+                # runs against the wrong state — and can still report PASS off a
+                # STALE artefact from an earlier run (measured: a failed waiter
+                # segment, then a kitchen segment that marked an old queued order
+                # Ready and went green). Record the rest as SKIPPED rather than
+                # dropping them, so the report shows they never ran instead of
+                # leaving gaps a reader fills in as "fine".
+                for skipped in segments[i + 1:]:
+                    self._persist(
+                        skipped, "SKIPPED",
+                        [f"[skipped] not run — segment {seg['num']} "
+                         f"({seg['name']}) failed, and this segment depends on the "
+                         f"app state it was supposed to leave behind."],
+                        0.0,
+                    )
+                self.on_event({"type": "log",
+                               "message": f"flow stopped at segment {seg['num']} "
+                                          f"({seg['name']}) — {len(segments) - i - 1} "
+                                          f"later segment(s) skipped"})
+                break
         except Exception as e:                       # preflight/setup crash, etc.
             crashed = e
             logger.exception("flow run crashed before/while running segments")
         finally:
+            # Deregister FIRST: once the thread is unwinding it can no longer be
+            # stopped, and a stale entry would make a finished run look stoppable.
+            with _ACTIVE_FLOW_RUNS_LOCK:
+                _ACTIVE_FLOW_RUNS.pop(self.run_id, None)
+            # Quitting the drivers is what actually frees the simulators. This runs
+            # on the stop path too — that is the whole reason cancellation is
+            # cooperative rather than killing the thread.
             for d in self._sessions.values():
                 try:
                     d.quit()
@@ -4083,9 +4286,48 @@ class FlowRunner:
                 run = db.query(TestRun).filter_by(id=self.run_id).first()
                 if run is not None:
                     rows = db.query(ScenarioResult).filter_by(run_id=self.run_id).all()
+                    # Reconcile any segment still marked 'running'. _run_segment
+                    # writes 'running' BEFORE each step so Live Steps can show what
+                    # is executing right now, and that row is only overwritten when
+                    # the step returns. If the run is stopped (or the thread dies)
+                    # while a step is in flight -- 'open app' can take minutes -- the
+                    # row is stranded at 'running' forever. Measured: a stopped run
+                    # whose header read STOPPED while its segment row still showed a
+                    # RUNNING spinner at 0.0s, which reads as "Stop did nothing".
+                    # Nothing else ever revisits these rows, so it has to happen here.
+                    terminal = "STOPPED" if self.cancelled else "FAIL"
+                    why = ("stopped by user while this step was still running"
+                           if self.cancelled else
+                           "the run ended while this step was still running")
+                    for row in rows:
+                        if (row.status or "").lower() in ("running", "queued"):
+                            row.status = terminal
+                            # Clear the '▶' in-flight marker on the step that never
+                            # finished. The UI spins on that marker, so leaving it
+                            # keeps 'running: open app' animating under a badge that
+                            # now says STOPPED.
+                            kept = [n for n in (row.reasons or []) if not n.lstrip().startswith("▶")]
+                            stalled = [n.lstrip()[1:].strip()
+                                       for n in (row.reasons or []) if n.lstrip().startswith("▶")]
+                            if stalled:
+                                kept.append(f"[{terminal.lower()}] {stalled[-1]} — {why}")
+                            else:
+                                kept.append(f"[{terminal.lower()}] {why}")
+                            row.reasons = kept
+                            if row.consumer_status == "running":
+                                row.consumer_status = terminal
+                            if row.business_status == "running":
+                                row.business_status = terminal
                     # A crash, or a run that never produced ANY segment result, is a
                     # FAILURE — never report a false 'passed' just because no row said FAIL.
-                    if crashed is not None or not rows:
+                    if self.cancelled:
+                        # The user stopped this run. It is neither a pass nor a
+                        # failure, and it must NOT be reported as one: this block
+                        # used to overwrite the 'stopped' that the Stop button had
+                        # just written, so a stopped run reappeared minutes later
+                        # as passed/failed and looked like it had never stopped.
+                        run.status = "stopped"
+                    elif crashed is not None or not rows:
                         run.status = "failed"
                     else:
                         run.status = "failed" if any(r.status == "FAIL" for r in rows) else "passed"

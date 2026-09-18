@@ -116,6 +116,45 @@ _DOMAIN_VERBS = {"book", "place", "add", "reserve", "confirm",
 _DESTRUCTIVE = ("logout", "log out", "signout", "sign out", "delete", "remove",
                 "deactivate", "unsubscribe", "clear", "reset", "refund")
 
+# Action verbs that are NOT interchangeable, even when the rest of the id matches.
+# A fuzzy heal compares whole strings, so two buttons that differ ONLY in their verb
+# score high on their shared tail: serveItemsBtn vs addItemsBtn is 0.667 — over the
+# 0.62 heal threshold — because both end in "ItemsBtn". That heal really happened and
+# it opened the ADD NEW ITEM sheet instead of serving, so every later step in the
+# waiter segment acted on the wrong screen and notifyPaymentBtn hung its full 240s.
+# The verb IS the intent; a match that swaps it is a different button, not a drifted
+# one. Grouped so members of the SAME group stay interchangeable (add/create) while
+# crossing groups is refused.
+_VERB_GROUPS = (
+    frozenset({"serve", "served"}),
+    frozenset({"add", "create", "new"}),
+    frozenset({"send", "submit"}),
+    frozenset({"notify", "alert"}),
+    frozenset({"select", "check"}),
+    frozenset({"unselect", "deselect", "uncheck"}),
+    frozenset({"close", "end", "finish"}),
+    frozenset({"open"}),
+    frozenset({"pay", "payment"}),
+    frozenset({"cancel"}),
+    frozenset({"confirm", "accept", "approve"}),
+    frozenset({"reject", "decline"}),
+    frozenset({"assign"}),
+    frozenset({"ready", "prepared"}),
+)
+
+
+def _verb_group(text: str):
+    """The verb group *text* belongs to, or None. Case/camelCase insensitive."""
+    low = re.sub(r"[^a-z]+", " ", (text or "").lower())
+    words = set(low.split())
+    # camelCase ids arrive as one token ("serveItemsBtn" -> "serveitemsbtn"), so also
+    # test each group's verbs as a PREFIX — the verb leads the id in this codebase.
+    stem = low.replace(" ", "")
+    for grp in _VERB_GROUPS:
+        if words & grp or any(stem.startswith(v) for v in grp):
+            return grp
+    return None
+
 # Words carrying no locator meaning — stripped when extracting the target phrase.
 _STOP = {
     "the", "a", "an", "on", "to", "in", "into", "at", "of", "for", "with",
@@ -1061,6 +1100,9 @@ class ScenarioRunner:
 
         best = None
         best_score = 0.0
+        # The verb the STEP asked for. A candidate carrying a different one is a
+        # different button, however well the rest of the string matches.
+        want_verb = _verb_group(target)
         for el in root.iter():
             a = el.attrib
             if a.get("visible", "true") == "false":
@@ -1069,6 +1111,13 @@ class ScenarioRunner:
             txt = (label or name or value).strip().lower()
             if not txt or len(txt) > 80:
                 continue
+            # Refuse a heal that swaps the action verb (serveItemsBtn -> addItemsBtn).
+            # Only when BOTH sides name a verb: an unverbed candidate ("SERVE") is
+            # still allowed to match, which is what ordinary label drift looks like.
+            if want_verb is not None:
+                got_verb = _verb_group(name) or _verb_group(label)
+                if got_verb is not None and got_verb is not want_verb:
+                    continue
             score = max(
                 difflib.SequenceMatcher(None, target, txt).ratio(),
                 difflib.SequenceMatcher(None, noun_str, txt).ratio() if noun_str else 0.0,

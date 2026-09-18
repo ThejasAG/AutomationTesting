@@ -284,8 +284,19 @@ function LiveView({ runId, jobState }: LiveViewProps) {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           {scenarios.map((s, i) => {
-            const done = s.status === 'PASS' || s.status === 'FAIL';
+            // Any status the backend considers terminal. STOPPED and SKIPPED are
+            // terminal too: treating only PASS/FAIL as done left a stopped run's
+            // last segment looking like it was still in flight.
+            const done = s.status === 'PASS' || s.status === 'FAIL'
+              || s.status === 'STOPPED' || s.status === 'SKIPPED';
+            // Only spin while the RUN itself is still active. A finished run can
+            // still carry a segment row stranded at 'running' (it is written before
+            // each step and only overwritten when that step returns), and rendering
+            // s.status raw showed a RUNNING badge on a run whose header said
+            // STOPPED — which reads as "Stop did nothing".
             const running = isActive && i === scenarios.length - 1 && !done;
+            const staleRunning = !isActive && !done
+              && (s.status || '').toLowerCase() === 'running';
             const isLast = i === scenarios.length - 1;
             const steps = (s.reasons || []).filter(r => !/↳ (screen ids|on screen):/.test(r));
             // Which app/role this stage runs on → node icon + chip.
@@ -338,7 +349,8 @@ function LiveView({ runId, jobState }: LiveViewProps) {
                     <span style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)' }}>{s.scenario_num}</span>
                     <span style={{ fontSize: '0.88rem', fontWeight: 600 }}>{s.scenario_name}</span>
                     <span className="badge" style={{ background: badgeBg, color: badgeFg, fontSize: '0.62rem' }}>
-                      {running ? <><Loader2 size={10} className="spin" /> running</> : s.status}
+                      {running ? <><Loader2 size={10} className="spin" /> running</>
+                        : staleRunning ? 'INCOMPLETE' : s.status}
                     </span>
                     {(() => {
                       // In flight: count up from the last reported elapsed. Finished:

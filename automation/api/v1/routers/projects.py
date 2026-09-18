@@ -311,15 +311,44 @@ def update_project(project_id: str, body: ProjectUpdate, db: Session = Depends(g
 def delete_project(
     project_id: str,
     delete_local: bool = False,
+    purge: bool = False,
+    dry_run: bool = False,
     db: Session = Depends(get_db),
 ):
     """Delete a project from the database.
 
     ``delete_local=true`` also removes the cloned repository from disk — the
     dashboard asks for confirmation before sending it.
-    """
-    project = _get_project_or_404(project_id, db)
 
+    ``purge=true`` removes everything else the project left behind as well: the
+    baselines, project settings (which hold jira/github tokens), saved scenarios,
+    tickets, AI recommendations and the learned-locator entry. Without it those
+    rows simply lose the project they pointed at — which is how this database
+    ended up with recommendations belonging to projects that no longer exist.
+
+    Test history is KEPT either way. A purge detaches runs (``project_id`` goes
+    null) rather than deleting them, so what was tested and what happened stays on
+    the record. ``dry_run=true`` reports what a purge would remove and changes
+    nothing.
+    """
+    _get_project_or_404(project_id, db)
+
+    if purge:
+        from automation.projects.purge import purge_project
+        plan = purge_project(db, project_id, dry_run=dry_run)
+        return {
+            "status": "would_purge" if dry_run else "purged",
+            "id": project_id,
+            "local_repository_deleted": bool(plan.repo_path) and not dry_run,
+            "baselines_deleted": bool(plan.baseline_path) and not dry_run,
+            "rows_deleted": plan.rows,
+            "runs_detached": plan.runs_detached,
+            "bytes_freed": plan.repo_bytes,
+            "locator_entry_removed": plan.locator_key,
+            "warnings": plan.warnings,
+        }
+
+    project = _get_project_or_404(project_id, db)
     local_deleted = False
     if delete_local:
         local_deleted = repository_manager.delete_local_repo(project_id)

@@ -357,6 +357,21 @@ class RunnerService:
             run["end_time"] = time.time()
             run["duration_ms"] = int((run["end_time"] - run["start_time"]) * 1000)
 
+        # Cross-app flows run in a daemon THREAD in this process, and marking the
+        # database never reached it: Stop turned the row 'stopped' while the thread
+        # kept driving the simulators to the end of the flow, then overwrote the row
+        # with passed/failed on its way out. Ask it to stop for real. Cooperative —
+        # it unwinds through its own finally and quits its Appium sessions, which is
+        # what actually frees the devices.
+        try:
+            from automation.scenarios.cross_app_flows import request_flow_stop
+            request_flow_stop(run_id)
+        except Exception:
+            # An in-process flow runner is one of several ways a run can execute;
+            # a run dispatched to a distributed agent has none, and the database
+            # update below is what stops that one. Never fail the stop over this.
+            logger.exception("could not signal in-process flow run %s", run_id)
+
         with SessionLocal() as db:
             db_run = database.get_test_run(db, run_id)
             if not db_run:

@@ -87,6 +87,67 @@ RN_REQUIRED_DEPS: Dict[str, Dict[str, str]] = {
 _RN_PKG_RE = re.compile(r"^(@react-native|react-native-|@react-navigation)")
 
 
+# Inserted by AppBuilder._expose_table_sheet(). Kept verbatim from the verified
+# app-side change so the patched file matches what was measured on the device
+# (sheet went 4 -> 19 accessibility elements). See that method for the why.
+_ACCESSIBLE_OVERLAY_SRC = '''/**
+ * Drop-in replacement for react-native-magnus <Overlay>, for sheets whose
+ * contents must be individually reachable by accessibility tooling.
+ *
+ * magnus renders its Overlay as:
+ *   Modal > TouchableWithoutFeedback(onBackdropPress) > View
+ *         > TouchableWithoutFeedback(null) > View > children
+ *
+ * TouchableWithoutFeedback defaults to accessible={true}, and on iOS an
+ * accessible ancestor collapses its entire subtree into ONE accessibility
+ * element with the descendants' labels concatenated. The "Select A Table" sheet
+ * therefore surfaced as a single element labelled
+ * "Select A Table I1 I2 O1 O2 O3 ..." spanning the whole screen — so neither the
+ * table chips nor Apply could be reached individually, by any tool. Labelling
+ * the children does not help: a child cannot escape an accessible ancestor.
+ *
+ * Same visuals (centred sheet, 50% black scrim, fixed width, rounded corners),
+ * no grouping ancestor. Used ONLY by the two table sheets; the other Overlay
+ * call sites in this file are deliberately left alone.
+ */
+const AccessibleOverlay = ({visible, w = 550, rounded = 43, onBackdropPress, children}) => (
+  <RNModal
+    transparent
+    visible={!!visible}
+    animationType="fade"
+    onRequestClose={onBackdropPress}>
+    <View
+      accessible={false}
+      style={{
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(0,0,0,0.5)',
+      }}>
+      {/* Backdrop. accessible={false} so it does not become a screen-sized
+          accessibility element sitting over the sheet. */}
+      <Pressable
+        accessible={false}
+        style={StyleSheet.absoluteFill}
+        onPress={onBackdropPress}
+      />
+      <View
+        accessible={false}
+        style={{
+          backgroundColor: '#ffffff',
+          width: w,
+          borderRadius: rounded,
+          overflow: 'hidden',
+        }}>
+        {children}
+      </View>
+    </View>
+  </RNModal>
+);
+
+'''
+
+
 @dataclass
 class BuildResult:
     ok: bool
@@ -780,6 +841,294 @@ class AppBuilder:
             logger.warning(f"Could not patch {entry}: {e}")
             return None
         msg = "Silenced LogBox in index.js (its toasts cover the app's own controls)"
+        logger.info(msg)
+        return msg
+
+    _A11Y_TABLE_MARK = "// platform: table sheet exposed to accessibility"
+
+    def _expose_table_sheet(self, repo_path: str) -> Optional[str]:
+        """Make the "Select A Table" sheet's chips and Apply button reachable.
+
+        WITHOUT THIS THE WAITER SEGMENT CANNOT COMPLETE. Measured on the Vya
+        Business iPad build: the whole sheet surfaced as ONE accessibility element
+        labelled 'Select A Table I1 I2 O1 ...' spanning the screen — idb saw 4
+        elements, Appium saw 0 buttons. @assign_table could tap a table by
+        COORDINATE (which needs no accessibility) but then found no Apply/Confirm
+        to commit it, so every run failed at 'assign table + send to kitchen'.
+
+        The cause is the ANCESTOR, not missing labels. react-native-magnus
+        <Overlay> wraps its children in TouchableWithoutFeedback, which defaults to
+        accessible={true}, and on iOS an accessible ancestor collapses its entire
+        subtree into one element with the descendants' labels concatenated. A child
+        cannot escape that, so labelling the chips alone has no effect — which is
+        why the ids were in the source and still unreachable.
+
+        The repair swaps <Overlay> for a local AccessibleOverlay (same visuals, no
+        grouping ancestor) for the TWO table sheets only, and labels the chips
+        (tableChip<Name> + accessibilityState.selected) and the commit button
+        (applyTableBtn). Verified on the iPad: 4 -> 19 elements, tableChipI1..O12
+        and applyTableBtn individually discoverable, selected flips false->true.
+
+        This lived as a LOCAL, UNPUSHED commit in one clone ('do not push'), so it
+        existed on exactly one machine: every other Mac cloned the app clean, built
+        it without the fix, and hit the same unfixable 'no Apply/Confirm' failure.
+        That is what this table is for (see MACHINE_SETUP.md §7) — add the repair
+        here rather than to one clone by hand, or the next machine repeats the whole
+        diagnosis.
+
+        The REAL fix belongs in the app: an element no tool can reach is also an
+        element VoiceOver users cannot reach, so this is an accessibility bug, not
+        just an automation one. Until that ships, this keeps every machine running.
+
+        JS-only (needs a Metro reload, not a rebuild), idempotent, and additive —
+        it only inserts the helper and attributes, never edits existing app logic.
+        Like _silence_logbox it touches TRACKED source, so the file shows as
+        modified in the app repo. That is deliberate and visible.
+        """
+        import re as _re
+
+        target = os.path.join(repo_path, "App", "Components", "Modal", "index.js")
+        if not os.path.isfile(target):
+            return None                                  # not the Business app
+        try:
+            with open(target) as f:
+                content = f.read()
+        except OSError as e:
+            logger.warning(f"Could not read {target}: {e}")
+            return None
+
+        if self._A11Y_TABLE_MARK in content or "AccessibleOverlay" in content:
+            return None                                  # already patched
+
+        # Only the two table sheets use this Overlay shape. If the app has been
+        # restructured, do nothing rather than guess — a wrong edit here would
+        # break the sheet for real users, not just for the automation.
+        if "Select A Table" not in content:
+            return None
+
+        original = content
+
+        # 1. RNModal import — AccessibleOverlay renders a plain react-native Modal.
+        m = _re.search(r"^import\s*\{([^}]*)\}\s*from\s*['\"]react-native['\"];",
+                       content, _re.M)
+        if not m:
+            logger.warning("table-sheet a11y: no react-native import block in %s", target)
+            return None
+        if "Modal as RNModal" not in m.group(1):
+            # Insert in place rather than rebuilding the block: this file's import
+            # is one-name-per-line, and collapsing it to a single line would show
+            # up as a 16-line reformat in the app team's diff for no reason.
+            inner = m.group(1)
+            if "\n" in inner:
+                indent = _re.search(r"\n(\s*)\S", inner)
+                pad = indent.group(1) if indent else "  "
+                new_inner = inner.rstrip()
+                if not new_inner.endswith(","):
+                    new_inner += ","
+                new_inner += f"\n{pad}Modal as RNModal,\n"
+            else:
+                new_inner = inner.rstrip().rstrip(",") + ", Modal as RNModal"
+            content = (content[:m.start(1)] + new_inner + content[m.end(1):])
+
+        # 2. The helper, inserted before the first table sheet class that uses it.
+        anchor = _re.search(r"^export class Table2 extends Component", content, _re.M)
+        if not anchor:
+            logger.warning("table-sheet a11y: no Table2 class in %s", target)
+            return None
+        content = content[:anchor.start()] + _ACCESSIBLE_OVERLAY_SRC + content[anchor.start():]
+
+        # 3. Swap Overlay -> AccessibleOverlay for the table sheets ONLY. Both are
+        #    the distinctive w={550} rounded={43} shape; the file's other 7 Overlay
+        #    call sites do not match and are deliberately left alone.
+        #    The closing tag must be matched PER SHEET, not globally: </Overlay>
+        #    appears 9 times in this file and 7 of them belong to other sheets.
+        #    Rewriting all of them would mismatch every untouched <Overlay> and the
+        #    bundle would not compile. So for each table sheet, rewrite the opening
+        #    tag and then the FIRST </Overlay> that follows it.
+        n_open = n_close = 0
+        pos = 0
+        open_re = _re.compile(r"<Overlay\s*\n(\s*)w=\{550\}\s*\n(\s*)rounded=\{43\}")
+        while True:
+            mo = open_re.search(content, pos)
+            if not mo:
+                break
+            content = (content[:mo.start()]
+                       + f"<AccessibleOverlay\n{mo.group(1)}w={{550}}\n{mo.group(2)}rounded={{43}}"
+                       + content[mo.end():])
+            n_open += 1
+            close_at = content.find("</Overlay>", mo.start())
+            if close_at == -1:
+                break
+            content = (content[:close_at] + "</AccessibleOverlay>"
+                       + content[close_at + len("</Overlay>"):])
+            n_close += 1
+            pos = close_at
+        if n_open != 2 or n_close != n_open:
+            # Refuse a half-applied edit: mismatched tags would not compile, and a
+            # build that fails at Metro is far harder to diagnose than this warning.
+            logger.warning("table-sheet a11y: expected 2 table Overlays, matched "
+                           "%d open / %d close in %s — leaving the file untouched",
+                           n_open, n_close, target)
+            return None
+
+        # 4. Label the chips and the commit button.
+        #    Both anchors must be specific to the TABLE sheets. 'key={idx}' alone
+        #    matches 5 unrelated list items, and Styles.cancelButton is shared by
+        #    several buttons in this file (food voucher, filter, ...) — labelling
+        #    those would put applyTableBtn on the wrong control, which is worse
+        #    than not patching at all. So: chips are the Pressables whose selected
+        #    state is driven by activeTables, and the commit button is the one
+        #    whose onPress calls table(activeTables).
+        content, n_chip = _re.subn(
+            r"(<Pressable\n(\s*)key=\{idx\}\n)(?=(?:\s*\n)*\s*style=\s*\n?\s*"
+            r"\{?\s*\n?\s*!activeTables\.includes\(el\.name\))",
+            r"\1\2accessible={true}\n"
+            r"\2accessibilityLabel={`tableChip${el.name}`}\n"
+            r"\2accessibilityState={{selected: activeTables.includes(el.name)}}\n",
+            content)
+        content, n_btn = _re.subn(
+            r"(<Pressable\n(\s*))(style=\{\[Styles\.cancelButton[^\n]*\n"
+            r"\s*onPress=\{\s*\(\s*\)\s*=>\s*\{?\s*table\s*\(\s*activeTables\s*\))",
+            r"\1accessible={true}" + "\n" + r"\2" + 'accessibilityLabel="applyTableBtn"'
+            + "\n" + r"\2\3",
+            content)
+        if n_chip != 2 or n_btn != 2:
+            # Exactly two of each — one per table sheet. Anything else means the
+            # anchors matched something they should not, and a misplaced
+            # applyTableBtn would make the automation tap the WRONG control.
+            logger.warning("table-sheet a11y: labelled %d chip block(s) and %d button(s) "
+                           "(expected 2 and 2) in %s — leaving the file untouched",
+                           n_chip, n_btn, target)
+            return None
+
+        content = content.replace(
+            _ACCESSIBLE_OVERLAY_SRC,
+            f"{self._A11Y_TABLE_MARK}\n{_ACCESSIBLE_OVERLAY_SRC}", 1)
+
+        try:
+            with open(target, "w") as f:
+                f.write(content)
+        except OSError as e:
+            logger.warning(f"Could not patch {target}: {e}")
+            return None
+        _ = original                                     # kept for clarity of intent
+        msg = (f"Exposed the Select A Table sheet to accessibility "
+               f"({n_chip} chip block(s), {n_btn} commit button(s)) — without this "
+               f"@assign_table cannot reach Apply")
+        logger.info(msg)
+        return msg
+
+    _A11Y_ASSIGN_MARK = "// platform: assign-table sheet exposed to accessibility"
+
+    def _expose_assign_table_sheet(self, repo_path: str) -> Optional[str]:
+        """Label the waiter's "Please assign a table" sheet (class ``TableView``).
+
+        THIS IS THE SHEET THE WAITER ACTUALLY GETS. It is a DIFFERENT component
+        from the "Select A Table" sheet handled by _expose_table_sheet: that one
+        is ``Table``/``Table2``; this one is ``TableView`` (Modal/index.js), and
+        it is what ``EventDetails`` renders on the assign-a-table flow.
+
+        Measured on staging run 5843f6d9 (2026-09-17): @open_reservation opened
+        the booking correctly, then @assign_table reported
+
+            · @assign_table — tapped table 'I3'
+            [FAIL] @assign_table — opened the table modal but found no
+                   Apply/Confirm to commit it
+
+        Both halves of that are explained by this component:
+
+        * The CHIPS are ``TouchableOpacity`` with no accessibilityLabel. Their
+          table name is only readable because the child ``<Subheading>`` renders
+          ``el.name``, so the coordinate fallback can see 'I3' by text while the
+          modern ``tableChip<Name>`` lookup finds nothing — which is exactly the
+          "tapped table 'I3'" line above, i.e. the LEGACY path.
+        * The COMMIT button is a ``TouchableOpacity`` whose caption 'Confirm'
+          lives in a nested ``<Text>``. With no label on the touchable, neither
+          an accessibility-id lookup nor a text match on the button itself can
+          reach it — so there is no way to commit the assignment.
+
+        Unlike the "Select A Table" sheet, ``TableView`` wraps in
+        ``react-native-modal``, NOT magnus ``Overlay``, so there is no
+        accessible-ancestor collapse here and no AccessibleOverlay is needed.
+        Labels alone are sufficient, which is why the chips were already
+        tappable by coordinate.
+
+        Adds ``tableChip<Name>`` + accessibilityState.selected to each chip and
+        ``applyTableBtn`` to the commit button — the SAME ids the other sheet
+        uses, so _assign_table needs no new special case. Applied to both the
+        iPad (``Components``) and phone (``MobileComponents``) copies.
+
+        JS-only, idempotent, additive. Touches tracked source, like
+        _silence_logbox — deliberately visible, because the real fix belongs in
+        the app: a control no tool can reach is a control VoiceOver cannot reach.
+        """
+        import re as _re
+
+        done = []
+        for variant in ("Components", "MobileComponents"):
+            target = os.path.join(repo_path, "App", variant, "Modal", "index.js")
+            if not os.path.isfile(target):
+                continue
+            try:
+                with open(target) as f:
+                    content = f.read()
+            except OSError as e:
+                logger.warning(f"Could not read {target}: {e}")
+                continue
+
+            if self._A11Y_ASSIGN_MARK in content:
+                continue                                 # already patched
+            if "Please assign a table" not in content:
+                continue                                 # not this app / restructured
+
+            # CHIPS. Anchored on the state setter that is unique to TableView's
+            # table chips, so no other TouchableOpacity in this large file can
+            # match. `el` is the table object; `el.name` is what the chip shows.
+            content, n_chip = _re.subn(
+                r"(<TouchableOpacity\n(\s*)key=\{idx\}\n)"
+                r"(?=(?:[^\n]*\n){0,20}?\s*this\.setState\(\{activeTblInfo: el, activeTbl: el\.id)",
+                r"\1\2accessible={true}\n"
+                r"\2accessibilityLabel={`tableChip${el.name}`}\n"
+                r"\2accessibilityState={{selected: el.id === activeTbl && !radioKey}}\n",
+                content, count=1)
+
+            # COMMIT BUTTON. Anchored on the onPress that calls _assignTable —
+            # the only control in the file that commits a table assignment.
+            # Bounded lookahead: the commit button is the TouchableOpacity that
+            # opens with activeOpacity={1.0} and reaches _assignTable within the
+            # next ~25 lines. An unbounded (?:.|\n)*? would scan the whole 6300-
+            # line file and could pair the tag with a far-away match.
+            content, n_btn = _re.subn(
+                r"(<TouchableOpacity\n(\s*))(activeOpacity=\{1\.0\}\n"
+                r"(?:[^\n]*\n){0,25}?\s*\?\s*this\._assignTable\(activeTblInfo, radioKey\))",
+                r"\1accessible={true}" + "\n" + r"\2" + 'accessibilityLabel="applyTableBtn"'
+                + "\n" + r"\2\3",
+                content, count=1)
+
+            if n_chip != 1 or n_btn != 1:
+                # Refuse rather than half-apply: a misplaced applyTableBtn would
+                # make the automation tap the WRONG control, which is worse than
+                # not patching at all.
+                logger.warning("assign-table a11y: matched %d chip / %d button in %s "
+                               "(expected 1 and 1) — leaving the file untouched",
+                               n_chip, n_btn, target)
+                continue
+
+            content = content.replace("export class TableView extends Component",
+                                      f"{self._A11Y_ASSIGN_MARK}\n"
+                                      "export class TableView extends Component", 1)
+            try:
+                with open(target, "w") as f:
+                    f.write(content)
+            except OSError as e:
+                logger.warning(f"Could not patch {target}: {e}")
+                continue
+            done.append(variant)
+
+        if not done:
+            return None
+        msg = (f"Exposed the assign-table sheet (TableView) to accessibility in "
+               f"{', '.join(done)} — without this @assign_table cannot reach Confirm")
         logger.info(msg)
         return msg
 
@@ -1573,6 +1922,12 @@ class AppBuilder:
             # CocoaPods would download an HTML error page and fail the checksum.
             self._patch_dead_podspec_urls(repo_path)
             self._silence_logbox(repo_path)
+            # Without these the waiter segment cannot commit a table — neither
+            # sheet's commit button is reachable by any tool. Two DIFFERENT
+            # components: "Select A Table" (Table/Table2) and the one the waiter
+            # actually gets, "Please assign a table" (TableView).
+            self._expose_table_sheet(repo_path)
+            self._expose_assign_table_sheet(repo_path)
 
             logger.info(f"Running pod install in {candidate}")
             ok, out = _run(["pod", "install"], cwd=candidate, timeout=1800)
@@ -1931,6 +2286,63 @@ class AppBuilder:
                     logger.info(f"Reset Metro (pid {pid}) for {repo_path} after a dependency fix")
             except Exception:
                 continue
+        return killed
+
+    def reap_orphaned_metros(self) -> int:
+        """Kill Metro bundlers whose repo directory no longer exists.
+
+        Metro holds its project root open at startup, so deleting (or re-cloning)
+        a repo underneath a running packager does NOT stop it: the process keeps
+        serving and keeps answering /status with 'packager-status:running'. Every
+        bundle request then fails with 'Unable to resolve module ./index from
+        <deleted path>' — a red screen that reads like a broken app but is really
+        a stale process. _metro_running() cannot catch this: liveness and
+        correctness look identical over /status, so the repo path is checked here
+        instead, against the process's own command line.
+
+        Returns the number of bundlers killed.
+        """
+        import signal as _signal
+        killed = 0
+        try:
+            pids = subprocess.run(
+                ["pgrep", "-f", "react-native start"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.split()
+        except Exception as e:
+            logger.debug("orphan reaper: could not list packagers: %s", e)
+            return 0
+
+        for pid in pids:
+            try:
+                # The process's own cwd IS its project root — the same authority
+                # _kill_metro_for_repo uses, and it stays correct for a deleted
+                # directory (lsof reports the path with a ' (deleted)' suffix).
+                out = subprocess.run(
+                    ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+                    capture_output=True, text=True, timeout=10,
+                ).stdout
+            except Exception:
+                continue
+
+            path = next((l[1:].strip() for l in out.splitlines() if l.startswith("n")), "")
+            if not path or "/repos/" not in path:
+                continue  # not one of our app packagers
+            gone = path.endswith("(deleted)")
+            path = path.replace(" (deleted)", "").strip()
+            if not gone and os.path.isdir(path):
+                continue  # repo still there — healthy, leave it alone
+
+            try:
+                os.kill(int(pid), _signal.SIGKILL)
+                killed += 1
+                logger.warning(
+                    "Metro watchdog: killed orphaned bundler pid=%s — its repo %s no "
+                    "longer exists (it was still answering /status and serving red "
+                    "screens). ensure_metro() will cold-start a correct one.", pid, path,
+                )
+            except Exception as e:
+                logger.debug("orphan reaper: could not kill %s: %s", pid, e)
         return killed
 
     def _metro_running(self, port: int = METRO_PORT) -> bool:
@@ -2370,6 +2782,15 @@ def start_metro_watchdog(interval: int = 25) -> None:
         _time.sleep(8)
         while True:
             try:
+                # First clear packagers whose repo was deleted or re-cloned. They
+                # still answer /status, so the liveness check below would treat
+                # one as healthy and never restart it, while the app red-screens
+                # on every bundle request.
+                try:
+                    app_builder.reap_orphaned_metros()
+                except Exception as e:
+                    logger.debug("metro watchdog: orphan reap failed: %s", e)
+
                 from automation.database.config import SessionLocal
                 from automation.database.models import TestProject
                 from automation.projects.repository import repository_manager

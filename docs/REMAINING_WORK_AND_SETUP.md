@@ -29,7 +29,8 @@ Add these to `.env` at the project root (all optional — each feature no-ops un
 # --- PR auto-test ---
 PR_AUTOTEST_ENABLED=true                 # poller runs the HONEST smart-selected autotest
                                          # (plan → build → run → comment) instead of a build-only pass
-PR_TEST_IOS_DEVICE=DA24A392-...          # pin PR runs to a specific simulator (your iPhone 16 Pro)
+PR_TEST_IOS_DEVICE=                      # LEAVE EMPTY: auto-picks (and boots) this Mac's own
+                                         # simulator. A UDID only exists on the Mac it came from.
 
 # --- Notifications (Slack) ---
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ

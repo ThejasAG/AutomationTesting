@@ -36,9 +36,28 @@ if xcodebuild -showsdks 2>/dev/null | grep -qi "iphonesimulator"; then
 else
   bad "no iOS simulator SDK" "xcodebuild -downloadPlatform iOS   (deleting a runtime to save disk BREAKS WebDriverAgent)"
 fi
-RT=$(xcrun simctl runtime list 2>/dev/null | grep -c "^iOS")
-[ "${RT:-0}" -gt 0 ] && pass "$RT iOS runtime(s) installed" \
-  || bad "no iOS runtime" "Xcode > Settings > Components, or xcodebuild -downloadPlatform iOS"
+# Any iOS runtime in the supported RANGE will do — we do not pin a version.
+# ios-support.json declares the range; this only reports what is installed.
+MIN_IOS=$(sed -n 's/.*"min_ios"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' ios-support.json 2>/dev/null)
+MAX_IOS=$(sed -n 's/.*"max_ios"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' ios-support.json 2>/dev/null)
+MIN_IOS=${MIN_IOS:-16.0}; MAX_IOS=${MAX_IOS:-26.99}
+
+# Major version is all that matters for the range test.
+VERS=$(xcrun simctl runtime list 2>/dev/null \
+       | sed -n 's/^iOS \([0-9][0-9.]*\).*/\1/p' | sort -u)
+IN_RANGE=$(for v in $VERS; do
+    awk -v v="${v%%.*}" -v lo="${MIN_IOS%%.*}" -v hi="${MAX_IOS%%.*}" \
+        'BEGIN{ if (v>=lo && v<=hi) print "y" }'
+  done | grep -c y)
+
+if [ "${IN_RANGE:-0}" -gt 0 ]; then
+  pass "iOS runtime(s) in supported range ${MIN_IOS}-${MAX_IOS}: $(echo $VERS | tr '\n' ' ')"
+elif [ -n "$VERS" ]; then
+  bad "installed iOS runtime(s) [$(echo $VERS | tr '\n' ' ')] are outside the supported ${MIN_IOS}-${MAX_IOS}" \
+      "install any iOS ${MIN_IOS%%.*}-${MAX_IOS%%.*} runtime (Xcode > Settings > Components), or raise max_ios in ios-support.json if a newer iOS is now verified"
+else
+  bad "no iOS runtime" "Xcode > Settings > Components, or xcodebuild -downloadPlatform iOS"
+fi
 
 echo "== Resources =="
 FREE=$(df -g / | tail -1 | awk '{print $4}')

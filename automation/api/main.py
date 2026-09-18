@@ -402,7 +402,7 @@ def _reap_orphaned_runs():
     try:
         from datetime import datetime
         from automation.database.config import SessionLocal
-        from automation.database.models import TestRun
+        from automation.database.models import ScenarioResult, TestRun
         with SessionLocal() as db:
             stuck = db.query(TestRun).filter(
                 TestRun.status == "running",
@@ -413,6 +413,26 @@ def _reap_orphaned_runs():
                 r.job_state = "cancelled"
                 if not r.completed_at:
                     r.completed_at = datetime.utcnow()
+                # The SEGMENT rows are stranded too. A segment is written as
+                # 'running' before each step and only overwritten when that step
+                # returns, so a backend that died mid-step leaves the row spinning
+                # forever -- a finished run whose segment still shows a RUNNING
+                # badge, which reads as "the run never stopped". Reaping the parent
+                # without these leaves the contradiction on screen.
+                for row in db.query(ScenarioResult).filter(
+                    ScenarioResult.run_id == r.id,
+                    ScenarioResult.status.in_(["running", "queued"]),
+                ).all():
+                    row.status = "FAIL"
+                    # Drop the '▶' in-flight marker — the dashboard spins on it, so
+                    # leaving it keeps a step animating under a terminal badge.
+                    kept = [n for n in (row.reasons or []) if not n.lstrip().startswith("▶")]
+                    kept.append("[fail] the backend restarted while this step was still running")
+                    row.reasons = kept
+                    if row.consumer_status == "running":
+                        row.consumer_status = "FAIL"
+                    if row.business_status == "running":
+                        row.business_status = "FAIL"
             if stuck:
                 db.commit()
                 _log.info("Reaped %d orphaned running run(s) on startup", len(stuck))
