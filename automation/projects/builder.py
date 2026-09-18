@@ -73,12 +73,24 @@ RN_KNOWN_FIXES: Dict[str, Dict[str, str]] = {
 # the device shows a blank screen or "Module AppRegistry is not a registered
 # callable module". Nothing in that symptom points at a missing package, which is
 # why this costs hours to diagnose by hand.
+# Each entry is injected ONLY when the branch's own source imports it — see
+# _source_imports. These requirements are branch-specific, so a global injection
+# is wrong: it adds a dependency the branch never uses, and an unused native
+# dependency can still break the build it was added to protect.
 RN_REQUIRED_DEPS: Dict[str, Dict[str, str]] = {
     "0.68": {
-        # App/Utils/videoUploadTracker.js requires it. The require is lazy and
-        # wrapped in try/except, which protects the RUNTIME but not Metro — static
-        # resolution still fails and 500s the bundle.
-        "react-native-compressor": "1.10.3",
+        # App/Utils/videoUploadTracker.js requires it on Thai-filter and
+        # preprod-2-May18. The require is lazy and wrapped in try/except, which
+        # protects the RUNTIME but not Metro — static resolution still fails and
+        # 500s the bundle.
+        #
+        # 1.10.3 was the pinned version until react-native-compressor's
+        # ios/Video/VideoMain.swift `import AssetsLibrary` stopped building
+        # against the iOS 26 SDK, where Apple removed the framework. 1.13.0 is
+        # the first release that uses Photos instead; its exported API is
+        # identical to 1.10.3's and its peers are unconstrained, so the bump
+        # changes nothing for callers.
+        "react-native-compressor": "1.13.0",
     },
 }
 
@@ -583,8 +595,22 @@ class AppBuilder:
 
         # 1b. Imported-but-undeclared packages. Deliberately NOT gated on
         # "pkg in deps" — being absent from package.json is the whole failure.
+        #
+        # It IS gated on the source actually importing the package, because the
+        # import is branch-specific: App/Utils/videoUploadTracker.js requires
+        # react-native-compressor on Thai-filter and preprod-2-May18, but on main
+        # the same file is a three-line Set with no requires. Injecting it there
+        # installed a dependency nothing used, and that dependency's
+        # `import AssetsLibrary` is unbuildable against the iOS 26 SDK — so an
+        # unconditional injection turned a branch that had no problem into one
+        # that could not build at all.
         for pkg, target in RN_REQUIRED_DEPS.get(rn_key, {}).items():
-            targets.setdefault(pkg, target)
+            if self._source_imports(repo_path, pkg):
+                targets.setdefault(pkg, target)
+            else:
+                logger.info(
+                    "%s is not imported by this branch's source — not injecting it.",
+                    pkg)
 
         # 2. Registry pass for packages honest enough to declare a peer range.
         self._registry_failures = 0
@@ -1529,6 +1555,51 @@ class AppBuilder:
             return os.path.getmtime(node_modules) > os.path.getmtime(manifest)
         except OSError:
             return False
+
+    # Source directories worth scanning for an import. node_modules is excluded:
+    # a dependency importing the package says nothing about whether THIS app does.
+    _SOURCE_DIRS = ("App", "src", "app", "js")
+    _SOURCE_EXTS = (".js", ".jsx", ".ts", ".tsx")
+
+    def _source_imports(self, repo_path: str, pkg: str) -> bool:
+        """Does this branch's own source reference *pkg*?
+
+        Matches `import ... from 'pkg'`, `require('pkg')` and the subpath forms.
+        The lazy `require('react-native-compressor')?.Video` in
+        videoUploadTracker.js is exactly the shape that has to be caught: it is
+        wrapped in try/catch, which protects the runtime but not Metro — static
+        resolution still fails and 500s the whole bundle.
+
+        Errs toward True on an unreadable tree: a missed import breaks the bundle
+        with a symptom that points nowhere near the missing package, whereas an
+        unnecessary install merely wastes time.
+        """
+        roots = [os.path.join(repo_path, d) for d in self._SOURCE_DIRS]
+        roots = [r for r in roots if os.path.isdir(r)]
+        if not roots:
+            # No recognised source directory — cannot prove absence, so keep the
+            # old unconditional behaviour rather than risk a broken bundle.
+            logger.debug("no source directory under %s; assuming %s is needed",
+                         repo_path, pkg)
+            return True
+
+        # Quoted, and allowing a subpath: 'pkg', "pkg/lib/x".
+        rx = re.compile(rf"""['"]{re.escape(pkg)}(?:/[^'"]*)?['"]""")
+        for root in roots:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames
+                               if d not in ("node_modules", "__tests__", ".git")]
+                for name in filenames:
+                    if not name.endswith(self._SOURCE_EXTS):
+                        continue
+                    try:
+                        with open(os.path.join(dirpath, name), "r",
+                                  errors="replace") as f:
+                            if rx.search(f.read()):
+                                return True
+                    except OSError:
+                        continue
+        return False
 
     def _folly_cxx_standard(self, pod_dir: str) -> List[str]:
         """RCT-Folly xcconfigs that pin a C++ standard folly cannot compile at.
