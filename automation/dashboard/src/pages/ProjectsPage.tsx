@@ -492,7 +492,11 @@ export default function ProjectsPage() {
               </div>
               <div style={{ flex: 2 }}>
                 <label style={{ display: 'block', marginBottom: 8, color: 'var(--text-secondary)' }}>Repository URL</label>
-                <input required value={form.git_url} onChange={e => setForm({ ...form, git_url: e.target.value })}
+                {/* Branches load when the URL is finished, so the Default Branch
+                    field below is already a list by the time it is reached. */}
+                <input required value={form.git_url}
+                  onChange={e => setForm({ ...form, git_url: e.target.value })}
+                  onBlur={loadFormBranches}
                   style={inputStyle} placeholder="https://github.com/org/repo.git" />
               </div>
             </div>
@@ -507,15 +511,22 @@ export default function ProjectsPage() {
                 </label>
                 {/* Branches load once a repo URL is present — before the project
                     exists there is no id to ask by, so this reads the URL itself. */}
-                <input required value={form.default_branch}
-                  list="register-branches"
-                  onChange={e => setForm({ ...form, default_branch: e.target.value })}
-                  onFocus={loadFormBranches}
-                  style={inputStyle}
-                  placeholder={loadingFormBranches ? 'Loading branches…' : 'main'} />
-                <datalist id="register-branches">
-                  {formBranches.map(b => <option key={b} value={b} />)}
-                </datalist>
+                {formBranches.length > 0 ? (
+                  <select required value={form.default_branch}
+                    onChange={e => setForm({ ...form, default_branch: e.target.value })}
+                    style={inputStyle}>
+                    {formBranches.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                ) : (
+                  // Before a URL is entered there is nothing to list, so this stays
+                  // a plain text field — and stays usable for a repo the server
+                  // cannot reach.
+                  <input required value={form.default_branch}
+                    onChange={e => setForm({ ...form, default_branch: e.target.value })}
+                    onBlur={loadFormBranches}
+                    style={inputStyle}
+                    placeholder={loadingFormBranches ? 'Loading branches…' : 'main'} />
+                )}
               </div>
               <div style={{ flex: 1 }}>
                 <label style={{ display: 'block', marginBottom: 8, color: 'var(--text-secondary)' }}>Platform</label>
@@ -662,20 +673,28 @@ export default function ProjectsPage() {
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)', fontSize: 13 }}>
                     <GitBranch size={13} /> Branch
                   </label>
-                  <input
-                    list={`branches-${p.id}`}
+                  {/* A real <select>, not a datalist. A datalist renders as a text
+                      box that AUTOCOMPLETES: it silently replaced the branch with
+                      whichever suggestion matched, so a clone could check out a
+                      branch nobody picked. A select shows every branch, and its
+                      value can only be one of them. Browsers scroll and
+                      type-to-jump long lists natively. */}
+                  <select
                     value={pickedBranch[p.id] ?? p.current_branch ?? p.default_branch ?? ''}
                     onFocus={() => loadBranches(p)}
                     onChange={e => setPickedBranch(s => ({ ...s, [p.id]: e.target.value }))}
-                    placeholder={loadingBranches === p.id ? 'Loading branches…' : 'Type to search…'}
                     style={{ ...inputStyle, width: 260, padding: '6px 10px', fontSize: 13 }}
-                  />
-                  {/* A datalist keeps this searchable AND typeable — 489 branches is
-                      far too many for a plain <select>, and a name can still be
-                      pasted in for a branch pushed since the list was fetched. */}
-                  <datalist id={`branches-${p.id}`}>
-                    {(branches[p.id] ?? []).map(b => <option key={b} value={b} />)}
-                  </datalist>
+                  >
+                    {/* The current branch is always an option, so the select has
+                        something valid to show before the list has loaded. */}
+                    {!branches[p.id] && (
+                      <option value={pickedBranch[p.id] ?? p.current_branch ?? p.default_branch ?? ''}>
+                        {loadingBranches === p.id ? 'Loading branches…'
+                          : (p.current_branch ?? p.default_branch ?? 'main')}
+                      </option>
+                    )}
+                    {(branches[p.id] ?? []).map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
                   {branches[p.id] && (
                     <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
                       {branches[p.id].length} branches
