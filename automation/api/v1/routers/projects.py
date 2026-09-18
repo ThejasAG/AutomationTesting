@@ -322,9 +322,14 @@ def delete_project(
 
     ``purge=true`` removes everything else the project left behind as well: the
     baselines, project settings (which hold jira/github tokens), saved scenarios,
-    tickets, AI recommendations and the learned-locator entry. Without it those
-    rows simply lose the project they pointed at — which is how this database
-    ended up with recommendations belonging to projects that no longer exist.
+    tickets, AI recommendations, the learned-locator entry, and the app itself from
+    any booted simulator carrying it. Without it those rows simply lose the project
+    they pointed at — which is how this database ended up with recommendations
+    belonging to projects that no longer exist, and the app stayed installed so a
+    "deleted" project could still be driven by a run.
+
+    An app whose bundle id another project also uses is KEPT, and the response says
+    so in ``app_kept_because``.
 
     Test history is KEPT either way. A purge detaches runs (``project_id`` goes
     null) rather than deleting them, so what was tested and what happened stays on
@@ -345,6 +350,8 @@ def delete_project(
             "runs_detached": plan.runs_detached,
             "bytes_freed": plan.repo_bytes,
             "locator_entry_removed": plan.locator_key,
+            "app_uninstalled_from": plan.uninstall_from if dry_run else plan.uninstalled,
+            "app_kept_because": plan.app_kept_because,
             "warnings": plan.warnings,
         }
 

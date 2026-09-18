@@ -32,7 +32,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -63,6 +65,13 @@ class PurgePlan:
     rows: Dict[str, int] = field(default_factory=dict)
     locator_key: Optional[str] = None
     locator_kept_because: str = ""
+    # Simulators/devices still carrying this project's app. Purging the row and the
+    # clone but leaving the app installed is how a "deleted" project keeps driving
+    # runs: the binary stays, and a debug build with no main.jsbundle then serves
+    # whatever Metro is up, which need not match anything left on disk.
+    uninstall_from: List[str] = field(default_factory=list)
+    uninstalled: List[str] = field(default_factory=list)
+    app_kept_because: str = ""
     warnings: List[str] = field(default_factory=list)
 
     @property
@@ -87,6 +96,10 @@ class PurgePlan:
             out.append(f"  locators   drop {self.locator_key!r} from learned_locators.json")
         elif self.locator_kept_because:
             out.append(f"  locators   kept — {self.locator_kept_because}")
+        for device in self.uninstall_from:
+            out.append(f"  uninstall  {self.bundle_id} from {device}")
+        if self.app_kept_because:
+            out.append(f"  app        kept — {self.app_kept_because}")
         for w in self.warnings:
             out.append(f"  ! {w}")
         if self.is_empty:
@@ -264,7 +277,43 @@ def plan_purge(db: Session, project_id: str, repos_base: Optional[str] = None) -
             if not plan.locator_key:
                 plan.locator_kept_because = (
                     f"no entry unambiguously owned by {plan.bundle_id}")
+
+        # The installed app goes too, on the same condition as the locator entry:
+        # a bundle id another project still claims must survive the purge.
+        if blocked:
+            plan.app_kept_because = blocked
+        else:
+            plan.uninstall_from = _devices_with_app(plan.bundle_id)
     return plan
+
+
+def _devices_with_app(bundle_id: str) -> List[str]:
+    """Booted simulators carrying *bundle_id*.
+
+    Booted only, deliberately: `simctl uninstall` boots a shut-down simulator to
+    run, which would turn a project delete into a fleet-wide wake-up. A shut-down
+    simulator's copy is replaced by the next prepare, which uninstalls first.
+    """
+    try:
+        from automation.projects.builder import app_builder
+        ok, out = _run_simctl(["list", "devices", "booted"])
+        if not ok:
+            return []
+        udids = re.findall(r"\(([0-9A-Fa-f-]{36})\)\s*\(Booted\)", out or "")
+        return [u for u in udids if app_builder.is_installed(u, bundle_id)]
+    except Exception as e:
+        logger.debug("_devices_with_app(%s): %s", bundle_id, e)
+        return []
+
+
+def _run_simctl(args: List[str]) -> tuple:
+    """simctl, or (False, '') where there is no Xcode — Linux CI, for one."""
+    try:
+        p = subprocess.run(["xcrun", "simctl", *args], capture_output=True,
+                           text=True, timeout=60)
+        return p.returncode == 0, p.stdout
+    except Exception:
+        return False, ""
 
 
 def purge_project(db: Session, project_id: str, repos_base: Optional[str] = None,
@@ -301,6 +350,20 @@ def purge_project(db: Session, project_id: str, repos_base: Optional[str] = None
                 plan.warnings.append(f"could not fully remove {path}")
             else:
                 logger.info("purged %s", path)
+
+    # ── devices ───────────────────────────────────────────────────────────────
+    # After the commit, like the disk removal: a leftover app is recoverable noise,
+    # whereas uninstalling for a purge that then fails is not.
+    if plan.uninstall_from:
+        from automation.projects.builder import app_builder
+        for device in plan.uninstall_from:
+            ok, msg = app_builder.uninstall(device, plan.bundle_id, "ios")
+            if ok:
+                plan.uninstalled.append(device)
+                logger.info("purge: uninstalled %s from %s", plan.bundle_id, device)
+            else:
+                plan.warnings.append(
+                    f"could not uninstall {plan.bundle_id} from {device}: {msg}")
 
     # ── knowledge ─────────────────────────────────────────────────────────────
     if plan.locator_key:
