@@ -114,3 +114,16 @@ def test_no_bundle_id_means_nothing_to_uninstall(db, tmp_path):
 
     devices.assert_not_called()
     assert plan.uninstall_from == []
+
+
+def test_apple_system_apps_are_never_uninstalled(db, tmp_path):
+    """The demo project drives Settings because it ships with the simulator.
+
+    Deleting that project must not strip the OS of an app the platform has no way
+    to reinstall.
+    """
+    _add_project(db, "demo", "Demo — iOS Settings", "com.apple.Preferences")
+
+    plan = plan_purge(db, "demo", repos_base=str(tmp_path))
+
+    assert plan.uninstall_from == [], "com.apple.* is not ours to remove"

@@ -293,7 +293,13 @@ def _devices_with_app(bundle_id: str) -> List[str]:
     Booted only, deliberately: `simctl uninstall` boots a shut-down simulator to
     run, which would turn a project delete into a fleet-wide wake-up. A shut-down
     simulator's copy is replaced by the next prepare, which uninstalls first.
+
+    Apple's own apps are never touched. The demo project drives Settings
+    (com.apple.Preferences) precisely because it ships with the simulator; deleting
+    that project must not strip the OS of an app the platform cannot reinstall.
     """
+    if bundle_id.startswith("com.apple."):
+        return []
     try:
         from automation.projects.builder import app_builder
         ok, out = _run_simctl(["list", "devices", "booted"])
