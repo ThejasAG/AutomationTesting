@@ -16,8 +16,16 @@ esac
 
 .venv/bin/python - "$MODE" "$N" <<'PY'
 import sqlite3, sys
+# Use the CONFIGURED database. Hardcoding the repo-root file meant this cleared
+# screenshots from a database the platform may not be using, while the real one grew
+# unbounded.
+sys.path.insert(0, ".")
+from automation.config import database_url
+_url = database_url()
+if not _url.startswith("sqlite:"):
+    sys.exit(f"clear-screenshots only supports sqlite; DATABASE_URL is {_url}")
 mode, n = sys.argv[1], int(sys.argv[2] or 0)
-c = sqlite3.connect("test_automation_new.db")
+c = sqlite3.connect(_url.removeprefix("sqlite:///"))
 before = c.execute("select coalesce(sum(length(screenshot)),0) from scenario_results "
                    "where screenshot is not null").fetchone()[0]
 if mode == "all":

@@ -33,8 +33,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+from automation.config import load_env  # noqa: E402
+load_env()   # the one loader — see automation/config.py
 
 from automation.database.config import SessionLocal, initialize_database  # noqa: E402
 from automation.database.models import SavedScenario, TestProject          # noqa: E402

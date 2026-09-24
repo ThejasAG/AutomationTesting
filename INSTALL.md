@@ -168,6 +168,33 @@ Then run one quick demo flow from the dashboard. If it passes, the install is go
 ## When something fails
 
 1. `bash scripts/doctor.sh` first — most failures are environment, not code.
+   Add a repo path to check that project too:
+
+   ```bash
+   bash scripts/doctor.sh repos/<project-id>
+   ```
+
+   That second form reports what a machine check cannot see: patches that were
+   never applied, a `Podfile.lock` disagreeing with `Pods/Manifest.lock` (the
+   "sandbox is not in sync" build error), a dependency whose Swift source imports
+   a framework this SDK has removed, and deployment targets below what the pods
+   need. Each finding says whether the platform can fix it or whether it belongs
+   in the application repository.
+
+   **Comparing a working Mac with a failing one** — the fastest way to find what
+   differs:
+
+   ```bash
+   # on the Mac where it works
+   .venv/bin/python -m automation.projects.macos_environment repos/<id> --json > good-mac.json
+
+   # on the Mac where it does not
+   .venv/bin/python -m automation.projects.macos_environment repos/<id> --compare good-mac.json
+   ```
+
+   It prints only the differences — tool versions, project state, and which
+   checks changed result.
+
 2. A failing run now carries the app's own words on the failing step, tagged
    `[evidence]`: JS console errors, device log, and any crash report.
 3. **Inspector** in the dashboard shows the live UI tree and flags anything covered

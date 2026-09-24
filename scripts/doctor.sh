@@ -106,7 +106,23 @@ if [ -f cross_app_config.json ]; then
   done
 fi
 
+# == Project preflight ========================================================
+# Everything above checks the MACHINE. A project has its own failure modes that
+# a machine check cannot see -- unapplied patches, a Podfile.lock that disagrees
+# with Pods/Manifest.lock, a dependency importing a framework this SDK dropped.
+# `doctor.sh <repo>` runs those too, so one command covers both.
+if [ -n "${1:-}" ]; then
+  echo
+  echo "== Project: $1 =="
+  if [ -x .venv/bin/python ]; then
+    .venv/bin/python -m automation.projects.macos_environment "$1" || FAIL=1
+  else
+    warn "cannot run the project preflight" "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+  fi
+fi
+
 echo
 [ "$FAIL" -eq 0 ] && echo "READY — every required check passed." \
   || echo "NOT READY — fix the ✗ items above, then re-run."
+[ -z "${1:-}" ] && echo "Tip: ./scripts/doctor.sh repos/<project-id>   also checks that project."
 exit $FAIL
