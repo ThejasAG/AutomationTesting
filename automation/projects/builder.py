@@ -13,18 +13,22 @@ Nothing here is React-Native specific: an RN repo simply has its native project
 under ios/ and android/, which is exactly what the discovery below looks for.
 """
 
+import contextlib
 import glob
 import json
 import logging
 import os
 import plistlib
 import re
+import shutil
 import stat
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -32,6 +36,14 @@ logger = logging.getLogger(__name__)
 # A cold xcodebuild of a large RN app genuinely takes this long.
 BUILD_TIMEOUT = 3600
 INSTALL_TIMEOUT = 300
+# `pod install` on a machine with a COLD CocoaPods cache downloads the whole spec
+# repo before it installs anything -- measured here at >30 min for a 108-pod project,
+# which is exactly what a new Mac does on its first build of every project. The old
+# 1800s ceiling killed it a few seconds after the pods had actually landed
+# ("Pods installed: 108" in the same failure), turning a slow first run into a failed
+# one. --repo-update gets longer still: it re-fetches specs by definition.
+POD_TIMEOUT = 5400              # 90 min: first run on a cold cache
+POD_REPO_UPDATE_TIMEOUT = 7200  # 2 h: the same, plus a full spec-repo refresh
 NPM_INSTALL_TIMEOUT = 1800
 REGISTRY_TIMEOUT = 15
 
@@ -61,6 +73,34 @@ RN_KNOWN_FIXES: Dict[str, Dict[str, str]] = {
         # react-native-svg, not on react-native, so the registry pass (which only
         # reads the `react-native` peer range) can't see it — hence a curated pin.
         "react-native-qrcode-svg": "6.1.2",
+    },
+}
+
+# Transitive packages that must be pinned even though the app never declares them.
+#
+# RN_KNOWN_FIXES cannot express these: it only rewrites versions already present in
+# package.json ("if pkg in deps"), and a dependency-of-a-dependency is not. npm and
+# yarn resolve those ranges to the newest release, which is how a package the app
+# pins indirectly still moves underneath it.
+#
+# Each entry names the RUNTIME failure it prevents, because the symptom never points
+# at the package: the build succeeds, the bundle serves, and the app red-screens on
+# the one screen that uses it.
+RN_TRANSITIVE_PINS: Dict[str, Dict[str, str]] = {
+    "0.68": {
+        # qrcode 1.5.4 rewrote ByteData to `new TextEncoder().encode(data)`.
+        # TextEncoder is a browser/Node global that React Native's JS runtime
+        # (JSC and Hermes) does not provide, so rendering ANY <QRCode> throws
+        # "Can't find variable: TextEncoder" and takes the screen down with a red
+        # box -- seen on the booking confirmation screen at the end of a preorder.
+        # 1.5.3 uses the `encode-utf8` package instead and needs no polyfill.
+        #
+        # Why it is reachable at all: react-native-qrcode-svg 6.3.x depends on
+        # qrcode ^1.5.1 AND ships text-encoding as a polyfill, but RN_KNOWN_FIXES
+        # downgrades that package to 6.1.2 (for the react-native-svg 12.x peer),
+        # and 6.1.2 predates the polyfill while its own ^1.5.0 range still admits
+        # 1.5.4. The downgrade is correct; this pin covers what it leaves exposed.
+        "qrcode": "1.5.3",
     },
 }
 
@@ -158,6 +198,15 @@ const AccessibleOverlay = ({visible, w = 550, rounded = 43, onBackdropPress, chi
 );
 
 '''
+
+
+def _is_build_input(path: str) -> bool:
+    """True for files only the BUILD reads, never the running app.
+
+    Such an edit must always be reverted, even for a Debug build whose JS edits are
+    deliberately left in place for Metro.
+    """
+    return path.endswith((".pbxproj", ".xcconfig", ".plist", ".entitlements"))
 
 
 @dataclass
@@ -468,6 +517,57 @@ class AppBuilder:
         )
         return data.get("version") if data else None
 
+    def _nested_copies(self, repo_path: str, pkg: str) -> List[Tuple[str, str]]:
+        """(directory, version) for every copy of *pkg* NESTED under another package.
+
+        npm and yarn hoist a shared dependency to the top of node_modules, but when
+        two dependents want incompatible ranges they also leave a private copy inside
+        the dependent -- and Node resolves that one first. A top-level check then
+        reports the pinned version while the app actually loads the nested one.
+
+        This is not theoretical: pinning qrcode to 1.5.3 at the top level left
+        react-native-qrcode-svg/node_modules/qrcode at 1.5.4, so every QR render
+        still threw "Can't find variable: TextEncoder" with the pin apparently
+        applied.
+        """
+        root = os.path.join(repo_path, "node_modules")
+        out: List[Tuple[str, str]] = []
+        if not os.path.isdir(root):
+            return out
+        for dep in os.listdir(root):
+            nested = os.path.join(root, dep, "node_modules", *pkg.split("/"))
+            data = self._read_json(os.path.join(nested, "package.json"))
+            if data and data.get("version"):
+                out.append((nested, data["version"]))
+        return out
+
+    def _prune_shadowing_copies(self, repo_path: str, rn_version: str,
+                                targets: Dict[str, str], result: Dict[str, Any]) -> None:
+        """Delete nested copies that shadow a pinned version.
+
+        Covers the curated pins as well as anything fixed this run: a pin whose top
+        level is already correct produces no target, yet a private copy inside a
+        dependent still wins Node's resolution and the app loads it instead.
+        """
+        rn_key = ".".join(str(x) for x in (_parse_ver(rn_version) or (0, 0, 0))[:2])
+        sweep = dict(RN_TRANSITIVE_PINS.get(rn_key, {}))
+        sweep.update(targets)
+        for pkg, target in sweep.items():
+            for nested_dir, nested_ver in self._nested_copies(repo_path, pkg):
+                if nested_ver == target:
+                    continue
+                logger.warning("removing nested %s@%s at %s — it shadows the pinned "
+                               "%s", pkg, nested_ver, nested_dir, target)
+                try:
+                    shutil.rmtree(nested_dir)
+                    note = f"{pkg}@{nested_ver} (nested, removed)"
+                    if note not in result["fixed"]:
+                        result["fixed"].append(note)
+                except OSError as e:
+                    result["failed"].append(
+                        f"could not remove nested {pkg}@{nested_ver}: {e}")
+                    result["ready_to_build"] = False
+
     def _rn_version(self, repo_path: str) -> Optional[str]:
         """The React Native version ACTUALLY installed.
 
@@ -508,22 +608,39 @@ class AppBuilder:
             return self._registry_cache[pkg]
 
         url = f"https://registry.npmjs.org/{urllib.parse.quote(pkg, safe='@')}"
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    # Abbreviated metadata: same peerDependencies, a fraction of
-                    # the bytes. The full doc for a popular package is megabytes.
-                    "Accept": "application/vnd.npm.install-v1+json, application/json",
-                },
-            )
-            with urllib.request.urlopen(
-                req, timeout=REGISTRY_TIMEOUT, context=self._ssl_context()
-            ) as resp:
-                doc = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            logger.warning(f"npm registry lookup failed for {pkg}: {e}")
-            doc = None
+        # Retry before giving up. A single dropped request used to decide that a
+        # package had no compatible version, which fails the whole build -- a 3.7-hour
+        # prepare died this way on a lookup that succeeded seconds later. Network
+        # blips are expected on a laptop (sleep, VPN, flaky wifi) and are not an
+        # answer about the package.
+        doc = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        # Abbreviated metadata: same peerDependencies, a fraction of
+                        # the bytes. The full doc for a popular package is megabytes.
+                        "Accept": "application/vnd.npm.install-v1+json, application/json",
+                    },
+                )
+                with urllib.request.urlopen(
+                    req, timeout=REGISTRY_TIMEOUT, context=self._ssl_context()
+                ) as resp:
+                    doc = json.loads(resp.read().decode("utf-8"))
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))    # 2s, then 4s
+        if doc is None:
+            logger.warning("npm registry lookup failed for %s after 3 attempts: %s",
+                           pkg, last_err)
+            # Do NOT cache a failure. Caching None made one blip permanent for the
+            # rest of the process, so every later question about this package got the
+            # same wrong answer.
+            return None
 
         self._registry_cache[pkg] = doc
         return doc
@@ -580,6 +697,29 @@ class AppBuilder:
             return False                      # crossing a major boundary
         return (cur[1] - tgt[1]) <= self.MAX_MINOR_DOWNGRADE
 
+    def platform_dependency_plan(self, repo_path: str) -> Dict[str, Dict[str, str]]:
+        """What the PLATFORM would inject here, and what it deliberately skips.
+
+        Read-only: it asks the same questions _conflicting_packages does (same
+        RN_REQUIRED_DEPS table, same _source_imports gate) and installs nothing.
+        It exists so the setup report can state the injection decision up front —
+        "injected 0, skipped react-native-compressor, no source import detected"
+        — instead of that decision only ever appearing in a log line.
+        """
+        rn_version = self._rn_version(repo_path)
+        if not rn_version:
+            return {"injected": {}, "skipped": {}}
+        rn_key = ".".join(str(x) for x in (_parse_ver(rn_version) or (0, 0, 0))[:2])
+
+        injected: Dict[str, str] = {}
+        skipped: Dict[str, str] = {}
+        for pkg, target in RN_REQUIRED_DEPS.get(rn_key, {}).items():
+            if self._source_imports(repo_path, pkg):
+                injected[pkg] = target
+            else:
+                skipped[pkg] = "no source import detected"
+        return {"injected": injected, "skipped": skipped}
+
     def _conflicting_packages(self, repo_path: str, rn_version: str) -> Dict[str, str]:
         """pkg -> target version, for every dependency incompatible with *rn_version*."""
         pj = self._read_json(os.path.join(repo_path, "package.json")) or {}
@@ -604,6 +744,18 @@ class AppBuilder:
         # `import AssetsLibrary` is unbuildable against the iOS 26 SDK — so an
         # unconditional injection turned a branch that had no problem into one
         # that could not build at all.
+        # 1c. Transitive pins. Gated on the package being INSTALLED rather than
+        # declared or imported: the app never names it and never imports it
+        # directly, but it is in the tree because something else pulled it in, and
+        # the resolver is free to move it. Pinning it in package.json is what makes
+        # the version deterministic -- without that, a range on a dependency of a
+        # dependency re-resolves to the newest release on every clean install.
+        for pkg, target in RN_TRANSITIVE_PINS.get(rn_key, {}).items():
+            installed = self._installed_version(repo_path, pkg)
+            if installed and installed != target:
+                logger.info("transitive pin: %s %s -> %s", pkg, installed, target)
+                targets.setdefault(pkg, target)
+
         for pkg, target in RN_REQUIRED_DEPS.get(rn_key, {}).items():
             if self._source_imports(repo_path, pkg):
                 targets.setdefault(pkg, target)
@@ -735,6 +887,13 @@ class AppBuilder:
         }
         result["already_compatible"] = sorted(set(targets) - set(pending))
 
+        # Nested shadowing copies are checked even when nothing needs installing: a
+        # pin whose top level is already correct still loads the WRONG code if a
+        # dependent keeps a private copy (Node resolves that one first). Returning
+        # early here is what let qrcode read as pinned at 1.5.3 while every QR render
+        # threw "Can't find variable: TextEncoder" from a nested 1.5.4.
+        self._prune_shadowing_copies(repo_path, rn_version, targets, result)
+
         if not pending:
             logger.info(f"RN compatibility: nothing to fix for {repo_path}")
             return result
@@ -761,6 +920,31 @@ class AppBuilder:
                 # Report the tool's own words — a swallowed error here is what
                 # made this class of failure undiagnosable in the first place.
                 result["failed"].append(f"{spec}: {(out or '').strip()[-300:]}")
+                result["ready_to_build"] = False
+
+        # Every `npm install <pkg>` PRUNES packages that are in node_modules but not
+        # in package.json. Injected dependencies are exactly that shape, so
+        # installing one fix can silently delete another -- and the loss only
+        # surfaces at run time, as Metro's "Unable to resolve module <x>" red box on
+        # a device, long after the build reported success. Verify the whole set is
+        # still present and reinstate anything that went missing.
+        for pkg, target in list(targets.items()):
+            if self._installed_version(repo_path, pkg):
+                continue
+            logger.warning("%s disappeared during dependency fixes (pruned as "
+                           "undeclared) — reinstating it.", pkg)
+            spec = f"{pkg}@{target}"
+            if os.path.exists(os.path.join(repo_path, "yarn.lock")):
+                cmd = self.detect_package_manager(repo_path) + ["add", spec]
+            else:
+                cmd = ["npm", "install", spec, "--legacy-peer-deps"]
+            ok, out = _run(cmd, cwd=repo_path, timeout=NPM_INSTALL_TIMEOUT)
+            if ok and self._installed_version(repo_path, pkg):
+                if spec not in result["fixed"]:
+                    result["fixed"].append(spec)
+            else:
+                result["failed"].append(
+                    f"{spec} (reinstate): {(out or '').strip()[-300:]}")
                 result["ready_to_build"] = False
 
         # Pods compile RN module source out of node_modules, so anything we just
@@ -2052,7 +2236,7 @@ class AppBuilder:
             self._expose_assign_table_sheet(repo_path)
 
             logger.info(f"Running pod install in {candidate}")
-            ok, out = _run(["pod", "install"], cwd=candidate, timeout=1800)
+            ok, out = _run(["pod", "install"], cwd=candidate, timeout=POD_TIMEOUT)
             if ok:
                 return True, self._verify_pods(candidate, out)
 
@@ -2062,7 +2246,7 @@ class AppBuilder:
             if "repo update" in out or "out-of-date source repos" in out:
                 logger.warning("pod install failed on stale specs — retrying with --repo-update")
                 ok, out = _run(
-                    ["pod", "install", "--repo-update"], cwd=candidate, timeout=2700
+                    ["pod", "install", "--repo-update"], cwd=candidate, timeout=POD_REPO_UPDATE_TIMEOUT
                 )
                 if ok:
                     return True, self._verify_pods(candidate, out)
@@ -2088,7 +2272,7 @@ class AppBuilder:
                     return False, f"Could not remove stale Podfile.lock: {e}"
 
                 ok, out = _run(
-                    ["pod", "install", "--repo-update"], cwd=candidate, timeout=2700
+                    ["pod", "install", "--repo-update"], cwd=candidate, timeout=POD_REPO_UPDATE_TIMEOUT
                 )
                 return ok, out
 
@@ -2097,7 +2281,8 @@ class AppBuilder:
         return True, "No Podfile — CocoaPods not used."
 
     def build_ios(
-        self, repo_path: str, force: bool = False, device_id: Optional[str] = None
+        self, repo_path: str, force: bool = False, device_id: Optional[str] = None,
+        bundle_id: Optional[str] = None, env_config=None,
     ) -> BuildResult:
         """Build a simulator .app via xcodebuild.
 
@@ -2107,7 +2292,46 @@ class AppBuilder:
         produce *every* simulator slice — including x86_64, which is useless on
         Apple Silicon, doubles the build, and is the slice where older React
         Native dependencies tend to fail to compile.
+
+        *bundle_id* is the bundle id the finished .app MUST carry. *env_config* is an
+        environments.EnvironmentConfig carrying the whole variant (bundle id, product
+        name, configuration, extra build settings); it supersedes *bundle_id*, which
+        stays for callers that only know the id.
+
+        Both exist because the prod/staging difference lived in local commits that
+        were never pushed — so a re-clone silently built a *prod* artifact from the
+        staging branch, which then failed the staging scenario's preflight as
+        "…staging is not installed". Passing the variant here as xcodebuild SETTING=
+        VALUE overrides makes it a reproducible property of configuration, and leaves
+        the application checkout untouched: Info.plist already reads
+        $(PRODUCT_BUNDLE_IDENTIFIER), so no file in the repo is modified.
         """
+        # env_config wins; bundle_id is the narrower, older way to say the same thing.
+        env_settings: List[str] = []
+        configuration = "Debug"
+        env_name = None
+        if env_config is not None:
+            bundle_id = env_config.bundle_id or bundle_id
+            configuration = env_config.configuration or "Debug"
+            env_name = env_config.environment
+            env_settings = env_config.xcodebuild_settings()
+        elif bundle_id:
+            # Resolve the full variant from config rather than passing the id as a
+            # global xcodebuild override: that override reaches EVERY target,
+            # including the CocoaPods resource bundles, which is what crashed
+            # PaymentSheet on launch (see EnvironmentConfig.xcodebuild_settings).
+            try:
+                from automation.projects import environments as _env
+                _envname = _env.environment_for_bundle(bundle_id)
+                env_config = (_env.resolve(_envname, bundle_id=bundle_id)
+                              if _envname else None)
+            except Exception as e:
+                logger.debug("no environment config for %s: %s", bundle_id, e)
+                env_config = None
+            if env_config is not None:
+                configuration = env_config.configuration or "Debug"
+                env_name = env_config.environment
+                env_settings = env_config.xcodebuild_settings()
         # xcodebuild runs with cwd=repo_path, so a repo-relative project path
         # would be resolved *twice* and not be found. Always work in absolutes.
         repo_path = os.path.abspath(repo_path)
@@ -2166,7 +2390,15 @@ class AppBuilder:
         if not ok:
             return BuildResult(ok=False, error=msg)
 
-        derived = os.path.join(repo_path, "build", "ios")
+        # One derived-data dir PER ENVIRONMENT. A single shared build/ios meant a
+        # staging build overwrote the production Products dir (and vice versa), so
+        # whichever ran last was the only artifact that existed -- and the next
+        # request for the other variant silently "reused" it. Keying the path by
+        # environment lets both exist side by side and be matched on identity.
+        # Unspecified environment keeps the historical path, so nothing that already
+        # points at build/ios breaks.
+        derived = os.path.join(repo_path, "build",
+                               f"ios-{env_name}" if env_name else "ios")
         head_file = os.path.join(derived, ".built_head")
         cur_head = self._git_head(repo_path)
 
@@ -2175,18 +2407,28 @@ class AppBuilder:
         # binary after a `git pull` or a code edit — a re-prepare looked done but
         # ran the previous version. Comparing the built commit to HEAD fixes that.
         if not force:
-            existing = self._find_built_app(derived)
+            existing = self._find_built_app(derived, configuration=configuration,
+                                            bundle_id=bundle_id)
             built_head = None
             try:
                 if os.path.exists(head_file):
                     built_head = open(head_file).read().strip()
             except Exception:
                 pass
-            if existing and cur_head and built_head == cur_head:
+            existing_bid = self._bundle_id(existing) if existing else None
+            # A matching HEAD is NOT enough when a variant was asked for: the same
+            # commit builds prod or staging depending only on the bundle-id override,
+            # so reusing on HEAD alone hands back a prod .app for a staging request --
+            # which is exactly the silent mismatch that failed the staging preflight.
+            if (existing and cur_head and built_head == cur_head
+                    and (not bundle_id or existing_bid == bundle_id)):
                 logger.info(f"Reusing iOS build (HEAD unchanged @ {cur_head[:8]})")
                 return BuildResult(
-                    ok=True, artifact_path=existing, bundle_id=self._bundle_id(existing)
+                    ok=True, artifact_path=existing, bundle_id=existing_bid
                 )
+            if existing and bundle_id and existing_bid != bundle_id:
+                logger.info("Rebuilding: existing artifact is %s but %s was requested",
+                            existing_bid, bundle_id)
             if existing:
                 logger.info(f"Rebuilding: checkout changed since last build "
                             f"(built {str(built_head)[:8]} → now {str(cur_head)[:8]})")
@@ -2207,8 +2449,8 @@ class AppBuilder:
         cmd = [
             "xcodebuild",
             flag, proj_path,
-            "-scheme", scheme,
-            "-configuration", "Debug",
+            "-scheme", env_config.scheme if (env_config and env_config.scheme) else scheme,
+            "-configuration", configuration,
             "-sdk", "iphonesimulator",
             "-derivedDataPath", derived,
             "-destination", destination,
@@ -2225,8 +2467,14 @@ class AppBuilder:
             "OTHER_CPLUSPLUSFLAGS=$(inherited) -D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION",
             "build",
         ]
+        # Apply the environment's build settings (see the docstring). Inserted before
+        # the `build` action -- xcodebuild only accepts SETTING=VALUE overrides ahead
+        # of the action, and silently ignores anything after it.
+        for setting in env_settings:
+            cmd.insert(-1, setting)
         logger.info(f"Building iOS: {' '.join(cmd)}")
-        ok, out = _run(cmd, cwd=repo_path)
+        with self._env_source_edits(repo_path, env_config):
+            ok, out = _run(cmd, cwd=repo_path)
         if not ok:
             return BuildResult(
                 ok=False,
@@ -2235,12 +2483,12 @@ class AppBuilder:
                                   self.removed_framework_users(repo_path))))
             )
 
-        app = self._find_built_app(derived)
+        app = self._find_built_app(derived, configuration=configuration)
         if not app:
             return BuildResult(
                 ok=False,
                 error="xcodebuild reported success but no .app was produced under "
-                      f"{derived}/Build/Products/Debug-iphonesimulator.",
+                      f"{derived}/Build/Products/{configuration}-iphonesimulator.",
             )
         # Record the commit this build was made from, so the next prepare can tell
         # whether a rebuild is needed (see the reuse check above).
@@ -2250,7 +2498,208 @@ class AppBuilder:
                     f.write(cur_head)
         except Exception:
             pass
-        return BuildResult(ok=True, artifact_path=app, bundle_id=self._bundle_id(app))
+
+        # ── Validate the artifact BEFORE anyone calls this a success ──────────
+        # "BUILD SUCCESS" must mean the artifact is the one that was asked for, not
+        # merely that xcodebuild exited 0. Deploying a production .app in answer to a
+        # staging request is the failure this whole module exists to prevent, so the
+        # identity check is part of the build, not of the caller.
+        valid, why = self.validate_artifact(app, expected_bundle_id=bundle_id,
+                                            environment=env_name)
+        if not valid:
+            return BuildResult(ok=False, error=why)
+
+        got = self._bundle_id(app)
+        self._write_artifact_metadata(app, repo_path=repo_path, commit=cur_head,
+                                      environment=env_name, bundle_id=got,
+                                      configuration=configuration)
+        return BuildResult(ok=True, artifact_path=app, bundle_id=got)
+
+    @contextlib.contextmanager
+    def _env_source_edits(self, repo_path: str, env_config):
+        """Apply an environment's source_replacements for the build, then revert.
+
+        Needed because not every environment difference is an xcodebuild setting.
+        This app picks its API host by which line of a JS config file is commented
+        out, so a staging build with only a bundle-id override still talks to
+        PRODUCTION -- it installs and runs, then shows an empty home screen because
+        the test data is on the staging server. That reads as a broken app.
+
+        The edits live in the build workspace only: the original bytes are restored
+        in a finally block, so the application checkout is identical afterwards even
+        if the build raises or is killed.
+
+        EXCEPT for a Debug build, which embeds no JS bundle and fetches it from Metro
+        at RUN time -- reverting before the run would hand the app the production
+        config the edit exists to replace, and the change would never take effect.
+        For those the edit is left in place (the file is restored by the next
+        _reset_worktree, which every checkout/pull already performs).
+        """
+        edits = list(getattr(env_config, "source_replacements", None) or [])
+        keep = self._runtime_bundled_from_metro(repo_path, env_config)
+        originals: Dict[str, str] = {}
+        try:
+            for e in edits:
+                path = os.path.join(repo_path, e["file"])
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                if e["find"] not in text:
+                    # Already applied is fine; genuinely absent is not -- silently
+                    # building the wrong variant is the failure being prevented.
+                    if e["replace"] in text:
+                        continue
+                    raise RuntimeError(
+                        f"{e['file']} does not contain the expected line for this "
+                        f"environment:\n  {e['find']}\nThe upstream file changed; "
+                        f"update source_replacements in project-environments.json.")
+                originals[path] = text
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text.replace(e["find"], e["replace"]))
+                logger.info("env edit: %s -> %s", e["file"], e["replace"][:80])
+            yield
+        finally:
+            for path, text in originals.items():
+                # `keep` covers files the RUNNING app reads (JS fetched from Metro on
+                # launch). Build inputs are not those: a .pbxproj is consumed by
+                # xcodebuild and never read again, so keeping it edited only leaves
+                # the checkout dirty -- and the next PRODUCTION build then finds no
+                # production line to replace and silently builds the wrong variant.
+                if keep and not _is_build_input(path):
+                    logger.info("env edit kept in the workspace (%s): this Debug "
+                                "build loads its JS from Metro at run time, so "
+                                "reverting now would serve the app the un-replaced "
+                                "config.", os.path.basename(path))
+                    continue
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(text)
+                except OSError as err:
+                    logger.error("could not restore %s: %s", path, err)
+
+    @staticmethod
+    def _runtime_bundled_from_metro(repo_path: str, env_config) -> bool:
+        """True when the app will fetch its JS at run time instead of embedding it.
+
+        A Debug React Native build ships no main.jsbundle: the app asks Metro for it
+        on launch, so any source edit must still be on disk THEN, not only during
+        xcodebuild.
+        """
+        cfg = (getattr(env_config, "configuration", None) or "Debug").lower()
+        if cfg != "debug":
+            return False
+        return os.path.isfile(os.path.join(repo_path, "package.json"))
+
+    # ── artifact identity ────────────────────────────────────────────────────
+
+    METADATA_NAME = ".artifact.json"
+
+    def _write_artifact_metadata(self, app_path: str, *, repo_path: str,
+                                 commit: Optional[str], environment: Optional[str],
+                                 bundle_id: Optional[str],
+                                 configuration: str) -> Optional[str]:
+        """Record WHAT this artifact is, next to the artifact itself.
+
+        Without this an .app is anonymous: the platform could only ask "is there a
+        .app?" and "what bundle id does it carry?", never "which branch/commit/
+        environment produced it?". Stored beside the bundle (not inside it) so it
+        cannot alter the app's own contents or signature.
+        """
+        meta = {
+            "bundle_id": bundle_id,
+            "environment": environment,
+            "configuration": configuration,
+            "branch": self._git_branch(repo_path),
+            "commit": commit,
+            "built_at": datetime.utcnow().isoformat() + "Z",
+            "artifact": os.path.basename(app_path),
+            "xcode": self._xcode_version(),
+            "version": self.app_version(app_path),
+        }
+        path = os.path.join(os.path.dirname(app_path),
+                            os.path.basename(app_path) + self.METADATA_NAME)
+        try:
+            with open(path, "w") as f:
+                json.dump(meta, f, indent=2)
+            return path
+        except OSError as e:
+            # Metadata is an aid, not a gate: a build that produced a valid artifact
+            # must not fail because a sidecar could not be written.
+            logger.warning("Could not write artifact metadata %s: %s", path, e)
+            return None
+
+    def artifact_metadata(self, app_path: str) -> Dict[str, Any]:
+        """Recorded identity for an artifact, or {} when it predates metadata."""
+        path = os.path.join(os.path.dirname(app_path),
+                            os.path.basename(app_path) + self.METADATA_NAME)
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _git_branch(self, repo_path: str) -> Optional[str]:
+        try:
+            import subprocess
+            r = subprocess.run(["git", "-C", repo_path, "rev-parse",
+                                "--abbrev-ref", "HEAD"],
+                               capture_output=True, text=True, timeout=10)
+            return (r.stdout or "").strip() or None
+        except Exception:
+            return None
+
+    def _xcode_version(self) -> Optional[str]:
+        try:
+            ok, out = _run(["xcodebuild", "-version"], timeout=30)
+            return (out or "").splitlines()[0].strip() if ok and out else None
+        except Exception:
+            return None
+
+    def validate_artifact(self, app_path: str, *,
+                          expected_bundle_id: Optional[str] = None,
+                          environment: Optional[str] = None) -> Tuple[bool, str]:
+        """Independently verify an artifact before it is trusted or deployed.
+
+        Checks structure (bundle, Info.plist, executable), that the executable is a
+        real Mach-O, and — the point of the exercise — that its identity matches the
+        environment that was requested.
+        """
+        if not app_path or not os.path.isdir(app_path):
+            return False, f"Artifact is missing: {app_path}"
+        plist = os.path.join(app_path, "Info.plist")
+        if not os.path.isfile(plist):
+            return False, f"Artifact has no Info.plist: {app_path}"
+        if not self._is_complete_app(app_path):
+            return False, (f"Artifact is incomplete (no bundle id, or its executable "
+                           f"is missing): {app_path}")
+
+        got = self._bundle_id(app_path)
+        if expected_bundle_id and got != expected_bundle_id:
+            return False, (
+                "BUILD VALIDATION FAILED\n\n"
+                f"Requested environment:\n    {environment or '?'}\n\n"
+                f"Expected bundle ID:\n    {expected_bundle_id}\n\n"
+                f"Actual bundle ID:\n    {got}\n\n"
+                "A different variant was produced than the one requested.\n\n"
+                "Deployment blocked.")
+
+        # Mach-O check. A truncated or non-binary executable installs and then fails
+        # at launch with nothing useful in the log, so catch it here.
+        try:
+            with open(plist, "rb") as f:
+                executable = plistlib.load(f).get("CFBundleExecutable")
+            exe = os.path.join(app_path, executable or "")
+            with open(exe, "rb") as f:
+                magic = f.read(4)
+            # Mach-O 32/64, either endianness, or a fat/universal archive.
+            if magic not in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",
+                             b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce",
+                             b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
+                return False, (f"Artifact executable is not a Mach-O binary "
+                               f"(magic {magic!r}): {exe}")
+        except Exception as e:
+            return False, f"Could not read the artifact executable: {e}"
+
+        return True, "Artifact validated."
 
     def _git_head(self, repo_path: str) -> Optional[str]:
         """Current git commit SHA of the checkout, or None if not a git repo."""
@@ -2283,10 +2732,27 @@ class AppBuilder:
             return False
         return os.path.exists(os.path.join(app, executable))
 
-    def _find_built_app(self, derived: str) -> Optional[str]:
-        pattern = os.path.join(derived, "Build", "Products", "Debug-iphonesimulator", "*.app")
-        complete = [m for m in sorted(glob.glob(pattern)) if self._is_complete_app(m)]
-        return complete[0] if complete else None
+    def _find_built_app(self, derived: str, configuration: str = "Debug",
+                        bundle_id: Optional[str] = None) -> Optional[str]:
+        """The built .app under *derived*, optionally the one carrying *bundle_id*.
+
+        Selection used to be `complete[0]` over a sorted glob -- i.e. alphabetical,
+        which is neither "the newest" nor "the right variant". With two .apps in one
+        Products dir that silently returned whichever sorted first, so a staging
+        request could be answered with a production artifact. When a bundle id is
+        known, match on it; otherwise prefer the most recently built.
+        """
+        pattern = os.path.join(derived, "Build", "Products",
+                               f"{configuration}-iphonesimulator", "*.app")
+        complete = [m for m in glob.glob(pattern) if self._is_complete_app(m)]
+        if not complete:
+            return None
+        if bundle_id:
+            matching = [m for m in complete if self._bundle_id(m) == bundle_id]
+            if not matching:
+                return None
+            complete = matching
+        return max(complete, key=lambda p: os.path.getmtime(p))
 
     def _bundle_id(self, app_path: str) -> Optional[str]:
         """Read CFBundleIdentifier so the app can be launched after install."""
@@ -2346,10 +2812,17 @@ class AppBuilder:
         platform: str,
         force: bool = False,
         device_id: Optional[str] = None,
+        bundle_id: Optional[str] = None,
+        env_config=None,
     ) -> BuildResult:
-        """Build the app for *platform* ("ios" | "android")."""
+        """Build the app for *platform* ("ios" | "android").
+
+        *bundle_id* / *env_config* pin the variant the artifact must be (iOS only);
+        see build_ios.
+        """
         if platform == "ios":
-            return self.build_ios(repo_path, force, device_id=device_id)
+            return self.build_ios(repo_path, force, device_id=device_id,
+                                  bundle_id=bundle_id, env_config=env_config)
         if platform == "android":
             return self.build_android(repo_path, force)
         return BuildResult(ok=True, skipped=True)

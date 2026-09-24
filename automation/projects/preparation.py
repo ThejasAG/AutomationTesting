@@ -98,6 +98,32 @@ class ProjectPreparationService:
             logger.warning(f"[{project_id}] Could not load project from DB: {e}")
             return None
 
+    def _env_config_for_project(self, project_id: str, project_name: str,
+                                step: Callable[[str], None]):
+        """The environment build configuration this project should be built as.
+
+        Derived from the project's own configured bundle id (falling back to its
+        name), so nothing here knows about any particular app. A project with no
+        entry in project-environments.json builds exactly as it always did -- this
+        must not become a new way for a build to fail.
+        """
+        from automation.projects import environments as envmod
+        project = self._load_project(project_id)
+        bundle = getattr(project, "app_bundle_id", None) if project else None
+        env_name = envmod.environment_for_bundle(bundle) if bundle else None
+        if not env_name:
+            return None
+        try:
+            cfg = envmod.resolve(env_name, bundle_id=bundle, name=project_name)
+        except envmod.EnvironmentNotConfigured as e:
+            step(f"⚠ {e}")
+            return None
+        # Make the decision visible: a build that quietly picks a variant is how the
+        # wrong app got deployed for weeks.
+        step(f"Environment: {cfg.environment} (bundle {cfg.bundle_id}, "
+             f"configuration {cfg.configuration})")
+        return cfg
+
     def _update_project(self, project_id: str, **fields) -> None:
         """Persist project fields. Never fatal — the agent may run without DB access."""
         try:
@@ -288,6 +314,103 @@ class ProjectPreparationService:
         except OSError as e:
             logger.warning(f"[{project_id}] Could not write .yarnrc.yml: {e}")
 
+    def apply_patch_package(self, repo_path: str) -> List[str]:
+        """Apply patches/*.patch, reporting one line per patch.
+
+        WHY THE PLATFORM DOES THIS
+            patch-package normally runs from a postinstall script. This project
+            ships four patches and declares neither patch-package nor a
+            postinstall that runs it, so a clean install applies none of them --
+            which is the difference between the Mac where the app builds and a
+            fresh one.
+
+        SAFE BY CONSTRUCTION
+            Every patch edits node_modules, which is generated and gitignored.
+            Nothing tracked is touched, so this can never end up in an
+            application diff.
+
+        NEVER FATAL
+            A patch that does not apply is reported and skipped. Most patches fix
+            one symptom; failing the whole build over one is worse than building
+            without it, and the message names the file so it can be judged.
+        """
+        import json
+        import subprocess
+
+        messages: List[str] = []
+        patches_dir = os.path.join(repo_path, "patches")
+        if not os.path.isdir(patches_dir):
+            return messages
+
+        patches = sorted(f for f in os.listdir(patches_dir) if f.endswith(".patch"))
+        if not patches:
+            return messages
+
+        node_modules = os.path.join(repo_path, "node_modules")
+        applied, skipped, failed = 0, 0, 0
+
+        for fname in patches:
+            stem = fname[: -len(".patch")]
+            parts = stem.split("+")
+            pkg = "/".join(parts[:-1]) if len(parts) > 1 else stem
+            want = parts[-1] if len(parts) > 1 else ""
+
+            pkg_json = os.path.join(node_modules, *pkg.split("/"), "package.json")
+            if not os.path.exists(pkg_json):
+                # Not installed: an inert patch, not a broken one.
+                skipped += 1
+                messages.append(f"Patch skipped — {pkg} is not installed ({fname})")
+                continue
+
+            try:
+                with open(pkg_json, encoding="utf-8", errors="replace") as fh:
+                    have = json.load(fh).get("version", "")
+            except Exception:
+                have = ""
+
+            # A patch built against another version may still apply, but it is
+            # reported rather than forced silently: the version it targets is the
+            # only claim the filename makes.
+            if want and have and want != have:
+                messages.append(
+                    f"Patch targets {pkg}@{want} but {have} is installed — "
+                    f"applying anyway and verifying the result ({fname})")
+
+            proc = subprocess.run(
+                ["git", "apply", "--check", os.path.join("patches", fname)],
+                cwd=repo_path, capture_output=True, text=True, timeout=120)
+            if proc.returncode != 0:
+                # Already applied is the common case on a re-run, and is success.
+                reverse = subprocess.run(
+                    ["git", "apply", "--reverse", "--check",
+                     os.path.join("patches", fname)],
+                    cwd=repo_path, capture_output=True, text=True, timeout=120)
+                if reverse.returncode == 0:
+                    applied += 1
+                    messages.append(f"Patch already applied — {pkg} ({fname})")
+                else:
+                    failed += 1
+                    messages.append(
+                        f"Patch does NOT apply to {pkg}@{have} — skipped, the "
+                        f"build continues unpatched ({fname})")
+                continue
+
+            proc = subprocess.run(
+                ["git", "apply", os.path.join("patches", fname)],
+                cwd=repo_path, capture_output=True, text=True, timeout=120)
+            if proc.returncode == 0:
+                applied += 1
+                messages.append(f"Patch applied — {pkg}@{have} ({fname})")
+            else:
+                failed += 1
+                messages.append(
+                    f"Patch FAILED on {pkg}@{have}: "
+                    f"{(proc.stderr or '').strip()[:200]} ({fname})")
+
+        messages.append(
+            f"Patches: {applied} applied, {skipped} not applicable, {failed} failed")
+        return messages
+
     def _install_node_deps(
         self, project_id: str, repo_path: str, stage=None
     ) -> "tuple[bool, Optional[str]]":
@@ -420,7 +543,14 @@ class ProjectPreparationService:
         self,
         project_id: str,
         device_id: Optional[str] = None,
-        auto_generate_yaml: bool = False,
+        # Generate a missing automation.yaml rather than refusing to prepare.
+        # automation.yaml is PLATFORM-OWNED and untracked (it records the built
+        # artifact path, which is machine-specific), so a fresh clone never has one --
+        # on any new machine, for every project. Defaulting to False meant the first
+        # prepare after a clone failed with "automation.yaml not found" and a template
+        # the platform can write itself. Callers that want the old behaviour (e.g. a
+        # UI that offers to generate it) still pass False explicitly.
+        auto_generate_yaml: bool = True,
         on_step: Optional[Callable[[str], None]] = None,
         git_url: Optional[str] = None,
         branch: Optional[str] = None,
@@ -588,6 +718,18 @@ class ProjectPreparationService:
             js_stage.notes.append(
                 "node_modules was already present — the package manager "
                 "reconciled it rather than installing from empty")
+
+        # 7a. patch-package patches, applied because nothing else does.
+        #
+        # vya-consumer's preprod-2-May18 ships four patches but declares neither
+        # patch-package nor a postinstall that runs it, so on a clean machine the
+        # patches are inert: the Mac where the app "works" has a node_modules
+        # patched by hand at some point, and a fresh clone silently gets unpatched
+        # source. Every one of them edits node_modules only, so applying them here
+        # changes nothing tracked.
+        if project_type == ProjectType.REACT_NATIVE and deps_ok:
+            for msg in self.apply_patch_package(repo_path):
+                step(msg)
 
         # 7b. Platform-injected dependencies: always reported, including "0".
         if project_type == ProjectType.REACT_NATIVE:
@@ -765,7 +907,16 @@ class ProjectPreparationService:
                        if setup_report is not None else None)
 
         # Pass the target device so iOS builds only the arch we will install onto.
-        result = app_builder.build(repo_path, platform, device_id=device_id)
+        # Build the variant this PROJECT is configured for, not whatever the repo's
+        # own settings happen to say. Without this the bundle id was left to the
+        # checkout -- so a project configured for a staging bundle silently produced
+        # a production artifact (the staging difference lived in unpushed commits),
+        # and the staging scenario then failed preflight as "…staging is not
+        # installed". Resolution is config-driven; an unconfigured project simply
+        # builds as before.
+        env_config = self._env_config_for_project(project_id, project_name, step)
+        result = app_builder.build(repo_path, platform, device_id=device_id,
+                                   env_config=env_config)
 
         if result.skipped:
             if build_stage is not None:
@@ -797,14 +948,26 @@ class ProjectPreparationService:
                 "Bundle id": result.bundle_id or measure.UNAVAILABLE,
             })
         step(f"Build succeeded: {os.path.basename(result.artifact_path)}")
-        self._update_project(
-            project_id,
+        # A DECLARED bundle id is the project's intent and must survive the build.
+        # Overwriting it with whatever was produced is self-defeating for a variant:
+        # a staging project whose build fell back to the production id would quietly
+        # rewrite itself as a production project, and the next run would then look
+        # correctly configured while driving the wrong app. The build's own identity
+        # check has already failed the build if the artifact was the wrong variant,
+        # so by here they agree -- this only protects the declaration.
+        declared = getattr(self._load_project(project_id), "app_bundle_id", None)
+        fields = dict(
             build_status="built",
             app_path=result.artifact_path,
-            app_bundle_id=result.bundle_id,
             build_error=None,
             last_build_at=datetime.utcnow(),
         )
+        if not declared:
+            fields["app_bundle_id"] = result.bundle_id
+        elif result.bundle_id and result.bundle_id != declared:
+            step(f"⚠ built bundle id {result.bundle_id} differs from the project's "
+                 f"declared {declared} — keeping the declared value")
+        self._update_project(project_id, **fields)
 
         # Point automation.yaml at the artifact so Appium installs/launches it too.
         self._set_yaml_app_path(repo_path, result.artifact_path, step)

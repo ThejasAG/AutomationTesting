@@ -105,6 +105,14 @@ class ProjectCreate(BaseModel):
     platform: str = "ios"          # ios | android
     repo_type: str = "github"      # github | gitlab | local
     group_id: Optional[str] = None  # optional — projects may be ungrouped
+    # The bundle id this project is meant to PRODUCE. Optional, and normally left
+    # unset: a build records whatever it produced. It has to be declarable for
+    # variants, though -- a staging project differs from its production twin only by
+    # bundle id, and the platform must know that id BEFORE building in order to pass
+    # the override. Left to the build alone the field is circular (the build sets it,
+    # so it can only ever be the production id), which is exactly how a project named
+    # "staging" ended up carrying a production artifact.
+    app_bundle_id: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -116,6 +124,7 @@ class ProjectUpdate(BaseModel):
     platform: Optional[str] = None
     repo_type: Optional[str] = None
     group_id: Optional[str] = None
+    app_bundle_id: Optional[str] = None   # see ProjectCreate.app_bundle_id
 
 
 def _validate_enums(platform: Optional[str], repo_type: Optional[str]) -> None:
@@ -264,6 +273,7 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
         "group_id": project.group_id or None,
         "clone_status": "not_cloned",
         "project_type": "unknown",
+        "app_bundle_id": project.app_bundle_id or None,
     })
 
     # Clone + detect type immediately so the card is useful straight away.

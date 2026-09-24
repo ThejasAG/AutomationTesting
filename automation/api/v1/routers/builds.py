@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from automation.database.config import get_db
+from automation.database.config import SessionLocal, get_db
 from automation.database.models import TestProject
 from automation.device_manager.service import DeviceDiscoveryService
 from automation.projects.builder import AppBuilder
@@ -35,6 +35,26 @@ router = APIRouter(prefix="/builds", tags=["builds"])
 
 _devices = DeviceDiscoveryService()
 _builder = AppBuilder()
+
+
+def _env_config_for_project(project_id: str, project_name: str = ""):
+    """Environment build config for a project, or None when it has no entry.
+
+    Keyed off the project's configured bundle id so no app-specific logic lives here.
+    """
+    from automation.projects import environments as envmod
+    try:
+        with SessionLocal() as db:
+            p = db.query(TestProject).filter(TestProject.id == project_id).first()
+            bundle = p.app_bundle_id if p else None
+            project_name = project_name or (p.name if p else "")
+        env_name = envmod.environment_for_bundle(bundle) if bundle else None
+        if not env_name:
+            return None
+        return envmod.resolve(env_name, bundle_id=bundle, name=project_name)
+    except Exception as e:
+        logger.debug("env config lookup failed for %s: %s", project_id, e)
+        return None
 
 
 def _bundle_id_for_project(project_id: str) -> Optional[str]:
@@ -235,8 +255,15 @@ class _Deploy:
                 repo_path = repository_manager.get_repo_path(pid)
                 self._phase("build", name)
                 self.log(f"{name}: building ({platform}) — this is the slow part …")
+                # Build the variant this project is configured for. Deploy used to
+                # ignore the project's bundle id entirely, so a project named
+                # "staging" happily built and installed a production app.
+                _envcfg = _env_config_for_project(pid, name)
+                if _envcfg:
+                    self.log(f"{name}: environment {_envcfg.environment} "
+                             f"(bundle {_envcfg.bundle_id})")
                 built = _builder.build(repo_path, platform, force=body.force_build,
-                                       device_id=devices[0].id)
+                                       device_id=devices[0].id, env_config=_envcfg)
                 if not built.ok or not built.artifact_path:
                     detail = (getattr(built, "error", "") or "build failed")[:300]
                     self.log(f"{name}: build FAILED — {detail}")
