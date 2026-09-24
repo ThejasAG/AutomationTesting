@@ -125,6 +125,42 @@ def report(elements: Sequence[Dict], screen_w: float, screen_h: float,
     """
     subjects = [e for e in elements if (not only_labelled or label_of(e)) and rect_of(e)]
     out: List[Dict] = []
+
+    # UNNAMED INTERACTIVE ELEMENTS are the third way something "cannot be tapped",
+    # and the one this report used to miss entirely. Covered and off-screen are
+    # about geometry; this is about whether the automation can NAME the thing at
+    # all. MEASURED on the table sheet: idb reported seven elements and the four
+    # table chips carried no accessibility id, so every id-based lookup returned
+    # zero and @assign_table had nothing to tap on a sheet plainly showing I1, I2,
+    # O1 and O2. The screen looked perfect and the report said "0 unreachable".
+    #
+    # An element is flagged when it is plausibly interactive (a real tap target,
+    # not a container or a whole-screen backdrop) and has no label of its own.
+    # Deliberately NOT gated on only_labelled. That flag controls which elements are
+    # checked for COVERAGE (an unlabelled decoration covering nothing is noise); an
+    # unnamed tap target is a finding in its own right and is exactly what
+    # only_labelled=True would hide.
+    if True:
+        sw, sh = float(screen_w or 0), float(screen_h or 0)
+        for el in elements:
+            r = rect_of(el)
+            if not r or label_of(el):
+                continue
+            if (el.get("type") or "") in ("Application", "Window"):
+                continue
+            # Finger-sized but not the whole screen: big enough to be a control,
+            # small enough not to be the page behind one.
+            if not (24 <= r.w <= 0.9 * (sw or r.w) and 18 <= r.h <= 0.9 * (sh or r.h)):
+                continue
+            out.append({"label": "",
+                        "frame": {"x": int(r.x), "y": int(r.y),
+                                  "w": int(r.w), "h": int(r.h)},
+                        "issues": [{"kind": "unnamed",
+                                    "detail": "no accessibility id or label, so it "
+                                              "cannot be targeted by name — only by "
+                                              "coordinate, which breaks when the "
+                                              "screen scrolls or re-lays out"}]})
+
     for el in subjects:
         r = rect_of(el)
         issues = []

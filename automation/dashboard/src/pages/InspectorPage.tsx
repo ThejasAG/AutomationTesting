@@ -6,7 +6,7 @@
  *  frames and comparing rectangles by hand. */
 import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { AlertTriangle, Crosshair, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Crosshair, Loader2, RefreshCw } from 'lucide-react';
 import {
     getInspectorScreenshot, getInspectorTree, getScenarioDevices,
     type InspectorElement, type InspectorTree, type SimDevice,
@@ -147,13 +147,36 @@ export default function InspectorPage() {
                         </div>
                     )}
 
+                    {/* The heading must AGREE with the result. It used to be a fixed
+                        red "Cannot be tapped as drawn" rendered even when the count
+                        was zero, directly above "Nothing is covered or out of reach
+                        on this screen." — a screen with no problems announced itself
+                        as broken, and a real finding looked the same as a clean one. */}
                     <h2 style={{ fontSize: '0.95rem', margin: '0 0 8px',
                                  display: 'flex', alignItems: 'center', gap: 7 }}>
-                        <AlertTriangle size={15} color="var(--danger)" /> Cannot be tapped as drawn
+                        {tree && tree.problem_count > 0 ? (
+                            <>
+                                <AlertTriangle size={15} color="var(--danger)" />
+                                Cannot be tapped as drawn
+                                <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>
+                                    ({tree.problem_count})
+                                </span>
+                            </>
+                        ) : (
+                            <>
+                                <CheckCircle2 size={15} color="var(--success)" />
+                                Every element can be tapped
+                            </>
+                        )}
                     </h2>
                     {tree && tree.problem_count === 0 && (
-                        <div style={{ color: 'var(--success)', fontSize: '0.85rem' }}>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                             Nothing is covered or out of reach on this screen.
+                        </div>
+                    )}
+                    {!tree && (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                            Pick a simulator and press Inspect to read the screen.
                         </div>
                     )}
                     <div style={{ maxHeight: 460, overflowY: 'auto' }}>

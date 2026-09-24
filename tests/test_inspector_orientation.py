@@ -8,6 +8,7 @@ its side, so the element frames drawn over it (from the tree, in landscape) line
 up with nothing: the "Select a table" sheet appeared rotated 90 degrees with the
 nav rail along the top instead of down the left.
 """
+import re
 from pathlib import Path
 
 SRC = (Path(__file__).resolve().parents[1]
@@ -56,3 +57,72 @@ def test_rotating_preserves_the_aspect_ratio():
     view_h = tree_h * scale
     # after a 90deg rotation the raster's long axis maps onto the box's long axis
     assert abs((shot_h / shot_w) - (VIEW_W / view_h)) < 0.01
+
+
+# ── the verdict must agree with itself ──────────────────────────────────────
+
+def test_the_heading_is_not_an_alarm_on_a_clean_screen():
+    """It used to be a fixed red "Cannot be tapped as drawn" rendered even when the
+    count was zero, directly above "Nothing is covered or out of reach on this
+    screen." — a healthy screen announced itself as broken, and a real finding
+    looked exactly like a clean one."""
+    assert "Every element can be tapped" in SRC
+    # Strip JSX {/* ... */} comments, which quote the old heading verbatim.
+    code = re.sub(r"\{/\*.*?\*/\}", "", SRC, flags=re.S)
+    i = code.index("Cannot be tapped as drawn")
+    head = code[max(0, i - 400):i]
+    assert "problem_count > 0" in head, \
+        "the alarm heading must be conditional on there being problems"
+
+
+def test_the_problem_count_is_shown_when_there_are_problems():
+    assert "({tree.problem_count})" in SRC
+
+
+# ── an element nothing can name is also untappable ──────────────────────────
+
+from automation.inspector.overlap import report
+
+_APP = {"type": "Application", "AXLabel": "App",
+        "frame": {"x": 0, "y": 0, "width": 1210, "height": 834}}
+
+
+def _probs(extra):
+    return report([_APP] + extra, 1210, 834)
+
+
+def test_an_unnamed_tap_target_is_reported():
+    """Covered and off-screen are about geometry; this is about whether the
+    automation can NAME the thing at all. A chip with no accessibility id can only
+    be reached by coordinate, which breaks the moment the screen re-lays out."""
+    p = _probs([{"type": "GenericElement", "AXLabel": "",
+                 "frame": {"x": 100, "y": 200, "width": 80, "height": 40}}])
+    assert [i["kind"] for x in p for i in x["issues"]] == ["unnamed"]
+
+
+def test_a_named_element_is_not_reported():
+    assert _probs([{"type": "GenericElement", "AXLabel": "I1",
+                    "frame": {"x": 300, "y": 200, "width": 80, "height": 40}}]) == []
+
+
+def test_a_full_screen_backdrop_is_not_a_tap_target():
+    """The page behind a modal is unnamed by nature and reporting it is noise."""
+    assert _probs([{"type": "Other", "AXLabel": "",
+                    "frame": {"x": 0, "y": 0, "width": 1210, "height": 834}}]) == []
+
+
+def test_a_speck_is_not_a_tap_target():
+    """Below finger size it is decoration, not a control."""
+    assert _probs([{"type": "GenericElement", "AXLabel": "",
+                    "frame": {"x": 5, "y": 5, "width": 6, "height": 6}}]) == []
+
+
+def test_the_check_is_not_hidden_by_only_labelled():
+    """only_labelled=True is the endpoint's default and filters the COVERAGE
+    subjects. Gating the unnamed check on it would hide exactly the elements it
+    exists to find."""
+    import inspect as _i
+    from automation.inspector import overlap
+    src = _i.getsource(overlap.report)
+    i = src.index('"unnamed"')
+    assert "if not only_labelled:" not in src[:i]
