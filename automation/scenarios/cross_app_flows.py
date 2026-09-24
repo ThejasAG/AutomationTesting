@@ -2828,10 +2828,41 @@ class FlowRunner:
             #    navigates when now >= start-30min, else it just toasts. A far buffered slot is
             #    un-openable, which silently broke every cross-app waiter flow.
             # So book the EARLIEST slot ~5-28 min ahead: non-stale AND inside the 30-min window.
-            window = [s for s in slots if 5 <= (s[0] - now_min) <= 28]
-            future = [s for s in slots if (s[0] - now_min) >= 3]
+            # THE APP'S GATE IS EVALUATED IN UTC, AGAINST A LOCAL-TIME SLOT.
+            #
+            # BookingCard.onPress and AddCountModal.isClickable both do:
+            #     moment.utc().hours(getUTCHours()).minutes(getUTCMinutes())
+            #         .isSameOrAfter(moment.utc(from_time).subtract(30, 'minutes'))
+            # `from_time` carries the slot as the form showed it -- local wall time --
+            # so on a machine at UTC+5:30 the app compares 10:50 against 16:35 and
+            # refuses to open a booking made fifteen minutes ago. MEASURED: local
+            # 16:20, UTC 10:50, slot 16:35, gate -> False.
+            #
+            # So aim at the window the app ACTUALLY enforces: 5-28 minutes ahead of
+            # the UTC clock, expressed in the local-time labels the form offers. On a
+            # UTC machine the two are identical and nothing changes.
+            # timezone-aware: utcnow() is deprecated and slated for removal.
+            from datetime import timezone as _tz
+            _utc = _dt.now(_tz.utc)
+            utc_min = _utc.hour * 60 + _utc.minute
+            offset = now_min - utc_min                 # local - UTC, in minutes
+            if offset > 720:
+                offset -= 1440
+            elif offset < -720:
+                offset += 1440
+
+            def _openable(slot_min):
+                """Minutes until the app's own UTC gate lets this slot be opened."""
+                return (slot_min - offset) - utc_min
+
+            window = [s for s in slots if 5 <= _openable(s[0]) <= 28]
+            future = [s for s in slots if _openable(s[0]) >= 3]
             chosen = window[0] if window else (future[0] if future else slots[min(1, len(slots) - 1)])
             in_window = chosen in window
+            if offset and not window:
+                notes.append(f"    · @first_time_slot — no slot inside the app's UTC "
+                             f"open window (this Mac is UTC{offset // 60:+d}:"
+                             f"{abs(offset) % 60:02d}); the booking may not be openable")
             _, lbl, cx, cy = chosen
             # Remember the booked slot: the waiter's My Bookings is a time-of-day calendar,
             # so @open_reservation steers to THIS hour's row to find the card (not blind-scroll).

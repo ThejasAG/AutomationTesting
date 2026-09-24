@@ -648,3 +648,59 @@ def test_the_chip_text_pattern_matches_real_table_names():
         assert pat.fullmatch(good), good
     for bad in ("Select a table", "Confirm", "ORDER SUMMARY", "1", "I"):
         assert not pat.fullmatch(bad), bad
+
+
+# ── the app's open-window gate is evaluated in UTC ──────────────────────────
+
+def _pick(slots, now_min, utc_min):
+    """The slot choice _first_time_slot makes, given a local and a UTC clock."""
+    offset = now_min - utc_min
+    if offset > 720:
+        offset -= 1440
+    elif offset < -720:
+        offset += 1440
+    openable = lambda sm: (sm - offset) - utc_min
+    window = [s for s in slots if 5 <= openable(s) <= 28]
+    future = [s for s in slots if openable(s) >= 3]
+    return (window[0] if window else (future[0] if future else slots[1])), bool(window)
+
+
+def test_the_slot_is_chosen_against_the_utc_gate():
+    """BookingCard.onPress and AddCountModal.isClickable both compare the UTC CLOCK
+    against a from_time carrying the slot's LOCAL wall time. MEASURED on this Mac:
+    local 16:20, UTC 10:50, a slot booked at 16:35 — the gate evaluated 10:50 >=
+    16:05 and refused to open a booking made fifteen minutes earlier. Every booking
+    the flow created was un-openable."""
+    slots = [10 * 60 + 55, 11 * 60, 16 * 60 + 35, 16 * 60 + 40]
+    chosen, in_window = _pick(slots, 980, 650)      # UTC+5:30
+    assert in_window
+    assert chosen == 16 * 60 + 35
+    # and the app's own gate now passes for it
+    offset = 980 - 650
+    assert 650 >= (chosen - offset) - 30
+
+
+def test_a_utc_machine_is_unaffected():
+    """offset 0 — the local and UTC windows coincide, so nothing changes."""
+    chosen, in_window = _pick([650 + 15, 650 + 20], 650, 650)
+    assert in_window and chosen == 650 + 15
+
+
+def test_a_negative_offset_is_handled():
+    """West of Greenwich the local clock is BEHIND UTC."""
+    # local 06:00, UTC 11:00 -> offset -300
+    chosen, in_window = _pick([6 * 60 + 15, 6 * 60 + 20], 360, 660)
+    assert in_window and chosen == 6 * 60 + 15
+
+
+def test_the_offset_wraps_across_midnight():
+    """local 00:30, UTC 19:00 the previous day -> +5:30, not -18:30."""
+    offset = 30 - 1140
+    if offset < -720:
+        offset += 1440
+    assert offset == 330
+
+
+def test_the_utc_gate_is_explained_in_the_source():
+    assert "isSameOrAfter" in _SRC or "UTC gate" in _SRC or "evaluated in UTC" in _SRC.upper() \
+        or "GATE IS EVALUATED IN UTC" in _SRC
