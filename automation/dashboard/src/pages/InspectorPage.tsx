@@ -5,6 +5,7 @@
  *  can't tap it" and were all "something is drawn over it" — found only by dumping
  *  frames and comparing rectangles by hand. */
 import { useEffect, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { AlertTriangle, Crosshair, Loader2, RefreshCw } from 'lucide-react';
 import {
     getInspectorScreenshot, getInspectorTree, getScenarioDevices,
@@ -52,6 +53,32 @@ export default function InspectorPage() {
     const scale = shot && tree?.screen.width ? VIEW_W / tree.screen.width : 1;
     const viewH = tree ? tree.screen.height * scale : 0;
 
+    // `simctl io screenshot` always writes the raster in the device's NATIVE
+    // orientation, which for an iPad in landscape is still PORTRAIT — measured
+    // 1668x2420 while the accessibility tree reported 1210x834 landscape. Painting
+    // that portrait raster into a landscape box with objectFit:'fill' squashed it
+    // and left the picture lying on its side, so the overlaid element frames (drawn
+    // from the tree, in landscape) lined up with nothing.
+    //
+    // Rotate only when the two genuinely disagree; a portrait device needs none.
+    const shotLandscape = !!shot && shot.width > shot.height;
+    const treeLandscape = !!tree && tree.screen.width > tree.screen.height;
+    const needsRotate = !!shot && !!tree && shotLandscape !== treeLandscape;
+    // Rotating a WxH image by 90deg makes it HxW, so to fill a box of viewW x viewH
+    // the <img> must first be laid out as viewH x viewW, then spun about its centre.
+    //
+    // -90deg, i.e. COUNTER-CLOCKWISE. Verified by rendering the real raster both
+    // ways: clockwise puts the picture upside down (nav rail on the right, text
+    // mirrored); counter-clockwise puts the nav rail down the left and the sheet
+    // upright, matching the device. CSS rotate() is clockwise-positive, which is the
+    // opposite sense to the image libraries used to check this.
+    const imgStyle: CSSProperties = needsRotate
+        ? { position: 'absolute', left: '50%', top: '50%',
+            width: viewH, height: VIEW_W,
+            transform: 'translate(-50%, -50%) rotate(-90deg)',
+            transformOrigin: 'center center' }
+        : { width: '100%', height: '100%', objectFit: 'fill' };
+
     const problemLabels = new Set((tree?.problems || []).map(p => p.label));
 
     return (
@@ -87,8 +114,7 @@ export default function InspectorPage() {
                 <div style={{ position: 'relative', width: VIEW_W, height: viewH || 200,
                               border: '1px solid var(--border-color)', borderRadius: 10,
                               overflow: 'hidden', background: '#000' }}>
-                    {shot && <img src={shot.image} alt="device screen"
-                                  style={{ width: '100%', height: '100%', objectFit: 'fill' }} />}
+                    {shot && <img src={shot.image} alt="device screen" style={imgStyle} />}
                     {(tree?.elements || []).map((e, i) => {
                         const bad = problemLabels.has(e.label) && e.label;
                         const on = sel && sel.label === e.label
