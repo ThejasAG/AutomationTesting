@@ -599,3 +599,52 @@ def test_an_already_open_sheet_is_waited_on_not_retapped():
     j = opener.index('for ident in (')
     assert i < j, "the already-open check must precede any tap"
     assert "onBackdropPress" in opener or "backdrop" in opener.lower()
+
+
+# ── the chips expose their NAME, not an accessibilityLabel ──────────────────
+
+def test_a_chip_is_found_by_its_table_name():
+    """MEASURED on the live iPad with the sheet open: the labelled predicates
+    ('tableChip*', 'T<N>AssignAnyBtn') matched ZERO elements, while ACCESSIBILITY_ID
+    'I1'/'I2'/'O1'/'O2' each matched exactly one. The installed build predates the
+    accessibilityLabel in the checked-out source, so the Pressable exposes its Text
+    child instead — and @assign_table reported nothing to tap on a sheet plainly
+    showing four tables."""
+    assert "_CHIP_TEXT" in _ASSIGN
+
+
+def test_the_name_fallback_only_runs_on_the_table_sheet():
+    """A bare 'I1' is a WEAK locator — it would match any such text anywhere. It is
+    only safe while the sheet is up."""
+    src = _ASSIGN[_ASSIGN.index("if out:\n                return out"):]
+    assert "_table_sheet_open()" in src[:400]
+
+
+def test_the_labelled_forms_are_still_preferred():
+    """A build that DOES carry the accessibilityLabel must keep using it — the name
+    fallback is for older builds, not a replacement."""
+    i = _ASSIGN.index("def chips():")
+    body = _ASSIGN[i:]
+    assert body.index("_CHIP_NAME.fullmatch") < body.index("_CHIP_TEXT.fullmatch")
+
+
+def test_an_ambiguous_name_is_not_tapped():
+    """If a name resolves to more than one element there is no way to know which is
+    the chip, and tapping the wrong one is silent."""
+    src = _ASSIGN[_ASSIGN.index("_CHIP_TEXT.fullmatch"):]
+    assert "len(els3) == 1" in src
+
+
+def test_the_commit_button_is_not_treated_as_a_chip():
+    src = _ASSIGN[_ASSIGN.index("_CHIP_TEXT.fullmatch"):]
+    assert "AssignTableBtn" in src and "applyTableBtn" in src
+
+
+def test_the_chip_text_pattern_matches_real_table_names():
+    """I1/I2/O1/O2 on this restaurant; two letters and up to three digits covers the
+    shape without matching prose."""
+    pat = re.compile(r"[A-Za-z]{1,2}\d{1,3}\Z")
+    for good in ("I1", "I2", "O1", "O2", "T12", "AB3"):
+        assert pat.fullmatch(good), good
+    for bad in ("Select a table", "Confirm", "ORDER SUMMARY", "1", "I"):
+        assert not pat.fullmatch(bad), bad

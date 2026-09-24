@@ -2127,7 +2127,25 @@ class FlowRunner:
         #   iPad  : 'tableChip<Name>'   chips + 'applyTableBtn'
         #   iPhone: 'T<N>AssignAnyBtn'  chips + 'AssignTableBtn'   (measured live)
         # Both expose accessibilityState.selected, so selection stays verifiable.
+        # THREE chip spellings ship in this fleet, and the third is the one that
+        # actually runs on the iPad today:
+        #   'tableChip<Name>'    — an older Modal/index.js build
+        #   'T<N>AssignAnyBtn'   — EventTableSelect's accessibilityLabel
+        #   '<Name>'             — the chip's own TEXT: I1, I2, O1, O2
+        #
+        # MEASURED on the live iPad with the sheet open: the first two predicates
+        # matched ZERO elements while ACCESSIBILITY_ID 'I1'/'I2'/'O1'/'O2' each
+        # matched exactly one. The installed build predates the
+        # accessibilityLabel in the checked-out source, so the Pressable exposes
+        # its Text child instead. Searching only for the labelled forms found no
+        # chips at all -- which is why @assign_table reported nothing to tap on a
+        # sheet that plainly showed four tables.
+        #
+        # A bare table name is a WEAK locator (any 'I1' anywhere would match), so
+        # it is used ONLY while the table sheet is up and only for names shaped
+        # like a table: one or two letters then digits.
         _CHIP_NAME = _re.compile(r"(?:tableChip\w+|T\d+AssignAnyBtn)\Z")
+        _CHIP_TEXT = _re.compile(r"[A-Za-z]{1,2}\d{1,3}\Z")
 
         def chips():
             """(label, element) for every real table chip on the sheet."""
@@ -2145,6 +2163,26 @@ class FlowRunner:
                         out.append((nm, e))
             except Exception:
                 pass
+            if out:
+                return out
+            # Fall back to the chips' own text, but only on the sheet itself.
+            if not self._table_sheet_open():
+                return out
+            seen = set()
+            for cand in self._idb_els():
+                nm = (cand.get("label") or "").strip()
+                if not _CHIP_TEXT.fullmatch(nm) or nm in seen:
+                    continue
+                # The commit button and the heading are not chips.
+                if nm in ("AssignTableBtn", "applyTableBtn"):
+                    continue
+                try:
+                    els3 = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, nm)
+                except Exception:
+                    continue
+                if len(els3) == 1:          # ambiguous names are not safe to tap
+                    seen.add(nm)
+                    out.append((nm, els3[0]))
             return out
 
         def selected_labels():
