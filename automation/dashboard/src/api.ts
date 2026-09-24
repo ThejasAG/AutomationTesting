@@ -246,6 +246,19 @@ export async function runCrossAppFlow(
     return await handleResponse(res);
 }
 
+/** Re-run the flow a previous run executed, with the same environment and devices.
+ *  Returns the NEW run id; the original run row is left untouched. */
+export async function retryRun(
+    run_id: string,
+): Promise<{ started: boolean; run_id: string; retried_from: string; flow_id: string;
+             env: string; business_device: string }> {
+    const res = await fetch(`${API_BASE}/runs/${run_id}/retry`, {
+        method: 'POST',
+        headers: getHeaders(),
+    });
+    return await handleResponse(res);
+}
+
 /** Run ALL cross-app flows sequentially against an environment. */
 export async function runAllCrossAppFlows(
     env: FlowEnv = 'prod',

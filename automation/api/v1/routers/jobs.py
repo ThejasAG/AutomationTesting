@@ -15,7 +15,7 @@ from automation.database.database import create_ai_recommendation, utc_iso
 from automation.auth.security import (require_agent, authenticated_agent,
                                       assert_agent_identity,
                                       require_authenticated_agent)
-from automation.database.config import get_db
+from automation.database.config import SessionLocal, get_db
 from automation.reports.step_stats import step_stats
 from automation.database.models import TestRun, TestProject, ScenarioResult
 from automation.auth.security import get_current_user
@@ -370,6 +370,62 @@ def run_cross_app_flow(body: FlowRunIn, current_user=Depends(get_current_user)):
     return {"started": True, "run_id": run_id, "flow_id": body.flow_id, "env": body.env,
             "business_device": body.business_device,
             "message": "Flow started. Open the run's Scenarios tab / rich report to watch it."}
+
+
+@runs_router.post("/{run_id}/retry")
+def retry_run(run_id: str, current_user=Depends(get_current_user)):
+    """Re-run the flow a previous run executed, with the SAME settings.
+
+    Retrying is the common next action after a failure (a flaky step, a device that
+    was busy, a fix just deployed), and doing it by hand meant going back to the
+    Scenarios page and remembering which flow, environment and business device the
+    run had used. Those are recovered from the run row here so the button cannot
+    silently retry something else.
+
+    Returns the NEW run id; the original row is never modified, so the failure stays
+    on record instead of being overwritten by its retry.
+    """
+    from automation.scenarios.cross_app_flows import (
+        start_flow_run, list_flows, ENV_BUNDLES)
+    from automation.scenarios.cross_app_orchestrator import DEFAULT_BUSINESS_PHONE_UDID
+
+    with SessionLocal() as db:
+        run = db.query(TestRun).filter(TestRun.id == run_id).first()
+        if not run:
+            raise HTTPException(status_code=404, detail=f"No run {run_id}")
+        test_name = run.test_name or ""
+        suite = run.test_suite or ""
+        device_name = run.device_name or ""
+        bot_type = run.bot_type or ""
+
+    if bot_type != "ios-crossapp-flow":
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Retry currently supports cross-app flow runs; this run is "
+                    f"'{bot_type or 'unknown'}'."))
+
+    # The run row stores the flow's NAME (prefixed with its environment label), not
+    # its id — so match on the name the flow actually has.
+    env = "staging" if "staging" in (suite + test_name).lower() else "prod"
+    env = env if env in ENV_BUNDLES else "prod"
+    stripped = re.sub(r"^\[[^\]]*\]\s*", "", test_name).strip()
+    flow = next((f for f in list_flows() if f["name"] == stripped), None)
+    if not flow:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"Could not identify the flow for this run ({stripped!r}). It may "
+                    f"have been renamed or deleted since the run."))
+
+    # device_name is recorded as "C:<6 chars> B:<6 chars>"; the business half tells us
+    # whether the B-app roles ran on the phone rather than the default tablet.
+    business_device = "tablet"
+    m = re.search(r"B:(\S+)", device_name)
+    if m and DEFAULT_BUSINESS_PHONE_UDID.startswith(m.group(1)):
+        business_device = "phone"
+
+    new_run_id = start_flow_run(flow["id"], env=env, business_device=business_device)
+    return {"started": True, "run_id": new_run_id, "retried_from": run_id,
+            "flow_id": flow["id"], "env": env, "business_device": business_device}
 
 
 # ── Cross-app flow EDITING ───────────────────────────────────────────────────

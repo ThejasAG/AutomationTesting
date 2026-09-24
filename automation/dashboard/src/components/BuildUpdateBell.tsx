@@ -62,6 +62,18 @@ export default function BuildUpdateBell() {
       const r = await getBuildUpdates();
       setProjects(r.projects);
       setCount(r.count);
+      // Drop remembered apps the server no longer knows. The selection is restored
+      // from localStorage, so a deleted/un-cloned project stayed selected forever and
+      // every deploy 404'd on the whole batch ("Unknown or un-cloned project(s)") --
+      // one dead id blocked the valid ones, with no way to clear it from the UI.
+      const live = new Set(r.projects.map((p) => p.project_id));
+      setApps((prev) => {
+        const kept = prev.filter((id) => live.has(id));
+        if (kept.length !== prev.length) {
+          localStorage.setItem('deploy_apps', JSON.stringify(kept));
+        }
+        return kept.length === prev.length ? prev : kept;
+      });
       setError('');
     } catch {
       /* offline / not logged in — leave the bell quiet rather than shouting */
@@ -346,7 +358,11 @@ export default function BuildUpdateBell() {
                 disabled={running || !apps.length || !chosen.length}
                 style={{
                   width: '100%', padding: '11px 14px', borderRadius: 8, fontWeight: 600,
-                  border: 'none', cursor: running || !withUpdates.length ? 'not-allowed' : 'pointer',
+                  border: 'none',
+                  // Must match `disabled` exactly. It used to test !withUpdates.length, so with
+                  // no new commits the cursor said not-allowed on a button that was enabled and
+                  // worked — this panel deliberately supports rebuilding an up-to-date checkout.
+                  cursor: running || !apps.length || !chosen.length ? 'not-allowed' : 'pointer',
                   background: running || !apps.length || !chosen.length ? 'rgba(255,255,255,0.10)' : '#7c3aed',
                   color: '#fff', display: 'flex', alignItems: 'center',
                   justifyContent: 'center', gap: 8,

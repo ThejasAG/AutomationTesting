@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { getRun, getRCA, getEvidence, getRunScenarios, triggerAnalysis,
-  getVisualRegression, updateVisualBaseline, getRiskPredictions, getRunSummary, getPerformance } from '../api';
+  getVisualRegression, updateVisualBaseline, getRiskPredictions, getRunSummary, getPerformance,
+  retryRun, stopRun } from '../api';
 import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult,
   VisualRegressionItem, RiskPrediction, PerformanceResponse } from '../api';
 import { format } from 'date-fns';
 import { parseServerDate } from '../time';
-import { ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown } from 'lucide-react';
+import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 
@@ -696,6 +697,42 @@ export default function RunDetails() {
   const [tab, setTab] = useState<'analysis' | 'scenarios' | 'visual' | 'performance'>('analysis');
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const navigate = useNavigate();
+
+  // Re-run this run's flow with the same environment and devices. The backend
+  // recovers those from the run row, so the retry cannot quietly run something else.
+  // Navigating to the NEW run leaves this failure on record rather than replacing it.
+  async function onRetry() {
+    if (!id || retrying) return;
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const res = await retryRun(id);
+      navigate(`/run/${res.run_id}`);   // route is /run/:id (see App.tsx)
+    } catch (e: any) {
+      setRetryError(e?.message || 'Could not start the retry.');
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  // Stop a run that is still going. The polling effect below picks up the new
+  // status, which swaps this button back to Retry on its own.
+  async function onStop() {
+    if (!id || stopping) return;
+    setStopping(true);
+    setRetryError(null);
+    try {
+      await stopRun(id);
+    } catch (e: any) {
+      setRetryError(e?.message || 'Could not stop the run.');
+    } finally {
+      setStopping(false);
+    }
+  }
 
   useEffect(() => {
     if (!id) return;
@@ -774,6 +811,56 @@ export default function RunDetails() {
             Time: {format(parseServerDate(run.created_at), "MMM d, yyyy h:mm a")} • 
             Device: {run.device_name}
           </p>
+        </div>
+
+        {/* One slot, two states: Stop while the run is live, Retry once it is over.
+            Retry mid-run would put two runs on the same simulators, which is a
+            guaranteed WDA collision, so the two can never be offered together. */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+          {ACTIVE_RUN_STATES.has(run.status) ? (
+            <button
+              onClick={onStop}
+              disabled={stopping}
+              title="Stop this run now — frees the devices and leaves the steps so far on record"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                padding: '9px 16px', fontSize: '0.88rem', fontWeight: 600,
+                fontFamily: 'inherit', borderRadius: 8, cursor: stopping ? 'default' : 'pointer',
+                border: '1px solid var(--danger)',
+                background: stopping ? 'transparent' : 'var(--danger)',
+                color: stopping ? 'var(--text-secondary)' : '#fff',
+                opacity: stopping ? 0.7 : 1,
+              }}
+            >
+              {stopping
+                ? <><Loader2 size={15} className="spin" /> Stopping…</>
+                : <><Square size={13} fill="currentColor" /> Stop run</>}
+            </button>
+          ) : (
+            <button
+              onClick={onRetry}
+              disabled={retrying}
+              title="Run this scenario again with the same environment and devices"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                padding: '9px 16px', fontSize: '0.88rem', fontWeight: 600,
+                fontFamily: 'inherit', borderRadius: 8, cursor: retrying ? 'default' : 'pointer',
+                border: '1px solid var(--accent-primary)',
+                background: retrying ? 'transparent' : 'var(--accent-primary)',
+                color: retrying ? 'var(--text-secondary)' : '#fff',
+                opacity: retrying ? 0.7 : 1,
+              }}
+            >
+              {retrying
+                ? <><Loader2 size={15} className="spin" /> Starting…</>
+                : <><RefreshCw size={15} /> Retry scenario</>}
+            </button>
+          )}
+          {retryError && (
+            <span style={{ color: 'var(--danger)', fontSize: '0.78rem', maxWidth: 280, textAlign: 'right' }}>
+              {retryError}
+            </span>
+          )}
         </div>
       </header>
 
