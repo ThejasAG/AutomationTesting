@@ -1,12 +1,15 @@
 """FastAPI REST API for querying test runs and RCA reports"""
 
-# Load .env BEFORE any automation.* import. Several modules (e.g. ai/provider.py)
-# read os.getenv at import time, so loading later would leave them holding the
-# defaults and the .env values would be silently ignored.
-from pathlib import Path
-from dotenv import load_dotenv
+# Load .env BEFORE any other automation.* import. Several modules (e.g.
+# ai/provider.py) read os.getenv at import time, so loading later would leave them
+# holding the defaults and the .env values would be silently ignored.
+#
+# automation.config is the ONE loader — do not call load_dotenv() here. It is also
+# what database/config.py uses, so the API and every standalone process resolve the
+# same DATABASE_URL.
+from automation.config import load_env
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_env()
 
 from fastapi import (
     FastAPI,

@@ -10,11 +10,12 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from dotenv import load_dotenv
+from automation.config import load_env
 
 # Load .env before the automation.* imports below — they read os.getenv at
-# import time, so a later load would have no effect on them.
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+# import time, so a later load would have no effect on them. automation.config is
+# the one loader; do not call load_dotenv() directly.
+load_env()
 
 # Device tooling (adb for Android, xcrun/simctl for iOS) and Appium are expected
 # to be on the agent host's PATH. Configure PATH via the environment/shell rather

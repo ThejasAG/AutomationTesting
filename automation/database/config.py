@@ -7,17 +7,16 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SQLITE_PATH = PROJECT_ROOT / "test_automation_new.db"
 
-# Default to SQLite for local development since Docker wasn't available
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"sqlite:///{DEFAULT_SQLITE_PATH.as_posix()}"
-)
+# ONE canonical resolution, for every process. automation.config loads .env before
+# DATABASE_URL is read, so an API process, a CLI run, a worker and a test all resolve
+# the same database. Previously .env was loaded only by api/main.py and
+# agent/main.py, and everything else silently fell back to the in-repo
+# test_automation_new.db -- so a project created by a script was invisible to the
+# backend. Do not reintroduce a load_dotenv() here or anywhere else.
+from automation.config import database_url  # noqa: E402
 
-if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite:////"):
-    relative_path = DATABASE_URL.removeprefix("sqlite:///")
-    DATABASE_URL = f"sqlite:///{(PROJECT_ROOT / relative_path).as_posix()}"
+DATABASE_URL = database_url()
 
 # For SQLite fallback during early migration tests if Postgres fails
 if DATABASE_URL.startswith("sqlite"):
