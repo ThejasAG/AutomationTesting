@@ -40,8 +40,30 @@ logger = logging.getLogger("cross_app")
 
 CONSUMER_PROJECT_ID = "bd34a47c-c099-4d36-ac61-810edfff31ca"
 BUSINESS_PROJECT_ID = "1519bec5-d14c-45d9-9616-891b98c6e2d8"
-CONSUMER_BUNDLE = "org.vyapy.sarls.vyaconsumer"
-BUSINESS_BUNDLE = "org.vyapy.sarls.vyabusinessipad"
+# Which build these sims actually have installed.
+#
+# This is the ONE definition of the pair: cross_app_flows imports FROM this
+# module, so it re-exports ENV_BUNDLES from here rather than the other way
+# round (importing it back would be circular).
+#
+# MEASURED: these were hardcoded to prod while the iPad only had
+# 'vyabusinessipadstaging' installed. Appium answered "App with bundle
+# identifier 'org.vyapy.sarls.vyabusinessipad' unknown", the business session
+# never started, and the run died before a single waiter step — recorded as
+# "Book slot FAIL" with a NULL error, which looks like a scenario bug and is not.
+ENV_BUNDLES = {
+    "prod": {
+        "consumer": "org.vyapy.sarls.vyaconsumer",
+        "business": "org.vyapy.sarls.vyabusinessipad",
+    },
+    "staging": {
+        "consumer": "org.vyapy.sarls.vyaconsumerstaging",
+        "business": "org.vyapy.sarls.vyabusinessipadstaging",
+    },
+}
+VYA_ENV = os.getenv("VYA_ENV", "staging")
+CONSUMER_BUNDLE = ENV_BUNDLES.get(VYA_ENV, ENV_BUNDLES["prod"])["consumer"]
+BUSINESS_BUNDLE = ENV_BUNDLES.get(VYA_ENV, ENV_BUNDLES["prod"])["business"]
 
 DEFAULT_CONSUMER_UDID = "DA24A392-FF1B-4283-A5CE-CDDE0D000D21"   # iPhone 16 Pro
 DEFAULT_BUSINESS_UDID = "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"   # iPad Pro 11"
@@ -75,10 +97,32 @@ def _business_metro_target(bundle: str):
 
     The staging and prod business apps are different checkouts pointing at
     different API hosts, so they cannot share one packager.
+
+    Both are resolved from CONFIGURATION rather than the constants below: a
+    hardcoded project id is a promise about a database row, and rows get recreated.
+    BUSINESS_STAGING_PROJECT_ID pointed at a project that no longer existed, so the
+    staging packager fell back to serving the PRODUCTION checkout -- the staging app
+    then talked to api.vyapy.com, and the waiter's staging credentials were rejected
+    with what looked like a Firebase getToken failure.
     """
-    if (bundle or "").endswith("staging"):
-        return BUSINESS_STAGING_METRO_PORT, BUSINESS_STAGING_PROJECT_ID
-    return BUSINESS_METRO_PORT, BUSINESS_PROJECT_ID
+    from automation.projects import deployment as _deploy
+    from automation.projects import environments as _env
+
+    fallback = ((BUSINESS_STAGING_METRO_PORT, BUSINESS_STAGING_PROJECT_ID)
+                if (bundle or "").endswith("staging")
+                else (BUSINESS_METRO_PORT, BUSINESS_PROJECT_ID))
+    if not bundle:
+        return fallback
+    try:
+        project = _deploy.project_for_bundle(bundle)
+        env_name = _env.environment_for_bundle(bundle)
+        cfg = _env.resolve(env_name, bundle_id=bundle) if env_name else None
+        port = (cfg.metro_port if cfg and cfg.metro_port else fallback[0])
+        return port, (project["id"] if project else fallback[1])
+    except Exception as e:                       # config/DB unavailable
+        logger.warning("metro target lookup failed for %s (%s) — using defaults",
+                       bundle, e)
+        return fallback
 
 
 def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:

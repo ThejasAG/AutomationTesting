@@ -53,7 +53,7 @@ from automation.database import database
 from automation.database.models import ScenarioResult, TestRun
 from automation.intelligence.scenario_runner import ScenarioRunner
 from automation.scenarios.cross_app_orchestrator import (
-    APPIUM_URL, CONSUMER_BUNDLE, BUSINESS_BUNDLE,
+    APPIUM_URL, CONSUMER_BUNDLE, BUSINESS_BUNDLE, ENV_BUNDLES,
     DEFAULT_CONSUMER_UDID, DEFAULT_BUSINESS_UDID, DEFAULT_BUSINESS_PHONE_UDID,
     _options, _fill_field, ensure_business_metro, _business_metro_target,
 )
@@ -64,16 +64,6 @@ logger = logging.getLogger("cross_app_flows")
 
 # Which app pair each environment drives. "prod" = the old live Vya apps;
 # "staging" = the separate STG-* builds (own bundle ids, pointed at vya.xorstack.com).
-ENV_BUNDLES: Dict[str, Dict[str, str]] = {
-    "prod": {
-        "consumer": "org.vyapy.sarls.vyaconsumer",
-        "business": "org.vyapy.sarls.vyabusinessipad",
-    },
-    "staging": {
-        "consumer": "org.vyapy.sarls.vyaconsumerstaging",
-        "business": "org.vyapy.sarls.vyabusinessipadstaging",
-    },
-}
 
 def bundle_for_env(bundle_id: str, env: str) -> str:
     """The same app's bundle id in *env*, or *bundle_id* unchanged if it is not one
@@ -224,6 +214,30 @@ _W_SERVE_PAY_VOUCHER = _W_SERVE_NOTIFY + ["@pay:voucher", "click closeTableBtn"]
 
 def _seg(num: str, name: str, role: str, steps: List[str]) -> Dict[str, Any]:
     return {"num": num, "name": name, "role": role, "steps": steps}
+
+
+#: A row inside the hour's events sidebar (AddCountModal -> OrderCard). The card has
+#: no accessibilityLabel, so idb reports its children's text concatenated, e.g.
+#: '4657 <icon> RESERVED 13:45 - 14:45 <icon> 13:38'. The 'HH:MM - HH:MM' booking
+#: window is the distinguishing part: the board's cards never render it, which is why
+#: eight bookings in one hour all read 'RoopaDcardReserved' there and are
+#: indistinguishable, while here each one states its own time.
+_SIDEBAR_ROW_RE = re.compile(r"\b\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\b")
+
+#: Returned instead of a card label when the booking was opened straight from the
+#: events sidebar. A distinct object, not "" or None, so the "no card found" paths
+#: cannot mistake a success for a failure.
+_OPENED_VIA_SIDEBAR = object()
+
+
+def _norm(label) -> str:
+    """Compare UI labels without caring about case, spacing or punctuation.
+
+    The same control is spelled "SIGN-IN", "Sign In" and "signIn" across screens and
+    builds; matching raw strings means keeping a list of spellings in sync forever,
+    and a missed variant reads as "the screen isn't there".
+    """
+    return re.sub(r"[^a-z0-9]", "", str(label or "").lower())
 
 
 def _safe_displayed(el) -> bool:
@@ -1606,6 +1620,175 @@ class FlowRunner:
                                      f"{hour_lbl or 'booked'} row — opened the first")
         return diner[0][1], ""
 
+    def _click_sidebar_row(self, slot: str, statuses: tuple, notes: List[str]) -> bool:
+        """Open the booking for *slot* from the hour's events sidebar.
+
+        This is the whole point of using the sidebar. On the board, every booking in
+        an hour renders the same label -- nine 'RoopaDcardReserved' in the 13:00 row,
+        measured -- so "which one is the 13:45 booking" is unanswerable there and the
+        runner opened the leftmost one, or nothing at all.
+
+        Each sidebar row states its own booking window, so the right one can be named
+        rather than guessed:
+            '4657 <icon> RESERVED 13:45 - 14:45 <icon> 13:38'
+        Match on the START time, and on status so a cancelled or expired row with the
+        same time is not opened by mistake.
+        """
+        want = re.match(r"^(\d{1,2}):(\d{2})", slot or "")
+        if not want:
+            return False
+        want_hhmm = f"{int(want.group(1)):02d}:{want.group(2)}"
+
+        rows = []
+        for e in self._idb_els():
+            lbl = (e.get("label") or "").strip()
+            m = _SIDEBAR_ROW_RE.search(lbl)
+            if not m:
+                continue
+            start = m.group(0).split("-")[0].strip()
+            if f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}" != want_hhmm:
+                continue
+            if statuses and not any(st in _norm(lbl) for st in statuses):
+                continue
+            rows.append((e, lbl))
+
+        if not rows:
+            return False
+        if len(rows) > 1:
+            notes.append(f"    · {len(rows)} sidebar rows start at {want_hhmm}; "
+                         f"opening the first")
+        e, lbl = rows[0]
+        notes.append(f"    · opening the {want_hhmm} booking from the events list: "
+                     f"{lbl[:60]!r}")
+        return self._idb_tap(e["cx"], e["cy"])
+
+    def _swipe_calendar(self, r, direction: str) -> bool:
+        """Scroll the bookings calendar vertically. True if it actually moved.
+
+        'mobile: swipe' WITHOUT an element is a measured no-op on this board: ten
+        consecutive elementless swipes left the 13:00 events badge at y=1730 every
+        time. The gesture needs an anchor element that is genuinely inside the
+        viewport -- the same rule _pick_swipe_surface enforces for the horizontal
+        rows. An hour label currently on screen is the natural anchor, since the
+        calendar is exactly the thing we want to move.
+
+        Movement is verified rather than assumed, so a wedged list reports "did not
+        scroll" instead of looping until the step times out.
+        """
+        def hour_positions():
+            return {e["label"].strip(): e["cy"] for e in self._idb_els()
+                    if re.match(r"^\d{1,2}:00$", e["label"].strip())}
+
+        before = hour_positions()
+        if not before:
+            return False
+        # Prefer a DIRECT DRAG to a stepwise swipe. 'mobile: swipe' costs a measured
+        # 9.3s per call here (13.7s including the scans around it) and moves a fixed
+        # ~590pt, so walking from 00:00 to 15:00 is six swipes and ~82s -- a third of
+        # the step's whole 240s budget spent scrolling. The rows are 100pt apart and
+        # idb reports live positions, so the exact distance is known: one drag covers
+        # it. Falls through to the swipe loop if the drag does not move the list.
+        try:
+            h0 = float(r.d.get_window_size()["height"])
+        except Exception:
+            h0 = 834.0
+        want_dy = 0.0
+        target = getattr(self, "_scroll_target_hour", "")
+        if target:
+            y_now = before.get(target)
+            if y_now is not None:
+                want_dy = y_now - 0.4 * h0
+        if abs(want_dy) > 60:
+            x = 600
+            y_from = min(max(0.55 * h0, 120), h0 - 80)
+            y_to = min(max(y_from - want_dy, 90), h0 - 60)
+            try:
+                r.d.execute_script("mobile: dragFromToForDuration", {
+                    "fromX": x, "fromY": y_from, "toX": x, "toY": y_to,
+                    "duration": 0.6})
+                time.sleep(1.0)
+                after0 = hour_positions()
+                if any(after0.get(k) != v for k, v in before.items() if k in after0):
+                    return True
+            except Exception:
+                pass
+        try:
+            h = float(r.d.get_window_size()["height"])
+        except Exception:
+            h = 0.0
+        on_screen = [lbl for lbl, y in before.items()
+                     if not h or 0.1 * h <= y <= 0.9 * h]
+        if not on_screen:
+            return False
+        for lbl in on_screen[:3]:
+            try:
+                els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{lbl}"')
+                if not els:
+                    continue
+                # An hour label resolves to TWO elements (the text and its row
+                # container), and the first is not necessarily the one on screen.
+                # Swiping an off-screen anchor is a silent no-op -- the same trap
+                # _pick_swipe_surface documents for the horizontal rows -- so choose
+                # the match whose own rect is really inside the viewport.
+                anchor = None
+                for e in els:
+                    try:
+                        rect = e.rect or {}
+                    except Exception:
+                        continue
+                    ey = (rect.get("y") or 0) + (rect.get("height") or 0) / 2
+                    if not h or 0.1 * h <= ey <= 0.9 * h:
+                        anchor = e
+                        break
+                if anchor is None:
+                    continue
+                r.d.execute_script("mobile: swipe",
+                                   {"direction": direction, "element": anchor.id})
+            except Exception:
+                continue
+            time.sleep(0.8)
+            after = hour_positions()
+            if any(after.get(k) != v for k, v in before.items() if k in after):
+                return True
+        return False
+
+    @staticmethod
+    def _events_sidebar_up(els: List[dict]) -> bool:
+        """Is the hour's events list (AddCountModal) open?
+
+        Tapping an hour's 'Events N' badge opens a SIDEBAR listing that hour's
+        bookings VERTICALLY -- which is the whole point: on the board an hour's
+        bookings are laid out sideways, so the 4th or 5th can only be reached by
+        swiping the row. In the sidebar every one of them is reachable by a
+        vertical scroll.
+
+        The badge is a toggle, so "did the tap open it or close it" has to be
+        answerable. Two observable signals, both measured live on the iPad:
+          • 'closeEventModal' -- the sidebar's own close button (AddCountModal
+            index.js:291); present only while it is up.
+          • 'Orders Not Found !!' -- its empty state, for an hour whose bookings
+            are all filtered out. The sidebar IS up; it just has nothing to show.
+        """
+        for e in els:
+            lbl = (e.get("label") or "").strip()
+            ident = (e.get("id") or "").strip()
+            if ident == "closeEventModal" or lbl == "closeEventModal":
+                return True
+            if "orders not found" in lbl.lower():
+                return True
+            # The POPULATED list is the common case and exposes neither of the above.
+            # Its rows are OrderCard, which carries no accessibilityLabel, so idb
+            # reports the concatenated text of its children -- measured on the iPad
+            # at x=799 (the board's own cards end at ~700):
+            #     '4657 <icon> RESERVED 13:45 - 14:45 <icon> 13:38'
+            # a ticket number, a status, and the booking's own 'HH:MM - HH:MM'
+            # window. That window is exactly what the board's cards never show, and
+            # it is what makes one of nine identical 'RoopaDcardReserved' cards
+            # identifiable.
+            if _SIDEBAR_ROW_RE.search(lbl):
+                return True
+        return False
+
     @staticmethod
     def _logbox_strip(els: List[dict]) -> Optional[dict]:
         """The COLLAPSED LogBox toast, found by GEOMETRY rather than by message text.
@@ -1964,12 +2147,82 @@ class FlowRunner:
             except Exception:
                 return None
 
+        def open_table_sheet() -> bool:
+            """Open the table-select sheet from the opened reservation.
+
+            Opening a reservation shows the EVENT sheet (closeEventModal, the booking
+            card, 'modifyTable'); the table chips live in a SEPARATE sheet that
+            App/Screens/Event/index.js renders only once onModifyTableClick has set
+            showAssignTableModal. Without this step the chip search finds nothing and
+            the run reports "no Apply/Confirm to commit" -- true, but only because the
+            sheet holding them was never opened.
+
+            No-op when the chips are already present, so the flow stays correct on a
+            build that opens straight onto them.
+            """
+            if chips():
+                return True
+            # 'tableBtn' is NOT a sheet control. It is the BOARD's booking-type
+            # filter tab (Screens/Home/index.js:1052, beside allBtn/pickupBtn) —
+            # measured live at x=598,y=55 on the bookings board. Tapping it
+            # navigated AWAY from the opened reservation, so the next pass found no
+            # chips, re-opened the sheet, tapped it again ... alternating
+            # modifyTable/tableBtn until the 240s step timeout killed the segment.
+            # Only controls that actually belong to the reservation sheet go here.
+            for ident in ("modifyTable", "assignTableBtn"):
+                try:
+                    els2 = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
+                except Exception:
+                    continue
+                if not els2:
+                    continue
+                try:
+                    els2[0].click()
+                except Exception as e:
+                    notes.append(f"    · @assign_table — could not tap {ident!r}: "
+                                 f"{type(e).__name__}")
+                    continue
+                notes.append(f"    · @assign_table — opened the table sheet via {ident!r}")
+                for _ in range(8):                # the sheet fetches its table list
+                    time.sleep(1.0)
+                    if chips():
+                        return True
+            return bool(chips())
+
         # ── new path: individually addressable chips ─────────────────────────
         found = []
-        for _ in range(6):                        # sheet renders a beat late
+        for _attempt in range(6):                 # sheet renders a beat late
             found = chips()
             if found:
                 break
+            if open_table_sheet():
+                found = chips()
+                break
+            # Re-opening only makes sense while we are still ON the reservation.
+            # If its own control has gone, a further pass cannot help: it would tap
+            # whatever the current screen offers and burn the step's whole budget
+            # (six identical "opened the table sheet" notes, then a 240s timeout).
+            # Stop and say where we ended up instead.
+            try:
+                still_on_sheet = bool(r.d.find_elements(
+                    AppiumBy.ACCESSIBILITY_ID, "modifyTable"))
+            except Exception:
+                still_on_sheet = True             # can't tell — keep trying
+            if not still_on_sheet:
+                # RETURN, do not break. Breaking falls through to the legacy
+                # coordinate path below, which scans the CURRENT screen for
+                # anything matching [IOio]\d — and the screen we are on once the
+                # reservation has closed is the order summary. MEASURED: it
+                # matched 'I1' there, tapped it, found no Apply (there is no
+                # sheet), and reported "opened the table modal but found no
+                # Apply/Confirm" — pointing every past investigation at the
+                # table sheet and its testIDs when the sheet was never up.
+                notes.append("[FAIL] @assign_table — the reservation closed before the table "
+                             "sheet could be read (no 'modifyTable'); not tapping blindly on "
+                             "whatever screen replaced it")
+                notes.append("    ↳ on screen: "
+                             f"{[e['label'] for e in self._idb_els()][:10]}")
+                return False
             time.sleep(1.0)
 
         if found:
@@ -2088,6 +2341,17 @@ class FlowRunner:
 
         # ── no addressable chips: fall through to the legacy detection, which
         #    also tells a genuinely absent sheet apart from an unreadable one ──
+        #
+        # GATE the legacy scan on the sheet actually being up. '[IOio]\d' is a
+        # two-character pattern that matches things on OTHER screens — 'I1' on
+        # the order summary, measured — so an ungated scan taps a random element
+        # and then blames the missing Apply button. Only the sheet's own screen
+        # may be coordinate-tapped.
+        if not self._table_modal_up():
+            notes.append("[ok] @assign_table — no table sheet on screen "
+                         "(already assigned / pickup); continuing")
+            return True
+
         tapped = False
         for _ in range(6):                    # wait for the modal / order summary to render
             els = self._idb_els()
@@ -2225,6 +2489,36 @@ class FlowRunner:
                         return True
             except Exception:
                 pass
+        # DO NOT RELAUNCH A REAL RESERVATION.
+        #
+        # 'AssignTableBtn' means the table sheet is up -- but a reservation that
+        # opens straight onto its assign-a-table screen shows exactly the same
+        # control, so _table_modal_in cannot tell the two apart. When the caller has
+        # just opened a booking, the relaunch below threw that booking away: the app
+        # came back on the bookings board, and @assign_table then ran against the
+        # board with no reservation open. That is the reported "it goes back and
+        # then tries to assign the table".
+        #
+        # A LEFTOVER sheet sits over the board, so the board's own controls are
+        # still in the tree behind it. A reservation replaces the board entirely.
+        # Use that to tell them apart, and refuse to relaunch the real thing.
+        els_now = self._idb_els()
+        seen = {e["id"] for e in els_now} | {e["label"] for e in els_now}
+        # 'historyBtn' and 'menuBtn' are the PERSISTENT LEFT NAV RAIL -- present on
+        # every screen, including an open reservation. Including them made
+        # board_behind always True, so this guard never fired and the relaunch below
+        # still threw the booking away: the app reloaded from scratch the moment
+        # @assign_table touched the sheet. Only markers unique to the BOOKINGS BOARD
+        # belong here.
+        board_behind = any(m in seen for m in ("addNewEvent", "qrScaner"))
+        on_reservation = any(m in seen for m in
+                             ("closeEventModal", "selectAllItemsBtn", "addItemsBtn",
+                              "sendToKitchenBtn", "assignToBtn", "ORDER SUMMARY"))
+        if on_reservation and not board_behind:
+            notes.append("    · table sheet belongs to the OPEN reservation — "
+                         "not relaunching")
+            return True
+
         # No close affordance — a relaunch always clears a transient sheet.
         try:
             r.d.terminate_app(self.business_bundle); time.sleep(1.5)
@@ -2362,15 +2656,50 @@ class FlowRunner:
                 els = _json.loads(raw) if raw.strip().startswith("[") else []
             except Exception:
                 return []
+
+            # WHERE the bookings board's hour gutter is, if a board is on screen.
+            # The board stacks 00:00..23:00 in one narrow left-hand column, so the
+            # gutter is the x shared by three or more full-hour labels. The
+            # consumer's booking form has no board behind it -- its '18:00' and
+            # '21:00' are real, bookable chips spread along a row -- so this stays
+            # None there and nothing is excluded.
+            _hour_xs = {}
+            for e in els:
+                lb = (e.get("AXLabel") or "").strip()
+                if re.match(r"^\d{1,2}:00$", lb):
+                    x = (e.get("frame") or {}).get("x", 0)
+                    _hour_xs[x] = _hour_xs.get(x, 0) + 1
+            hour_gutter_x = next((x for x, n in _hour_xs.items() if n >= 3), None)
+
             out = []
             for e in els:
                 lbl = (e.get("AXLabel") or "").strip()
-                m = re.match(r"^(\d{1,2})[:.](\d{2})", lbl)
-                if m:
-                    f = e.get("frame", {}) or {}
-                    cx = int(f.get("x", 0) + f.get("width", 0) / 2)
-                    cy = int(f.get("y", 0) + f.get("height", 0) / 2)
-                    out.append((int(m.group(1)) * 60 + int(m.group(2)), lbl, cx, cy))
+                # The two apps label their slots DIFFERENTLY, and both forms are
+                # live in this fleet:
+                #   business (waiter) : '<HH:MM>Btn'  -- AddNewEventModal:1181
+                #   consumer (diner)  : '<HH:MM>'     -- measured: '17:45' at x=21
+                # So accept both. Requiring the 'Btn' suffix matched every business
+                # chip and NO consumer chip, and the diner's booking then failed
+                # with "no bookable time chip on this screen" against a form that
+                # was showing eighteen of them.
+                m = re.match(r"^(\d{1,2})[:.](\d{2})(Btn)?$", lbl)
+                if not m:
+                    continue
+                f = e.get("frame", {}) or {}
+                # Drop the BOOKINGS BOARD's hour labels, which stay in the tree
+                # BEHIND the waiter's modal. They are bare 'HH:00' in the board's
+                # left-hand gutter, and matching them picked '17:00' -- an hour
+                # row, not a bookable slot -- when the real chips started at 17:35.
+                # The consumer form has no board behind it, so this only ever
+                # excludes the thing it is aimed at: a full-hour label sharing the
+                # x of the other full-hour labels, with no 'Btn' suffix.
+                if not m.group(3) and m.group(2) == "00" and hour_gutter_x is not None \
+                        and abs((f.get("x") or 0) - hour_gutter_x) < 8:
+                    continue
+                cx = int(f.get("x", 0) + f.get("width", 0) / 2)
+                cy = int(f.get("y", 0) + f.get("height", 0) / 2)
+                out.append((int(m.group(1)) * 60 + int(m.group(2)),
+                            lbl[:-3] if m.group(3) else lbl, cx, cy))
             return out
 
         slots = _read_slots()
@@ -2391,35 +2720,21 @@ class FlowRunner:
         if _scrolls:
             notes.append(f"    · @first_time_slot — scrolled {_scrolls}x to reveal the time slots")
         if slots:
-            # Drop slots the LogBox toast is drawn over. Measured on the PHONE with the
-            # form open: slot 17:00 centre y=730, toast y=726..774 — an idb tap there
-            # opened the LogBox VIEWER instead of selecting the time, so selectedTime
-            # stayed null and Save was silently blocked. (On the iPad the same toast
-            # covers saveBtn instead; _tap_save_btn already aims around it.) Keep the
-            # unfiltered list if EVERY slot is covered — the Appium path below scrolls
-            # the real element into view and may still land it.
-            try:
-                _strips = self._logbox_strips([
-                    {"label": (e.get("AXLabel") or "").strip(),
-                     "x": (e.get("frame") or {}).get("x", 0),
-                     "y": (e.get("frame") or {}).get("y", 0),
-                     "w": (e.get("frame") or {}).get("width", 0),
-                     "h": (e.get("frame") or {}).get("height", 0),
-                     "cx": 0, "cy": 0}
-                    for e in (_json.loads(_sp.run([_IDB, "ui", "describe-all", "--udid", udid],
-                              capture_output=True, text=True, timeout=15).stdout or "[]"))
-                ])
-            except Exception:
-                _strips = []
-            if _strips:
-                _clear = [sl for sl in slots
-                          if not any(t["x"] <= sl[2] <= t["x"] + t["w"]
-                                     and t["y"] <= sl[3] <= t["y"] + t["h"]
-                                     for t in _strips)]
-                if _clear and len(_clear) != len(slots):
-                    notes.append(f"    · @first_time_slot — skipped {len(slots) - len(_clear)} "
-                                 f"slot(s) covered by the LogBox toast")
-                    slots = _clear
+            # The LogBox toasts are NOT avoided here any more.
+            #
+            # They do cover the slot row -- measured on the iPad: two stacked strips
+            # at y=708 and y=761.5, each 1190x48, sitting over 17:35/17:40/17:45
+            # whose centres are all at y=793. But dropping the covered chips threw
+            # away the EARLIEST slots, which are the only ones inside the waiter's
+            # 30-minute open window, and left the flow booking a time it could not
+            # later open.
+            #
+            # It is also unnecessary. The Appium click below auto-scrolls the chip
+            # clear of the toasts before tapping it, and that was verified with both
+            # strips still on screen: not committed before the click, committed
+            # after. Closing them is actively worse -- tapping a strip's close
+            # control expands it into the full stack-trace viewer about as often as
+            # it closes it (measured: 2 strips -> "Log 11 of 11" and 9 strips).
             slots.sort()
             from datetime import datetime as _dt
             now_min = _dt.now().hour * 60 + _dt.now().minute
@@ -2451,12 +2766,22 @@ class FlowRunner:
             import concurrent.futures as _fut
             safe = lbl.replace('"', '')
             def _click_slot():
-                e = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, safe)
-                if not e:
-                    e = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
-                if e:
-                    e[0].click()
-                    return True
+                # The chip's accessibilityLabel is `${el}Btn` -- '17:35Btn', not
+                # '17:35' (AddNewEventModal/index.js:1181). Searching the bare time
+                # matched NOTHING (measured: ACCESSIBILITY_ID=0, PREDICATE=0 for
+                # '17:35'; 3 matches for '17:35Btn'), so this returned False, the run
+                # fell through to the idb coordinate tap, and that tap used a
+                # CONTENT-space x from a horizontally scrolled row -- up to x=3680 on
+                # a 1210pt screen -- so it landed on nothing. selectedTime stayed
+                # null while the step reported the slot selected.
+                for probe in (f"{safe}Btn", safe):
+                    e = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, probe)
+                    if not e:
+                        e = r.d.find_elements(AppiumBy.IOS_PREDICATE,
+                                              f'label == "{probe}"')
+                    if e:
+                        e[0].click()
+                        return True
                 return False
             _ex = _fut.ThreadPoolExecutor(max_workers=1)
             try:
@@ -2470,6 +2795,20 @@ class FlowRunner:
             # FALLBACK: idb coordinate tap (fine for the consumer's simple vertical list, where
             # content-space ~= screen-space). Only used if the Appium element wasn't found/clicked.
             if not tapped:
+                # idb reports CONTENT-space x for this HORIZONTALLY SCROLLED row
+                # (measured: slots run to x=3680 on a 1210pt screen), so a
+                # coordinate tap only works for a chip that is really in the
+                # viewport. Tapping an off-screen x hits whatever is at that point
+                # -- usually nothing -- and selectedTime stays null.
+                try:
+                    _vw = float(r.d.get_window_size()["width"])
+                except Exception:
+                    _vw = 0.0
+                if _vw and not (0 <= cx <= _vw):
+                    notes.append(f"[FAIL] @first_time_slot — slot '{lbl}' is outside the "
+                                 f"visible strip (x={cx:.0f} of {_vw:.0f}) and its chip "
+                                 f"id did not resolve, so it cannot be tapped reliably")
+                    return False
                 try:
                     _sp.run([_IDB, "ui", "tap", "--udid", udid, str(cx), str(cy)], timeout=10)
                     time.sleep(1.0); tapped = True
@@ -2477,6 +2816,23 @@ class FlowRunner:
                 except Exception as ex:
                     notes.append(f"[FAIL] @first_time_slot — could not select slot '{lbl}' ({ex})")
                     return False
+
+            # VERIFY THE SELECTION TOOK.
+            #
+            # A click that lands on nothing raises no error, so "tapped" only ever
+            # meant "the gesture was dispatched". The run then reported
+            # "selected slot '17:00'" while the form showed no time chosen at all,
+            # and @save_appointment sat on a Save the app silently refuses.
+            #
+            # The chip states its own selection only through a background colour
+            # (selectedTime === el ? '#d6d6d6' : '#eee'), which accessibility does
+            # not expose -- so check the thing that DOES change: the app enables the
+            # save control once a time is committed.
+            if not self._time_slot_committed(r, lbl):
+                notes.append(f"[FAIL] @first_time_slot — tapped '{lbl}' but no time is "
+                             f"selected (the form still has none), so Save would be "
+                             f"silently rejected")
+                return False
             return True
         # NO SLOT. This used to report "[ok] ... booking proceeds without a slot",
         # which is not a thing that can happen: BOOK NOW only goes live once a time
@@ -2510,11 +2866,133 @@ class FlowRunner:
         except Exception:
             return False
 
+    # Controls that dismiss a first-run intro, in priority order. Label matching is
+    # case-insensitive and generic on purpose: these are the words onboarding
+    # carousels use, not one app's ids, so a newly onboarded app needs no code here.
+    _SKIP_LABELS = ("skip", "skipfornow", "getstarted", "continue", "next", "done")
+    # Markers that say "this is a first-run/signed-out screen". Kept separate from
+    # _on_home's Home markers: absence of Home does NOT imply first run (the app may
+    # simply be on the Wallet), so first run needs positive evidence of its own.
+    # Matched case-insensitively with punctuation stripped, so "SIGN-IN", "Sign In"
+    # and "signIn" are one marker rather than three spellings to keep in sync.
+    # Already normalised (no spaces/punctuation) because they are matched against a
+    # normalised blob — a marker written "stop exploring" could never match, since
+    # normalisation removes the space from the screen text too.
+    _FIRST_RUN_MARKERS = ("stopexploring", "startdiscovering", "signin", "signup",
+                          "login", "getstarted", "welcome")
+
+    def _first_run_preamble(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Clear a first-run intro (and sign in) if the app is showing one.
+
+        A no-op on an app that is already past first run, so every flow can call it
+        unconditionally. Returns True if it changed anything.
+
+        Why this exists: the platform installs apps automatically now, and a fresh
+        install always comes up at onboarding, signed out -- which made every step
+        after it fail against a screen that never loads. `uninstall`'s own docstring
+        flags this exact trade-off; this is the "first-run preamble" it refers to.
+        """
+        acted = False
+        for _ in range(8):                      # carousels are a few pages long
+            els = self._idb_els()
+            if not els:
+                break
+            blob = _norm(" ".join(str(e.get("label") or "") for e in els))
+            if not any(m in blob for m in self._FIRST_RUN_MARKERS):
+                break                           # not a first-run screen -> done
+            if self._on_home():
+                break
+            skip = next((e for e in els
+                         if _norm(e.get("label")) in self._SKIP_LABELS), None)
+            if not skip:
+                # Past the carousel and onto the signed-out landing screen: the way
+                # forward is the sign-in entry point, not a skip control.
+                # Substring, not equality: the control that opens the email form is
+                # spelled "SIGN-IN", "Login with mail address", "Sign in with email"
+                # … depending on screen and build. Prefer an email/mail one when the
+                # screen offers social logins we cannot drive (Google/Apple open
+                # system sheets), and never match those.
+                cands = [e for e in els
+                         if any(k in _norm(e.get("label"))
+                                for k in ("signin", "login", "continuewithemail"))
+                         and not any(b in _norm(e.get("label"))
+                                     for b in ("google", "apple", "facebook"))
+                         # Prose is not a control: the explanatory paragraph on this
+                         # screen contains "Sign in …" and outranked the real button.
+                         and e.get("type") != "StaticText"
+                         and len(str(e.get("label") or "")) <= 40]
+                entry = next((e for e in cands
+                              if any(k in _norm(e.get("label"))
+                                     for k in ("mail", "email"))), None) \
+                    or (cands[0] if cands else None)
+                if entry:
+                    notes.append(f"[ok] first run — opening '{entry.get('label')}'")
+                    self._idb_tap(entry["cx"], entry["cy"])
+                    acted = True
+                    time.sleep(2.5)
+                    continue
+                break
+            notes.append(f"[ok] first run — tapped '{skip.get('label')}'")
+            self._idb_tap(skip["cx"], skip["cy"])
+            acted = True
+            time.sleep(1.5)
+            if self._on_home():
+                return True
+
+        # Signed out? Use the credentials the run already carries — the same source
+        # the business roles use, so nothing app-specific is hardcoded here.
+        if self._looks_signed_out():
+            if self._sign_in_consumer(r, notes):
+                acted = True
+        return acted
+
+    def _looks_signed_out(self) -> bool:
+        blob = _norm(" ".join(str(e.get("label") or "") for e in self._idb_els()))
+        return (any(m in blob for m in ("signin", "login", "password"))
+                and not self._on_home())
+
+    def _sign_in_consumer(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Sign the consumer in using the run's configured credentials."""
+        creds = (self.credentials or {}).get("consumer") or {}
+        email, password = creds.get("email"), creds.get("password")
+        if not (email and password):
+            notes.append("[warn] first run — signed out and no consumer credentials "
+                         "configured; cannot sign in")
+            return False
+        try:
+            from appium.webdriver.common.appiumby import AppiumBy
+            fields = r.d.find_elements(AppiumBy.IOS_PREDICATE,
+                                       'type == "XCUIElementTypeTextField" OR '
+                                       'type == "XCUIElementTypeSecureTextField"')
+            if len(fields) < 2:
+                notes.append("[warn] first run — sign-in form not recognised")
+                return False
+            fields[0].send_keys(email)
+            fields[1].send_keys(password)
+            self._hide_keyboard(r, notes)
+            btn = next((e for e in self._idb_els()
+                        if _norm(e.get("label")) in ("signin", "login", "submit")), None)
+            if btn:
+                self._idb_tap(btn["cx"], btn["cy"])
+            time.sleep(4)
+            notes.append(f"[ok] first run — signed in as {email}")
+            return True
+        except Exception as e:
+            notes.append(f"[warn] first run — sign-in failed: {str(e)[:120]}")
+            return False
+
     def _consumer_home(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """Reach the Home tab. The app resumes on its last screen (often the Wallet
         with a booking). The fuzzy resolver can't reach the bottom tab in this app's
         huge tree, so tap `homeTab` DIRECTLY by accessibility id (verified), backing
         out of any blocking sub-screen, and confirm Home via idb."""
+        # A FRESHLY INSTALLED app does not resume anywhere — it starts at first run:
+        # the onboarding carousel, signed out. Every later step then hunts for
+        # controls on a screen that is not there. This is not hypothetical: the
+        # platform now installs apps automatically, so the first run after any deploy
+        # lands here. Clear it before looking for Home.
+        self._first_run_preamble(r, notes)
+
         tapped = False
         for _ in range(3):
             # Clear a leftover booking-confirmed dialog FIRST. It has no back or
@@ -2997,6 +3475,182 @@ class FlowRunner:
                     return e["cy"]
             return None
 
+        def open_events_for_hour(els) -> bool:
+            """Tap the hour's 'Events N' badge to list that hour's bookings.
+
+            The board lays an hour's bookings out SIDEWAYS in a horizontal strip, so a
+            card beyond the second or third sits off-screen and could only be reached
+            by swiping across the row -- slow, and it fails outright when the swipe
+            surface is itself off-screen (measured: a target at x=2668 on a ~1200px
+            viewport, then a 240s hang).
+
+            The badge beside each hour is the app's own answer to that: it toggles
+            selectEventTime to the hour (Screens/Home/index.js addCountfunc) and lists
+            that hour's events vertically, where every one of them is reachable without
+            a single horizontal gesture.
+
+            The badge carries no accessibility id -- it is a TouchableOpacity whose two
+            Text children render as 'Events <count>' -- so it is matched on that text,
+            anchored to the hour row's y so the right hour's badge is tapped.
+            """
+            if not hour_lbl:
+                return False
+            y = hour_y(els)
+            if y is None:
+                return False
+            # The badge renders just BELOW its hour label, not level with it —
+            # measured at a consistent +50px on the iPad, which is outside the row
+            # tolerance used for cards. So take the badge whose own nearest hour
+            # label is the one we want, rather than the badge nearest the label.
+            all_hours = [(str(e.get("label") or "").strip(), e.get("cy") or 0)
+                         for e in els
+                         if re.match(r"^\d{1,2}:00$", str(e.get("label") or "").strip())]
+            badges = [e for e in els if _norm(e.get("label")).startswith("events")]
+            b = None
+            for cand in badges:
+                cy = cand.get("cy") or 0
+                nearest = min(all_hours, key=lambda h: abs(h[1] - cy), default=None)
+                if nearest and nearest[0] == hour_lbl:
+                    b = cand
+                    break
+            if b is None:
+                return False
+            # The badge sits BELOW its hour label, so scrolling the LABEL into view
+            # does not guarantee the badge is on screen -- measured: 13:00 label at
+            # y=1658 with its 'Events 9' badge at y=1706 on an 834pt screen, both far
+            # below the fold. The previous version tapped that stale coordinate, hit
+            # empty space, and the run then clicked a board card instead of a sidebar
+            # row and sat in "no meaningful UI change" for 240s.
+            try:
+                _h = float(r.d.get_window_size()["height"])
+            except Exception:
+                _h = 0.0
+            if _h and not (0.05 * _h <= b["cy"] <= 0.92 * _h):
+                notes.append(f"    · the {hour_lbl} events badge is off-screen "
+                             f"(y={b['cy']:.0f} of {_h:.0f}) — scrolling it into view")
+                for _ in range(8):
+                    # 'mobile: swipe' must be anchored on an ELEMENT that is really
+                    # inside the viewport (see _MIN_SWIPE_SURFACE_PX above): the
+                    # elementless form is a measured no-op on this board -- 10
+                    # consecutive swipes left the 13:00 badge at y=1730 exactly.
+                    # An hour label currently on screen is a reliable anchor.
+                    # MEASURED: 'up' scrolls the calendar TOWARDS LATER HOURS
+                    # (one swipe moved 13:00 from y=1679 to y=1089). A row BELOW
+                    # the fold is reached by swiping UP, not down -- the inverted
+                    # version was a silent no-op, which is exactly why this used to
+                    # report a successful scroll while 13:00 never moved.
+                    if not self._swipe_calendar(r, "up" if b["cy"] > _h else "down"):
+                        notes.append("    · the calendar did not scroll")
+                        return False
+                    time.sleep(1.0)
+                    fresh = self._idb_els()
+                    b2 = None
+                    hs = [(str(e.get("label") or "").strip(), e.get("cy") or 0)
+                          for e in fresh
+                          if re.match(r"^\d{1,2}:00$", str(e.get("label") or "").strip())]
+                    for cand in [e for e in fresh
+                                 if _norm(e.get("label")).startswith("events")]:
+                        near = min(hs, key=lambda h: abs(h[1] - (cand.get("cy") or 0)),
+                                   default=None)
+                        if near and near[0] == hour_lbl:
+                            b2 = cand
+                            break
+                    if b2 is None:
+                        continue
+                    b = b2
+                    if 0.05 * _h <= b["cy"] <= 0.92 * _h:
+                        break
+                else:
+                    notes.append(f"    · could not bring the {hour_lbl} events badge "
+                                 f"on screen")
+                    return False
+            try:
+                self._idb_tap(b["cx"], b["cy"])
+            except Exception as e:
+                notes.append(f"    · events badge tap failed: {type(e).__name__}")
+                return False
+            notes.append(f"    · opened the {hour_lbl} events list "
+                         f"({(b.get('label') or '').strip()!r}) — no horizontal scrolling")
+            time.sleep(2.0)
+            # The badge is a TOGGLE (addCountfunc: `selectEventTime === el ? null : el`).
+            # If a previous hour's list was already open, this tap CLOSES it and the
+            # board is back to its horizontal strips. Confirm the sidebar is actually
+            # up, and tap once more if it is not.
+            for _ in range(2):
+                # Wait for the ROWS, not merely for the panel. The list fetches its
+                # bookings, and MEASURED on the iPad they land ~3.9s after the tap --
+                # well past the old flat 2.0s wait. Returning early made
+                # _click_sidebar_row scan an empty list, find nothing and fall back to
+                # the board, where two bookings share one 'RoopaDcardReserved' label
+                # and the wrong one gets opened. That is the whole 240s hang.
+                for _ in range(16):               # ~12s, polled every 0.75s
+                    els_now = self._idb_els()
+                    if any(_SIDEBAR_ROW_RE.search((e.get("label") or "").strip())
+                           for e in els_now):
+                        return True
+                    if self._events_sidebar_up(els_now) and any(
+                            "orders not found" in (e.get("label") or "").lower()
+                            for e in els_now):
+                        return True               # genuinely empty hour, not a race
+                    time.sleep(0.75)
+                try:
+                    self._idb_tap(b["cx"], b["cy"])
+                except Exception:
+                    return False
+                time.sleep(2.0)
+            return self._events_sidebar_up(self._idb_els())
+
+        def scroll_to_hour(els) -> bool:
+            """Bring the booked hour's row into view VERTICALLY before looking for a card.
+
+            My Bookings is a time-of-day calendar: each hour is a row, and each row is
+            its own horizontal strip. The board opens on the current hour, so a booking
+            an hour or two later sits in a row that is off-screen DOWNWARDS -- and the
+            horizontal search then found the target at x=2668 on a ~1200px viewport and
+            tried to swipe across five intervening cards to reach it. Swiping a long
+            way sideways is slow, fails on cards that are themselves off-screen, and
+            was the step that hung for 240s.
+
+            Scrolling the calendar to the hour first puts the row (and usually the card)
+            in the viewport, which is how a person would do it: find the time, then the
+            event under that time.
+            """
+            if not hour_lbl:
+                return False
+            # Tell _swipe_calendar which row we are aiming at, so it can cover the
+            # distance in ONE drag instead of stepping ~590pt per 9.3s swipe.
+            self._scroll_target_hour = hour_lbl
+            for _ in range(6):
+                els = self._idb_els()
+                y = hour_y(els)
+                if y is not None:
+                    try:
+                        h = float(r.d.get_window_size()["height"])
+                    except Exception:
+                        return True
+                    # Comfortably inside the visible area, not under the header/footer.
+                    if 0.12 * h <= y <= 0.80 * h:
+                        return True
+                    # 'up' moves towards LATER hours (measured, see _swipe_calendar).
+                    direction = "up" if y > 0.80 * h else "down"
+                else:
+                    direction = "up"        # not rendered yet: later hours are below
+                # Element-anchored: the elementless form does not move this list
+                # (measured — ten swipes, zero movement), which is why this used to
+                # report "scrolled the calendar to the 13:00 row" while 13:00 was
+                # still at y=1658 on an 834pt screen.
+                if not self._swipe_calendar(r, direction):
+                    break
+                time.sleep(1.0)
+            y_final = hour_y(self._idb_els())
+            if y_final is None:
+                return False
+            try:
+                h2 = float(r.d.get_window_size()["height"])
+            except Exception:
+                return True
+            return 0.05 * h2 <= y_final <= 0.92 * h2
+
         def bookings_loaded(els):
             """The list is up when we can see hour labels or any booking card."""
             return any(re.match(r"^\d{1,2}:\d{2}$", e["label"].strip()) for e in els) \
@@ -3037,7 +3691,25 @@ class FlowRunner:
             def _do():
                 els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
                 if not els:
+                    # The label came from an idb snapshot taken moments ago. The board
+                    # re-renders on its own (it polls the backend), so a card that was
+                    # there can be mid-rerender for one WDA query and back immediately
+                    # after -- measured: this reported "no element matched that exact
+                    # label" for a card idb had just listed, and a query seconds later
+                    # found sixteen. One short retry turns that transient into a
+                    # non-event instead of failing the whole segment.
+                    time.sleep(1.5)
+                    els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{safe}"')
+                if not els:
                     return "no element matched that exact label"
+                # WHICH of them. The board shows 8 cards with this SAME label laid out
+                # sideways (x=208 ... x=4144), and the events sidebar adds its own copy
+                # of each. Taking [0] always picked the board's leftmost card -- a
+                # different booking from the one chosen, and off in a row the sidebar is
+                # covering, so the tap changed nothing and the step sat in "no
+                # meaningful UI change" for 240s.
+                # When the sidebar is up it is the authority: it lists exactly this
+                # hour's bookings, vertically, so prefer the element inside it.
                 els[0].click()
                 return ""
             # Report WHY, not just that it failed. "(WDA click)" cannot tell a 30s
@@ -3083,10 +3755,72 @@ class FlowRunner:
             # renders its cards on its own (42 cards by t=18.8s) with no input.
             # So just wait for them — and clear the sheet if it turns up anyway,
             # because while it is open the board is not readable at all.
+            scrolled = False
+            # HARD DEADLINE. Every helper below is individually bounded, but the loop
+            # around them was not: 14 iterations x (idb scan + scroll + badge wait +
+            # sidebar poll) can exceed the 240s step ceiling on its own, and then the
+            # segment watchdog kills the step with "step hung" -- which names the
+            # symptom and throws away every note explaining what was actually tried.
+            # Stop early and keep the diagnosis.
+            _deadline = time.time() + 0.55 * STEP_TIMEOUT
             for _ in range(14):                     # ~35s for the diner's card to appear/sync
+                if time.time() > _deadline:
+                    notes.append(f"    · giving up the card search after "
+                                 f"{0.55 * STEP_TIMEOUT:.0f}s so the step can report "
+                                 f"why, rather than being killed as 'hung'")
+                    return None
                 if self._table_modal_up():
                     notes.append("    · table sheet was covering the board — dismissing it")
                     self._dismiss_table_modal(r, notes)
+                # Bring the booked hour into view before choosing a card. Done once the
+                # board has actually rendered (scrolling an empty list does nothing) and
+                # only once, so a re-poll does not walk the calendar away from the row.
+                els_now = self._idb_els()
+                if not scrolled and hour_lbl and bookings_loaded(els_now):
+                    # LATCH ON SUCCESS, NOT ON ATTEMPT.
+                    #
+                    # The table sheet can render a beat AFTER this loop starts, so
+                    # iteration 1 sees a clean board, scrolls against it, and then
+                    # the sheet covers everything -- the scroll silently achieves
+                    # nothing. Latching unconditionally meant the one wasted attempt
+                    # was the only attempt: the run reported "could not bring the
+                    # 20:00 row into view" and fell back to the horizontal search
+                    # even though 20:00 was reachable (measured: y=518 on an 834pt
+                    # screen, comfortably inside the band).
+                    #
+                    # The give-up path is the deadline above, not a single try.
+                    if scroll_to_hour(els_now):
+                        scrolled = True
+                        notes.append(f"    · scrolled the calendar to the {hour_lbl} row")
+                    else:
+                        notes.append(f"    · could not bring the {hour_lbl} row into view "
+                                     f"— retrying (the table sheet can cover the board)")
+                        continue
+                    # Then open that hour's events list. An hour's bookings are laid
+                    # out sideways, so the list is the only way to reach the 4th or
+                    # 5th one without swiping across the row.
+                    if open_events_for_hour(self._idb_els()):
+                        # The list is open and every row states its own booking
+                        # window, so open the one that matches the booked slot
+                        # directly. This is the only place the right booking can be
+                        # NAMED: on the board all nine 13:00 bookings render the
+                        # same 'RoopaDcardReserved' label, so picking among them is
+                        # a guess -- which is how a run clicked the leftmost card
+                        # and then sat in "no meaningful UI change" for 240s.
+                        if self._click_sidebar_row(slot, statuses, notes):
+                            return _OPENED_VIA_SIDEBAR
+                        # The list is open and does NOT hold the booking. Falling
+                        # through to the board would pick among cards that all read
+                        # 'RoopaDcardReserved' and open whichever came first -- a
+                        # guess, and the reason a run opened someone else's booking
+                        # and then hung. Say what the list actually offered instead.
+                        offered = [(e.get("label") or "").strip()
+                                   for e in self._idb_els()
+                                   if _SIDEBAR_ROW_RE.search((e.get("label") or ""))]
+                        if offered:
+                            notes.append(f"    · no {slot} booking in the "
+                                         f"{hour_lbl} events list; it holds: "
+                                         + "; ".join(o[:44] for o in offered[:8]))
                 lbl = pick_label(self._idb_els())
                 if lbl:
                     return lbl
@@ -3094,6 +3828,26 @@ class FlowRunner:
             return None
 
         label = _select_today_and_find()
+        # The sidebar row was tapped directly: the reservation is already opening, so
+        # there is no board card to locate or click. Skip straight to verification.
+        if label is _OPENED_VIA_SIDEBAR:
+            # Verify against markers that exist ONLY on the reservation, not on the
+            # sidebar. 'closeEventModal' is deliberately excluded: it is the events
+            # list's OWN close button, so treating it as "opened" would report
+            # success the instant the list appeared.
+            SIDEBAR_SAFE = ("selectAllItemsBtn", "addItemsBtn", "assignToBtn",
+                            "sendToKitchenBtn", "AssignTableBtn", "closeModal")
+            for _ in range(12):
+                time.sleep(1.5)
+                seen = {e["id"] for e in self._idb_els()} | \
+                       {e["label"] for e in self._idb_els()}
+                if any(m in seen for m in SIDEBAR_SAFE) or self._table_modal_up():
+                    notes.append(f"    · {what} — opened the {slot} booking from the "
+                                 f"events list")
+                    return True
+            notes.append(f"    · {what} — tapped the {slot} row in the events list but "
+                         f"the reservation did not open; falling back to the board")
+            label = None
         if not label:
             notes.append("    · card not found — relaunching business app once and retrying")
             try:
@@ -3163,8 +3917,31 @@ class FlowRunner:
             # vertical helper above cannot reach. Additive: a target already in the
             # viewport returns immediately, and a failure here only annotates — the
             # click still runs and reports its own outcome.
-            if not self._scroll_card_into_view_h(r, label, notes, diner_key=name,
-                                                 slot=hour_lbl or slot):
+            # LAST RESORT only. Opening the hour's events list (above) lays that
+            # hour's bookings out vertically, so the target is normally already
+            # reachable and swiping the row sideways is both unnecessary and the
+            # slowest thing this step can do. Check first, and only swipe if the card
+            # really is still outside the viewport.
+            _cards = self._cards_on_board()
+            _tgt = self._find_target_card(_cards, label, name)
+            try:
+                _vw = float(r.d.get_window_size()["width"])
+            except Exception:
+                _vw = 0.0
+            _reachable = bool(_tgt) and (not _vw or self._target_in_viewport(_tgt, _vw))
+            # NEVER swipe sideways while the hour's events list is open. The list is
+            # a VERTICAL sidebar, so a horizontal swipe on it reaches nothing; worse,
+            # the swipe lands on the board BEHIND it and scrolls the wrong surface.
+            # Measured: the run that reported "scroll 1/2/3 — new visible cards"
+            # identical three times was swiping a row that the sidebar was covering,
+            # then clicked anyway 220s later. Appium's own .click() auto-scrolls the
+            # sidebar vertically, which is all that is needed here.
+            _sidebar = self._events_sidebar_up(self._idb_els())
+            if _sidebar:
+                notes.append(f"    · {what} — events list is open; selecting from it "
+                             f"vertically (no horizontal scrolling)")
+            elif not _reachable and not self._scroll_card_into_view_h(
+                    r, label, notes, diner_key=name, slot=hour_lbl or slot):
                 notes.append(f"    · {what} — '{label[:36]}' could not be brought into the "
                              f"viewport horizontally; clicking anyway")
             if not appium_click(label):
@@ -3469,6 +4246,49 @@ class FlowRunner:
     def _id_candidates(cls, ident: str):
         """The id as written, then any known equivalent in the other build."""
         return ScenarioRunner.id_candidates(ident)
+
+    def _time_slot_committed(self, r: ScenarioRunner, lbl: str) -> bool:
+        """Did tapping the time chip actually set selectedTime?
+
+        The chip shows its selection ONLY as a background colour
+        (selectedTime === el ? '#d6d6d6' : '#eee', AddNewEventModal/index.js:1187),
+        and accessibility does not expose that -- measured: `selected` stays
+        "false" and the idb tree is byte-identical before and after a successful
+        selection. So the selection itself is not directly observable.
+
+        What IS observable is the chip's POSITION. The form's content is taller than
+        the sheet, so the slot row renders BELOW saveBtn and is clipped: all three
+        matches report displayed=False and an idb coordinate tap there hits nothing.
+        Appium's .click() auto-scrolls the chip into the sheet first -- measured
+        17:35Btn moving y=793 -> y=645, above saveBtn at y=710 -- and that scroll is
+        the proof the click reached a real, hit-testable element rather than a
+        clipped one.
+
+        So: the slot counts as committed once its chip is genuinely on screen and
+        above the save control.
+        """
+        try:
+            els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{lbl}Btn"')
+        except Exception:
+            return True          # cannot tell -- do not fail a booking on that
+        if not els:
+            return True
+        save_y = None
+        for e in self._idb_els():
+            if (e.get("label") or "").strip() == "saveBtn":
+                save_y = e.get("cy")
+                break
+        for e in els:
+            try:
+                if not e.is_displayed():
+                    continue
+                rect = e.rect or {}
+            except Exception:
+                continue
+            cy = (rect.get("y") or 0) + (rect.get("height") or 0) / 2
+            if save_y is None or cy <= save_y:
+                return True
+        return False
 
     def _dismiss_logbox_viewer(self, udid: str = "") -> bool:
         """Close the EXPANDED LogBox (the full-screen stack-trace view).
@@ -4121,36 +4941,59 @@ class FlowRunner:
         # step then fails against a screen that never loads. That reads as "the
         # tests are broken" when the real answer is "the wrong app is installed".
         # Check it here, once, and say so plainly.
-        required = [("consumer", self.devices.get("consumer") or DEFAULT_CONSUMER_UDID,
-                     self.consumer_bundle),
-                    ("business", self._business_udid(), self.business_bundle)]
-        missing = []
-        for role, udid, bundle in required:
+        #
+        # A missing app is now DEPLOYED rather than reported: the platform already
+        # knows how to build and install, so telling the user to go do it by hand was
+        # withholding a capability it has. Each role carries its own device, so two
+        # apps landing on two different simulators is the ordinary path here.
+        #
+        # Only the apps THIS flow's segments actually drive. A consumer-only flow
+        # (the Quick demo is one segment, role "consumer") never opens the B-App, so
+        # demanding it blocked a run that would otherwise pass — and sent the user off
+        # to build an app the scenario was never going to launch. Roles map to apps
+        # the same way _session_for/_prewarm_sessions map them: consumer -> C-App,
+        # every other role (waiter, kitchen) -> the B-App on the shared business device.
+        from automation.projects import deployment as _deploy
+        roles = {seg["role"]
+                 for seg in (getattr(self, "flow", None) or {}).get("segments", [])}
+        required = []
+        if "consumer" in roles:
+            required.append(_deploy.AppRequirement(
+                role="consumer",
+                bundle_id=self.consumer_bundle,
+                device_id=self.devices.get("consumer") or DEFAULT_CONSUMER_UDID))
+        if roles - {"consumer"}:
+            required.append(_deploy.AppRequirement(
+                role="business",
+                bundle_id=self.business_bundle,
+                device_id=self._business_udid()))
+        try:
+            results = _deploy.prepare_scenario(
+                required,
+                on_log=lambda m: self.on_event({"type": "log",
+                                                "message": f"preflight: {m}"}))
+        except _deploy.DeploymentBlocked as e:
+            # Already fully formed (app, bundle, device, reason, action) — re-wrapping
+            # it would only bury the part that says what to do.
+            raise RuntimeError(str(e)) from e
+        except subprocess.TimeoutExpired:
             # A slow simctl must not fail the run. simctl is shared with Xcode and
-            # goes to its knees under concurrent builds -- measured on this machine
-            # at >120s for three get_app_container calls, and `simctl list devices`
-            # timing out at 15s in the same window. This check is an EARLY WARNING
-            # about a missing app; treating "simctl did not answer" as "the app is
-            # not installed" turns a busy machine into a failed run that never ran
-            # a step, which is exactly what it did.
-            try:
-                got = subprocess.run(["xcrun", "simctl", "get_app_container", udid, bundle],
-                                     capture_output=True, text=True, timeout=30)
-            except subprocess.TimeoutExpired:
-                self.on_event({"type": "log",
-                               "message": f"preflight: could not verify {role} app {bundle} "
-                                          f"— simctl did not answer in 30s (busy machine); "
-                                          f"continuing, the session will report a missing app"})
-                continue
-            if got.returncode != 0 or not got.stdout.strip():
-                missing.append(f"{bundle} ({self.env} {role}) is not installed on {udid}")
-            else:
-                self.on_event({"type": "log",
-                               "message": f"preflight: {role} app {bundle} present"})
-        if missing:
-            raise RuntimeError(
-                "Preflight failed — deploy the " + self.env + " build before running:\n  "
-                + "\n  ".join(missing))
+            # goes to its knees under concurrent builds -- measured on this machine at
+            # >120s for three get_app_container calls. Treating "simctl did not
+            # answer" as "the app is not installed" turns a busy machine into a run
+            # that never executed a step, which is exactly what it used to do. The
+            # session will surface a genuinely missing app a few seconds later.
+            self.on_event({"type": "log",
+                           "message": "preflight: could not verify the required apps "
+                                      "— simctl did not answer in time (busy machine); "
+                                      "continuing, the session will report a missing app"})
+            self._prewarm_sessions()
+            return
+        passed = all(r.installed for r in results)
+        self.on_event({"type": "log",
+                       "message": _deploy.preflight_report(results, passed=passed)})
+        if not passed:
+            raise RuntimeError(_deploy.preflight_report(results, passed=False))
         # Pre-warm every device session NOW, in parallel — the expensive bit is the WDA
         # build (~60s per device). Doing it lazily meant the iPad's WDA built at the first
         # C-App -> B-App switch, stalling the handoff. Building consumer (:8100) and

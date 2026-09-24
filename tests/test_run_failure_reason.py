@@ -37,6 +37,9 @@ def test_01_a_simctl_timeout_does_not_fail_the_run(monkeypatch):
     fr.devices = {"consumer": "UDID-C"}
     fr.consumer_bundle = "com.example.consumer"
     fr.business_bundle = "com.example.business"
+    # Preflight requires only the apps the flow's segments actually drive, so a
+    # runner under test needs a flow for there to be anything to check at all.
+    fr.flow = {"segments": [{"role": "consumer"}, {"role": "waiter"}]}
     fr._business_udid = lambda: "UDID-B"
     fr._prewarm_sessions = lambda: None
     logged = []
@@ -66,6 +69,7 @@ def test_02_a_genuinely_missing_app_still_fails_loudly(monkeypatch):
     fr.devices = {"consumer": "UDID-C"}
     fr.consumer_bundle = "com.example.consumer"
     fr.business_bundle = "com.example.business"
+    fr.flow = {"segments": [{"role": "consumer"}, {"role": "waiter"}]}
     fr._business_udid = lambda: "UDID-B"
     fr._prewarm_sessions = lambda: None
     fr.on_event = lambda e: None
@@ -80,7 +84,13 @@ def test_02_a_genuinely_missing_app_still_fails_loudly(monkeypatch):
 
     with pytest.raises(RuntimeError) as e:
         fr._preflight()
-    assert "not installed" in str(e.value)
+    # The run must still die loudly, but the message is now the deployment report:
+    # it names the app, the bundle, the device and what to do, instead of only
+    # saying "not installed" and leaving the operator to work out the rest.
+    msg = str(e.value)
+    assert "DEPLOYMENT BLOCKED" in msg
+    assert "com.example.consumer" in msg      # which app
+    assert "UDID-C" in msg                    # and on which device
 
 
 # ── the reason must reach the report ────────────────────────────────────────
