@@ -555,3 +555,47 @@ def test_a_transient_label_miss_is_retried():
     src = _SRC[_SRC.index("def appium_click"):]
     head = src[:src.index("return \"no element matched")]
     assert head.count("find_elements") >= 2, "one retry must precede the failure"
+
+
+# ── the table sheet closes itself when re-opened ────────────────────────────
+
+def _sheet_open(els):
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._idb_els = lambda *a, **k: els
+    return fr._table_sheet_open()
+
+
+def test_an_open_sheet_is_recognised_before_its_chips_load():
+    """EventTableSelect gates its chips on tablesLoading, so an OPEN sheet has no
+    chips for the first beat — indistinguishable, by chips alone, from a sheet that
+    was never opened."""
+    assert _sheet_open([{"label": "Select a table", "id": ""},
+                        {"label": "AssignTableBtn", "id": ""}])
+
+
+def test_the_modify_heading_needs_the_sheets_own_commit_control():
+    """'modifyTable' is ALSO the id of the BUTTON that opens the sheet, so on its own
+    it proves nothing — treating it as the heading would report the sheet open while
+    sitting on the reservation."""
+    assert not _sheet_open([{"label": "modifyTable", "id": ""},
+                            {"label": "closeEventModal", "id": ""}])
+    assert _sheet_open([{"label": "Modify Table", "id": ""},
+                        {"label": "AssignTableBtn", "id": ""}])
+
+
+def test_the_board_is_not_a_table_sheet():
+    assert not _sheet_open([{"label": "addNewEvent", "id": ""},
+                            {"label": "homeBtn", "id": ""}])
+
+
+def test_an_already_open_sheet_is_waited_on_not_retapped():
+    """The sheet is a Modal with onBackdropPress={handleTableClose}. Re-tapping
+    'modifyTable' to "open" an already-open sheet hits the BACKDROP covering that
+    control and dismisses the sheet — the reported "it clicks the event and then
+    simply comes back", with I1/I2/O1/O2 visible on screen as it closed."""
+    src = inspect.getsource(FlowRunner._assign_table)
+    opener = src[src.index("def open_table_sheet"):]
+    i = opener.index("_table_sheet_open()")
+    j = opener.index('for ident in (')
+    assert i < j, "the already-open check must precede any tap"
+    assert "onBackdropPress" in opener or "backdrop" in opener.lower()

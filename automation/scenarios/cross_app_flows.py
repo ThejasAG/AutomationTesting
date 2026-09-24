@@ -1662,6 +1662,30 @@ class FlowRunner:
                      f"{lbl[:60]!r}")
         return self._idb_tap(e["cx"], e["cy"])
 
+    def _table_sheet_open(self) -> bool:
+        """Is the table-select sheet up, EVEN BEFORE its chips have loaded?
+
+        EventTableSelect gates its chips on tablesLoading, so for the first beat of
+        an open sheet there are no chips at all -- and "no chips" is exactly what a
+        sheet that was never opened looks like. Telling those apart matters because
+        the sheet is a Modal with onBackdropPress={handleTableClose}: tapping
+        'modifyTable' again to "open" an already-open sheet hits the backdrop
+        covering it and closes the sheet instead.
+
+        Its heading is the signal that survives the loading state --
+        'Select a table' on a first assignment, 'Modify Table' when re-assigning
+        (Screens/Event/index.js:2368).
+        """
+        els = self._idb_els()
+        labels = {_norm(e.get("label")) for e in els} | {_norm(e.get("id")) for e in els}
+        if "selectatable" in labels:
+            return True
+        # 'Modify Table' is ALSO the id of the button that opens the sheet, so on its
+        # own it proves nothing. As the sheet's HEADING it appears alongside the
+        # sheet's own commit control, which the reservation screen does not have.
+        return "modifytable" in labels and bool(
+            labels & {"assigntablebtn", "applytablebtn"})
+
     def _swipe_calendar(self, r, direction: str) -> bool:
         """Scroll the bookings calendar vertically. True if it actually moved.
 
@@ -2162,6 +2186,27 @@ class FlowRunner:
             """
             if chips():
                 return True
+            # THE SHEET MAY ALREADY BE OPEN AND STILL FETCHING.
+            #
+            # EventTableSelect renders its chips only after the table list arrives
+            # (tablesLoading gates them), so chips() is empty for the first beat of
+            # an OPEN sheet -- indistinguishable, by chips alone, from a sheet that
+            # was never opened. Re-tapping 'modifyTable' then made it worse, because
+            # the sheet is a Modal with onBackdropPress={handleTableClose}: the tap
+            # lands on the backdrop covering that control and DISMISSES the sheet.
+            # That is the reported "it clicks the event, then simply comes back" --
+            # the sheet was open, with I1/I2/O1/O2 on screen, and we closed it.
+            #
+            # So: if the sheet's own heading is up, wait for its chips instead.
+            if self._table_sheet_open():
+                for _ in range(10):               # ~10s for the table fetch
+                    time.sleep(1.0)
+                    if chips():
+                        return True
+                    if not self._table_sheet_open():
+                        break                     # it closed under us — reopen below
+                if chips():
+                    return True
             # 'tableBtn' is NOT a sheet control. It is the BOARD's booking-type
             # filter tab (Screens/Home/index.js:1052, beside allBtn/pickupBtn) —
             # measured live at x=598,y=55 on the bookings board. Tapping it
