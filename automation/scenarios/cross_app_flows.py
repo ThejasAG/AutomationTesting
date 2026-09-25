@@ -1994,14 +1994,32 @@ class FlowRunner:
         if not any(m in seen for m in MARKERS):
             return False
 
-        products = []
-        for e in self._idb_els():
-            nm = (e.get("label") or "").strip() or (e.get("id") or "").strip()
-            if not nm.endswith("Item") or nm in products:
-                continue
-            if " Item" in nm:          # 'PASTA Item' — a category header, not a product
-                continue
-            products.append(nm)
+        # CATEGORY CHIPS LOOK EXACTLY LIKE PRODUCTS.
+        #
+        # AddNewItem.js labels both `${...}Item`, so the suffix cannot separate them.
+        # Most categories keep a space ('PASTA Item') but not all -- MEASURED on this
+        # restaurant, 'biriyaniItem' is a CATEGORY, and matching it tapped a filter
+        # chip while the step reported adding a product and the order stayed at 0.
+        #
+        # The layout does separate them: the chips are one horizontal row (all at
+        # y=200, x=190..702) and the products a column beneath (x=97, y=321+). So
+        # take the products' own column -- the x shared by the most 'Item' elements
+        # -- and keep only the rows in it.
+        cand = [(( e.get("label") or "").strip() or (e.get("id") or "").strip(),
+                 e.get("x") or 0, e.get("y") or 0)
+                for e in self._idb_els()]
+        cand = [c for c in cand if c[0].endswith("Item")]
+        if not cand:
+            products = []
+        else:
+            xs = {}
+            for _nm, x, _y in cand:
+                xs[x] = xs.get(x, 0) + 1
+            col = max(xs, key=lambda k: (xs[k], -k))     # the busiest column
+            products = []
+            for nm, x, _y in sorted(cand, key=lambda c: c[2]):
+                if x == col and nm not in products:
+                    products.append(nm)
         if not products:
             notes.append("    · @add_all_products — ADD NEW ITEM sheet is open but holds "
                          "no products")
@@ -2009,39 +2027,80 @@ class FlowRunner:
 
         added = 0
         for nm in products[:2]:        # a couple is enough to send to the kitchen
-            try:
-                els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, nm)
-            except Exception:
+            if not self._appium_click_id(r, nm):
                 continue
-            if not els:
-                continue
-            try:
-                els[0].click(); time.sleep(1.5)
-                added += 1
-            except Exception:
-                continue
+            time.sleep(2.0)
+            # TAPPING A PRODUCT DOES NOT ADD IT. handleProductFeature routes a
+            # product carrying features/modifiers to the 'Add Options' sheet
+            # (Screens/Event/index.js:843) and only a plain one straight to the
+            # order. MEASURED: PennePolloItem opened a sheet with 'Add Options',
+            # 'Special Instructions' and applyOptionBtn -- so without Apply the item
+            # never lands and the order stays at 0 EUR while the step reports
+            # success. Apply when the sheet appears; a plain product shows none.
+            for _ in range(8):
+                if self._appium_click_id(r, "applyOptionBtn", secs=10.0):
+                    time.sleep(2.0)
+                    break
+                if self._add_items_sheet_up():
+                    break                     # plain product: already added
+                time.sleep(1.0)
+            added += 1
         if not added:
             return False
         notes.append(f"    · @add_all_products — added {added} product(s) from the ADD "
                      f"NEW ITEM sheet: " + ", ".join(n[:-4] for n in products[:added]))
-        # Close the sheet so the items land on the order.
+        # COMMIT, then close.
         #
-        # 'addNewItemAll' is NOT a commit button -- it is the 'All' CATEGORY FILTER
-        # chip (AddNewItem.js:155, handleChipset('All')). Tapping it just re-filters
-        # the list and leaves the sheet up, which then hides addItemsBtn and made the
-        # next step report "no addItems button (already has items?)". The real exit is
-        # addNewItemClose -> toggleAddItems().
-        for ident in ("addNewItemClose",):
-            try:
-                b = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
-            except Exception:
-                continue
-            if b:
-                try:
-                    b[0].click(); time.sleep(2.0)
-                except Exception:
-                    pass
-                break
+        # Apply only stages a product: handleAddingProducts pushes it onto
+        # addedProductsList (Screens/Event/index.js:912), which is NOT the order.
+        # 'assignToBtn' on the sheet itself (AddNewItem.js:212) is what assigns the
+        # staged products -- it is disabled while addedProductsList is empty, which
+        # is exactly why it has to be tapped BEFORE the sheet is closed. Closing
+        # first threw the staging list away, and the order stayed at 0 EUR while the
+        # step reported adding items.
+        #
+        # 'addNewItemAll' is NOT a commit button either -- it is the 'All' CATEGORY
+        # FILTER chip (AddNewItem.js:155), and tapping it just re-filters the list.
+        if self._appium_click_id(r, "assignToBtn"):
+            time.sleep(2.5)
+            # The assign sheet ("Assign to or split among…") asks WHO the products
+            # are for. Each diner row is `${username}select` with spaces stripped
+            # (Components/Modal/index.js:1647) -- 'RoopaDselect' -- so there is no
+            # fixed id to click; match the suffix. MEASURED: the sheet held
+            # RoopaDselect, RoopaDclose, unSelect, addNewGuest and assignProductsBtn,
+            # and a guessed 'selectAll' matched nothing, leaving the products
+            # assigned to no one.
+            for _ in range(10):
+                if any(m in {(e.get("label") or "").strip() for e in self._idb_els()}
+                       for m in ("assignProductsBtn",)):
+                    break
+                time.sleep(1.0)
+            picked = False
+            for e in self._idb_els():
+                nm = (e.get("label") or "").strip()
+                if nm.endswith("select") and nm not in ("unSelect",):
+                    if self._appium_click_id(r, nm, secs=15.0):
+                        picked = True
+                        time.sleep(1.5)
+                    break
+            if not picked:
+                notes.append("    · @add_all_products — no diner row on the assign sheet")
+            # TWO buttons share this id, side by side (Components/Modal:1731 and
+            # :1756): the FIRST is 'Assign', the SECOND is 'Split'. Split is
+            # disabled unless 2+ diners are selected, so clicking the last match --
+            # which _appium_click_id does by default -- pressed a dead button and
+            # the sheet never closed. Take the leftmost, which is Assign.
+            if not self._appium_click_leftmost(r, "assignProductsBtn"):
+                notes.append("    · @add_all_products — could not press Assign")
+            else:
+                time.sleep(3.0)
+        else:
+            notes.append("    · @add_all_products — no assignToBtn; products may stay "
+                         "staged and never reach the order")
+        # Leave the sheet if it is still up.
+        if self._add_items_sheet_up():
+            self._appium_click_id(r, "addNewItemClose", secs=15.0)
+            time.sleep(2.0)
         return True
 
     def _add_all_products(self, r: ScenarioRunner, notes: List[str]) -> bool:
@@ -2691,6 +2750,76 @@ class FlowRunner:
             pass
         return not modal_up()
 
+    def _appium_click_id(self, r: ScenarioRunner, ident: str, secs: float = 30.0) -> bool:
+        """Click by accessibility id through Appium, which SCROLLS the element into
+        view first. Use this wherever a control can sit under the LogBox toasts that
+        a debug build stacks along the bottom edge -- a coordinate tap there lands on
+        the toast and silently does nothing. Bounded so a slow WDA cannot wedge the
+        step."""
+        import concurrent.futures as _fut
+
+        def _do():
+            els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
+            if not els:
+                return False
+            els[-1].click()
+            return True
+
+        ex = _fut.ThreadPoolExecutor(max_workers=1)
+        try:
+            return bool(ex.submit(_do).result(timeout=secs))
+        except Exception:
+            return False
+        finally:
+            ex.shutdown(wait=False)
+
+    def _appium_click_leftmost(self, r: ScenarioRunner, ident: str,
+                               secs: float = 20.0) -> bool:
+        """Click the LEFTMOST element with this id.
+
+        Some sheets render two controls under one accessibility id -- the assign
+        sheet's 'Assign' and 'Split' both answer to assignProductsBtn
+        (Components/Modal/index.js:1731 and :1756). Split is disabled unless two or
+        more diners are selected, so a default last-match click presses a dead
+        button and nothing happens. Position is what tells them apart.
+        """
+        import concurrent.futures as _fut
+
+        def _do():
+            els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
+            if not els:
+                return False
+            best, best_x = None, None
+            for e in els:
+                try:
+                    if not e.is_enabled():
+                        continue
+                    x = (e.rect or {}).get("x")
+                except Exception:
+                    continue
+                if x is not None and (best_x is None or x < best_x):
+                    best, best_x = e, x
+            if best is None:
+                return False
+            best.click()
+            return True
+
+        ex = _fut.ThreadPoolExecutor(max_workers=1)
+        try:
+            return bool(ex.submit(_do).result(timeout=secs))
+        except Exception:
+            return False
+        finally:
+            ex.shutdown(wait=False)
+
+    def _add_items_sheet_up(self) -> bool:
+        """Is the ADD NEW ITEM sheet showing? Its own controls, not its products —
+        the list arrives from the backend a beat later."""
+        els = self._idb_els()
+        seen = {(e.get("label") or "").strip() for e in els} | \
+               {(e.get("id") or "").strip() for e in els}
+        return bool(seen & {"addNewItemClose", "addNewItemInput", "addNewItemAll"})
+
     def _ensure_order_items(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """On the opened Order Summary: if the booking was PRE-ORDERED, items are already
         there — do nothing. If it's an order-later booking with an EMPTY order, ADD items
@@ -2703,7 +2832,19 @@ class FlowRunner:
             return True
         # Empty order → add items.
         if r._resolve(["addItemsBtn"]):
-            r.run_one("click addItemsBtn", 0); time.sleep(1.3)
+            # APPIUM CLICK, not a coordinate tap. A LogBox toast sits along the
+            # bottom edge, which is exactly where addItemsBtn renders -- MEASURED:
+            # button centre (442, 735), toast spanning y=708..756, so the tap lands
+            # on the toast and the ADD NEW ITEM sheet never opens. The step then
+            # reported adding items while the order stayed empty at 0 EUR. Appium's
+            # .click() scrolls the element clear of the toast first, the same fix the
+            # time chips needed.
+            if not self._appium_click_id(r, "addItemsBtn"):
+                r.run_one("click addItemsBtn", 0)
+            for _ in range(10):                          # the sheet fetches its menu
+                time.sleep(1.5)
+                if self._add_items_sheet_up():
+                    break
             self._add_all_products(r, notes)            # add a couple of products (idb)
             for bid in ("assignToBtn", "selectAll", "assignProductsBtn"):   # commit them to the order
                 if r._resolve([bid]):
