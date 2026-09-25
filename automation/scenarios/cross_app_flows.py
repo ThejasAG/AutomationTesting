@@ -1974,6 +1974,76 @@ class FlowRunner:
                 out.append((e, nm))
         return out
 
+    def _add_items_sheet_products(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Add products from the waiter's ADD NEW ITEM sheet. True if any were added.
+
+        This sheet has no quantity steppers. Each product is a TouchableOpacity
+        labelled `${product.name}Item`, spaces stripped, whose onPress calls
+        addNewItem(product) directly (Screens/Event/AddNewItem.js:89) -- one tap per
+        product, no '+' to find.
+
+        The CATEGORY headers on the same sheet are labelled the same way
+        (AddNewItem.js:178 -- 'PASTA Item', 'PIZZA Item'), so they have to be
+        excluded or the step 'adds' a heading and nothing lands in the order. They
+        are distinguishable: a category keeps its space before 'Item' because it is
+        stripped of non-ASCII rather than whitespace.
+        """
+        MARKERS = ("addNewItemClose", "addNewItemInput", "addNewItemAll")
+        seen = {e["label"].strip() for e in self._idb_els()} | \
+               {e["id"].strip() for e in self._idb_els()}
+        if not any(m in seen for m in MARKERS):
+            return False
+
+        products = []
+        for e in self._idb_els():
+            nm = (e.get("label") or "").strip() or (e.get("id") or "").strip()
+            if not nm.endswith("Item") or nm in products:
+                continue
+            if " Item" in nm:          # 'PASTA Item' — a category header, not a product
+                continue
+            products.append(nm)
+        if not products:
+            notes.append("    · @add_all_products — ADD NEW ITEM sheet is open but holds "
+                         "no products")
+            return False
+
+        added = 0
+        for nm in products[:2]:        # a couple is enough to send to the kitchen
+            try:
+                els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, nm)
+            except Exception:
+                continue
+            if not els:
+                continue
+            try:
+                els[0].click(); time.sleep(1.5)
+                added += 1
+            except Exception:
+                continue
+        if not added:
+            return False
+        notes.append(f"    · @add_all_products — added {added} product(s) from the ADD "
+                     f"NEW ITEM sheet: " + ", ".join(n[:-4] for n in products[:added]))
+        # Close the sheet so the items land on the order.
+        #
+        # 'addNewItemAll' is NOT a commit button -- it is the 'All' CATEGORY FILTER
+        # chip (AddNewItem.js:155, handleChipset('All')). Tapping it just re-filters
+        # the list and leaves the sheet up, which then hides addItemsBtn and made the
+        # next step report "no addItems button (already has items?)". The real exit is
+        # addNewItemClose -> toggleAddItems().
+        for ident in ("addNewItemClose",):
+            try:
+                b = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
+            except Exception:
+                continue
+            if b:
+                try:
+                    b[0].click(); time.sleep(2.0)
+                except Exception:
+                    pass
+                break
+        return True
+
     def _add_all_products(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """Add a couple of products. The '+' has no id, so tap it by COORDINATE at
         the right edge of each product's stepper element. Waits for the menu to
@@ -1994,6 +2064,17 @@ class FlowRunner:
                 pass
             time.sleep(1.5)
         if not found:
+            # THE 'ADD NEW ITEM' SHEET IS A DIFFERENT SCREEN.
+            #
+            # _steppers looks for a '- 0 +' control whose id ends 'Inc'. The waiter's
+            # Add-New-Item sheet (Screens/Event/AddNewItem.js:89) has no steppers at
+            # all: each product is a TouchableOpacity labelled `${name}Item` whose
+            # onPress calls addNewItem(product) directly. MEASURED on this build: 0
+            # ids ending 'Inc', 39 ending 'Item' -- so the wait timed out and the
+            # step reported "no menu products" on a sheet full of them, which is the
+            # 'Nylai Kitchen2 has no products' conclusion this step kept producing.
+            if self._add_items_sheet_products(r, notes):
+                return True
             notes.append("[FAIL] @add_all_products — no menu products and no cart (unexpected screen)")
             return False
 
@@ -2632,12 +2713,93 @@ class FlowRunner:
         notes.append("[ok] @ensure_order_items — no addItems button (already has items?); continuing")
         return True
 
+    def _kitchen_pick_products(self, r: ScenarioRunner, notes: List[str]) -> int:
+        """Tick the product rows on the kitchen card. Returns how many were ticked.
+
+        The kitchen board is NOT "tap Ready on a card". Ready is disabled until at
+        least one product of that order is selected:
+
+            disabled={!readyActive(orders?._id)}                 KitchenCards:1129
+            readyActive = id => selectedPrepList2.find(e => e.aptId == id)
+
+        Each product is a Radio whose accessibilityLabel is the product name with
+        its spaces removed plus 'Btn' (KitchenCards:303) -- 'PennePolloBtn',
+        'TagliatellealSalmoneBtn'. There is no single id to search for, so find them
+        by SHAPE: a '<Name>Btn' on screen that is not one of the board's own
+        controls. Without this the step tapped a disabled button, changed nothing,
+        and reported an empty queue.
+        """
+        # The kitchen screen's STATIC controls are a closed, source-verified set.
+        #
+        # Every product row is `${order.data.name}Btn` (KitchenCards:303), and every
+        # other 'Btn' on this screen comes from one of two files. Grepping both for
+        # a literal accessibilityLabel gives the complete list:
+        #     kitchenAllBtn kitchenPickupBtn kitchenTableBtn        Screens/Home/kitchen.js
+        #     orderCloseBtn orderPrintBtn orderReadyBtn             Components/KitchenCards
+        # plus the persistent nav rail. So anything else ending 'Btn' IS a product.
+        #
+        # An earlier blacklist missed orderPrintBtn and preOrderBtn and tapped them
+        # as products, navigating off the kitchen board entirely -- the step then
+        # reported "kitchen queue empty" from the Pre-Orders screen. Geometry alone
+        # does not separate them either: the header tabs sit in the same band as a
+        # card near the top of the board.
+        STATIC = {
+            "kitchenAllBtn", "kitchenTableBtn", "kitchenPickupBtn",
+            "orderReadyBtn", "orderCloseBtn", "orderPrintBtn",
+            "preOrderBtn", "homeBtn", "historyBtn", "menuBtn",
+            "allBtn", "tableBtn", "pickupBtn", "orderFilterBtn",
+            "addNewEvent", "qrScaner", "screenBackBtn", "walletBackBtn",
+        }
+        names = []
+        for e in self._idb_els():
+            nm = (e.get("label") or "").strip()
+            if (nm.endswith("Btn") and nm not in STATIC
+                    and len(nm) > 3 and nm not in names):
+                names.append(nm)
+        if not names:
+            # NOT an error. The product radio renders only for items carrying
+            # modifiers (KitchenCards:299 gates on item.data[idx2]?.header); a plain
+            # item has no row at all and Ready is enabled from the start. MEASURED:
+            # ticket 4698 showed only '4698', 'I1' and the two buttons, with
+            # orderReadyBtn already enabled.
+            notes.append("    · @kitchen_ready — no product rows on this card "
+                         "(plain items); Ready needs no selection")
+            return 0
+
+        ticked = 0
+        for nm in names[:12]:                      # a ticket has a handful of items
+            try:
+                els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, nm)
+            except Exception:
+                continue
+            if not els:
+                continue
+            try:
+                els[0].click()
+                ticked += 1
+                time.sleep(0.6)
+            except Exception:
+                continue
+        if ticked:
+            notes.append(f"    · @kitchen_ready — selected {ticked} product(s): "
+                         + ", ".join(n[:-3] for n in names[:ticked]))
+        return ticked
+
     def _kitchen_ready(self, r: ScenarioRunner, notes: List[str]) -> bool:
-        """Kitchen KANBAN board (verified on-device): each queued order card carries its own
-        `orderReadyBtn` (mark it Prepared), and each prepared/completed order carries an
-        `orderCloseBtn` (close the ticket). There is NO single inProgressOrderCard to open and
-        NO per-item selection here — you tap Ready on a queued order, then Close on a prepared
-        one. These are RN buttons that IGNORE idb coordinate taps, so use Appium element clicks."""
+        """Kitchen KANBAN board: SELECT THE PRODUCTS, then Ready, then Close.
+
+        Each queued order card carries its own `orderReadyBtn` (mark it Prepared) and
+        each prepared order an `orderCloseBtn` (close the ticket). These are RN
+        buttons that IGNORE idb coordinate taps, so use Appium element clicks.
+
+        The per-item step is NOT optional, which this docstring previously claimed
+        outright. Ready is rendered disabled until a product of that order is ticked:
+
+            disabled={!readyActive(orders?._id)}                 KitchenCards:1129
+
+        so tapping it first is a no-op on a disabled control -- indistinguishable
+        from an empty queue, and the reason the kitchen segment could never mark
+        anything Prepared. Order: pick products -> Ready -> Close."""
         def _appium_click_first(idv: str) -> bool:
             try:
                 els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, idv)
@@ -2655,10 +2817,23 @@ class FlowRunner:
                 break
             time.sleep(2.5)
 
-        # 1) Mark a queued order Ready (Prepared).
+        # 1) SELECT THE PRODUCTS FIRST. 'Ready' is disabled until at least one
+        #    product on the card is ticked:
+        #        disabled={!readyActive(orders?._id)}            KitchenCards:1129
+        #        readyActive = id => selectedPrepList2.find(e => e.aptId == id)
+        #    Each product row is a Radio labelled `${order.data.name}Btn` with the
+        #    spaces stripped (KitchenCards:303) -- 'PennePolloBtn',
+        #    'TagliatellealSalmoneBtn'. Tapping Ready without ticking one is a no-op
+        #    on a disabled button, which looked exactly like "the kitchen queue is
+        #    empty" and is why this step could never mark anything Prepared.
+        picked = self._kitchen_pick_products(r, notes)
+
+        # 2) Mark the queued order Ready (Prepared).
         readied = _appium_click_first("orderReadyBtn")
         if readied:
             notes.append("[ok] @kitchen_ready — marked a queued order Ready (Prepared)")
+        elif picked:
+            notes.append("    · @kitchen_ready — products selected but no orderReadyBtn")
         else:
             notes.append("    · @kitchen_ready — no orderReadyBtn (no queued order to ready)")
         time.sleep(1.0)
@@ -2828,19 +3003,24 @@ class FlowRunner:
             #    navigates when now >= start-30min, else it just toasts. A far buffered slot is
             #    un-openable, which silently broke every cross-app waiter flow.
             # So book the EARLIEST slot ~5-28 min ahead: non-stale AND inside the 30-min window.
-            # THE APP'S GATE IS EVALUATED IN UTC, AGAINST A LOCAL-TIME SLOT.
+            # THE APP'S OPEN-WINDOW GATE RUNS ON THE UTC CLOCK.
             #
             # BookingCard.onPress and AddCountModal.isClickable both do:
             #     moment.utc().hours(getUTCHours()).minutes(getUTCMinutes())
             #         .isSameOrAfter(moment.utc(from_time).subtract(30, 'minutes'))
-            # `from_time` carries the slot as the form showed it -- local wall time --
-            # so on a machine at UTC+5:30 the app compares 10:50 against 16:35 and
-            # refuses to open a booking made fifteen minutes ago. MEASURED: local
-            # 16:20, UTC 10:50, slot 16:35, gate -> False.
             #
-            # So aim at the window the app ACTUALLY enforces: 5-28 minutes ahead of
-            # the UTC clock, expressed in the local-time labels the form offers. On a
-            # UTC machine the two are identical and nothing changes.
+            # The LEFT side is the UTC wall clock. The RIGHT side is from_time
+            # converted to UTC -- AddNewEventModal builds it as
+            # moment(`${date} ${selectedTime}`, 'DD MMMM YYYY HH:mm'), a LOCAL moment
+            # that serialises with its offset, so moment.utc() shifts it correctly.
+            # VERIFIED against the live app: a slot of 11:07 local on a UTC+5:30 host
+            # serialises as 2026-09-25T11:07:00+05:30, reads back as 05:37 UTC, and
+            # the gate evaluates 05:32 >= 05:07 -> True.
+            #
+            # Both sides therefore live on the UTC clock, and a window measured
+            # against the LOCAL clock is offset by the machine's own timezone. Aim at
+            # the UTC clock instead, expressed in the local-time labels the form
+            # offers. On a UTC machine the two coincide and nothing changes.
             # timezone-aware: utcnow() is deprecated and slated for removal.
             from datetime import timezone as _tz
             _utc = _dt.now(_tz.utc)
@@ -3307,6 +3487,11 @@ class FlowRunner:
 
         W = _bounded(lambda: r.d.get_window_size())
         if not W:
+            return False
+        # Defensive: a caller that hands us a non-string (the _OPENED_VIA_SIDEBAR
+        # sentinel once did) must not take the whole segment down with an
+        # AttributeError deep inside a helper.
+        if not isinstance(label, str):
             return False
         safe = (label or "").replace('"', "")
         for _ in range(tries):
@@ -3941,10 +4126,15 @@ class FlowRunner:
                 time.sleep(2.5)
             return None
 
-        label = _select_today_and_find()
         # The sidebar row was tapped directly: the reservation is already opening, so
         # there is no board card to locate or click. Skip straight to verification.
-        if label is _OPENED_VIA_SIDEBAR:
+        #
+        # This MUST wrap every call to _select_today_and_find(), not just the first.
+        # The retry after the relaunch below can return the sentinel too, and the
+        # second result used to flow straight into _scroll_into_view(r, label) --
+        # which crashed with "'object' object has no attribute 'replace'" and took
+        # the whole segment down.
+        def _opened_from_sidebar() -> bool:
             # Verify against markers that exist ONLY on the reservation, not on the
             # sidebar. 'closeEventModal' is deliberately excluded: it is the events
             # list's OWN close button, so treating it as "opened" would report
@@ -3953,14 +4143,20 @@ class FlowRunner:
                             "sendToKitchenBtn", "AssignTableBtn", "closeModal")
             for _ in range(12):
                 time.sleep(1.5)
-                seen = {e["id"] for e in self._idb_els()} | \
-                       {e["label"] for e in self._idb_els()}
+                els_now = self._idb_els()
+                seen = {e["id"] for e in els_now} | {e["label"] for e in els_now}
                 if any(m in seen for m in SIDEBAR_SAFE) or self._table_modal_up():
                     notes.append(f"    · {what} — opened the {slot} booking from the "
                                  f"events list")
                     return True
             notes.append(f"    · {what} — tapped the {slot} row in the events list but "
                          f"the reservation did not open; falling back to the board")
+            return False
+
+        label = _select_today_and_find()
+        if label is _OPENED_VIA_SIDEBAR:
+            if _opened_from_sidebar():
+                return True
             label = None
         if not label:
             notes.append("    · card not found — relaunching business app once and retrying")
@@ -3970,6 +4166,10 @@ class FlowRunner:
             except Exception as e:
                 notes.append(f"    · relaunch note: {type(e).__name__}")
             label = _select_today_and_find()
+            if label is _OPENED_VIA_SIDEBAR:
+                if _opened_from_sidebar():
+                    return True
+                label = None
         if not label:
             # Say WHY nothing matched, not just that nothing did: a card can be on screen and
             # still be rejected (wrong status, or w<=60 when it sits outside the horizontally

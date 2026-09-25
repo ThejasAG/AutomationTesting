@@ -666,11 +666,14 @@ def _pick(slots, now_min, utc_min):
 
 
 def test_the_slot_is_chosen_against_the_utc_gate():
-    """BookingCard.onPress and AddCountModal.isClickable both compare the UTC CLOCK
-    against a from_time carrying the slot's LOCAL wall time. MEASURED on this Mac:
-    local 16:20, UTC 10:50, a slot booked at 16:35 — the gate evaluated 10:50 >=
-    16:05 and refused to open a booking made fifteen minutes earlier. Every booking
-    the flow created was un-openable."""
+    """The gate runs on the UTC clock on BOTH sides: moment.utc() of the wall clock
+    against moment.utc(from_time), where from_time is a local moment that serialises
+    with its offset. VERIFIED live: a slot of 11:07 on a UTC+5:30 host serialises as
+    2026-09-25T11:07:00+05:30, reads back as 05:37 UTC, and the gate evaluates
+    05:32 >= 05:07 -> True.
+
+    So a window measured against the LOCAL clock is offset by the machine's own
+    timezone, and every booking the flow created landed outside it."""
     slots = [10 * 60 + 55, 11 * 60, 16 * 60 + 35, 16 * 60 + 40]
     chosen, in_window = _pick(slots, 980, 650)      # UTC+5:30
     assert in_window
