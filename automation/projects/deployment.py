@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -227,6 +228,23 @@ def _grant_device_permissions(req: "AppRequirement", say=None) -> None:
             say(f"{req.role}: granted location + pinned simulator coordinates")
     except Exception as e:                      # never fatal
         logger.debug("permission grant failed for %s: %s", req.bundle_id, e)
+    # Every other privacy prompt too. Each one is a SYSTEM sheet (a separate
+    # process): the app's accessibility tree disappears behind it, so a flow sees
+    # only the status bar and stalls. Signing the consumer in on a fresh install
+    # raised iOS's "How do you want to share contacts?" and blocked @consumer_home.
+    # A test simulator answering "allow" up front is the intended setup.
+    try:
+        # `all` did not cover contacts on the iOS 26.5 runtime: the share-contacts
+        # sheet still appeared, so contacts is granted explicitly (FULL access --
+        # granted after `all` so nothing leaves it at "limited").
+        for service in ("all", "contacts"):
+            subprocess.run(["xcrun", "simctl", "privacy", req.device_id, "grant",
+                            service, req.bundle_id],
+                           capture_output=True, text=True, timeout=60)
+        if say:
+            say(f"{req.role}: pre-granted all privacy permissions")
+    except Exception as e:                      # never fatal
+        logger.debug("grant all failed for %s: %s", req.bundle_id, e)
 
 
 def device_is_available(device_id: str) -> tuple[bool, str]:

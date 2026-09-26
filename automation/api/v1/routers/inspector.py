@@ -32,12 +32,11 @@ def _idb_path() -> str:
     worked on the machine it was written on and returned a raw ENOENT naming a
     path the operator has no reason to recognise on any other.
     """
-    from automation.scenarios.idb_path import idb_binary
-    found = idb_binary()
-    # idb_binary() ends with a hardcoded default rather than returning nothing,
-    # so "it gave us a string" is not evidence the tool exists. Only a path that
-    # is actually on disk counts; a bare name resolved from PATH already is.
-    if found and (not os.path.isabs(found) or os.path.isfile(found)):
+    from automation.scenarios.idb_path import find_idb
+    # find_idb() returns None when idb is genuinely absent (idb_binary() would
+    # hand back the bare name "idb", which is not evidence the tool exists).
+    found = find_idb()
+    if found:
         return found
     raise HTTPException(
         status_code=503,

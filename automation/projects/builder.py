@@ -3242,13 +3242,23 @@ class AppBuilder:
         for runtime, devs in data.get("devices", {}).items():
             if "iOS" not in runtime:
                 continue
+            ios = runtime.split("iOS-")[-1].replace("-", ".") if "iOS-" in runtime else ""
             for d in devs:
                 if d.get("isAvailable"):
                     sims.append({"udid": d["udid"], "name": d.get("name", ""),
-                                 "state": d.get("state", "Shutdown")})
+                                 "state": d.get("state", "Shutdown"), "ios": ios})
 
         if not sims:
             return None, "no available iOS simulators on this machine"
+
+        # Only simulators Appium can drive with this Xcode (Xcode 26's XCTest
+        # cannot load on an iOS 18 runtime). A requested/booted sim that fails
+        # this is skipped exactly like one that does not exist.
+        from automation.projects.simulators import testable
+        usable = testable(sims)
+        too_old = next((s for s in sims if s["udid"] == device_id
+                        and s not in usable), None)
+        sims = usable
 
         def matches(s):
             return bool(prefer) and prefer.lower() in s["name"].lower()
@@ -3271,7 +3281,10 @@ class AppBuilder:
             if pick is requested:
                 return pick["udid"], None
             note = f"using already-booted simulator {pick['name']}"
-            if device_id and device_id != pick["udid"]:
+            if too_old:
+                note += (f" (requested {too_old['name']} runs iOS {too_old['ios']}, "
+                         f"older than Xcode's SDK — Appium cannot drive it)")
+            elif device_id and device_id != pick["udid"]:
                 note += f" (requested {device_id} is not booted)"
             return pick["udid"], note
 

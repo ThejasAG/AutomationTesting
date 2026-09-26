@@ -22,9 +22,11 @@ class Fake:
         return True, ""
 
 
-def _setup(monkeypatch, answers, tools=("xcodebuild", "pod", "ruby")):
+def _setup(monkeypatch, answers, tools=("xcodebuild", "pod", "ruby", "idb_companion")):
     fake = Fake(answers)
     monkeypatch.setattr(ms, "_run", fake)
+    from automation.scenarios import idb_path
+    monkeypatch.setattr(idb_path, "find_idb", lambda: "/x/idb")
     monkeypatch.setattr(ms.me, "which", lambda t: f"/x/{t}" if t in tools else None)
     return fake
 
@@ -118,3 +120,37 @@ def test_one_crashing_fixer_does_not_stop_the_others(monkeypatch):
     monkeypatch.setattr(ms, "FIXERS", (boom, lambda s: ran.append(1) or True))
     assert ms.auto_setup(lambda m: None) is False
     assert ran == [1]
+
+
+def test_missing_idb_client_is_installed_into_its_own_venv(monkeypatch):
+    from automation.scenarios import idb_path
+    state = {"idb": None}
+
+    def pip(cmd):
+        state["idb"] = "/home/.idb-venv/bin/idb"
+        return True, ""
+    _setup(monkeypatch, [])
+    monkeypatch.setattr(idb_path, "find_idb", lambda: state["idb"])
+    monkeypatch.setattr(ms, "_run", lambda cmd, timeout: pip(cmd) if "pip" in cmd[0] else (True, ""))
+    assert ms.fix_idb(lambda m: None)
+    assert state["idb"]
+
+
+def test_missing_idb_companion_is_reported_with_the_command(monkeypatch):
+    _setup(monkeypatch, [], tools=("xcodebuild",))
+    msgs = []
+    assert ms.fix_idb(msgs.append) is False
+    assert any("idb-companion" in m for m in msgs)
+
+
+def test_idb_found_outside_path(tmp_path, monkeypatch):
+    # The daemon's PATH lacks ~/.local/bin, where pipx/--user put idb.
+    from automation.scenarios import idb_path
+    local = tmp_path / ".local" / "bin"
+    local.mkdir(parents=True)
+    (local / "idb").write_text("#!/bin/sh\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.delenv("IDB_BINARY", raising=False)
+    monkeypatch.setattr(idb_path, "IDB_VENV", str(tmp_path / ".idb-venv"))
+    assert idb_path.find_idb() == str(local / "idb")

@@ -55,7 +55,8 @@ from automation.intelligence.scenario_runner import ScenarioRunner
 from automation.scenarios.cross_app_orchestrator import (
     APPIUM_URL, CONSUMER_BUNDLE, BUSINESS_BUNDLE, ENV_BUNDLES,
     DEFAULT_CONSUMER_UDID, DEFAULT_BUSINESS_UDID, DEFAULT_BUSINESS_PHONE_UDID,
-    _options, _fill_field, ensure_business_metro, _business_metro_target,
+    _options, _fill_field, ensure_business_metro, ensure_app_metro,
+    _business_metro_target,
 )
 from automation.scenarios import cross_app_config as cfgmod
 from automation.scenarios import ui_health as _uih
@@ -267,20 +268,13 @@ def _appium_binary() -> str:
 
 
 def _idb_binary() -> str:
-    """Locate the `idb` executable. shutil.which() fails in the flow's daemon process
-    (PATH lacks /usr/local/bin & the pip user-bin), which made every idb call throw
-    FileNotFoundError — silently breaking the fast idb steps. Probe the usual spots."""
-    import glob
-    import os as _os
-    import shutil
-    found = shutil.which("idb")
-    if found:
-        return found
-    for c in ("/usr/local/bin/idb", "/opt/homebrew/bin/idb"):
-        if _os.path.exists(c):
-            return c
-    hits = sorted(glob.glob(_os.path.expanduser("~/Library/Python/*/bin/idb")))
-    return hits[-1] if hits else "idb"
+    """Locate the `idb` executable (shared resolver: scenarios/idb_path.py).
+
+    shutil.which() alone fails in the flow's daemon process (PATH lacks the pip
+    user-bin), which made every idb call throw FileNotFoundError and silently
+    broke the fast idb steps."""
+    from automation.scenarios.idb_path import idb_binary
+    return idb_binary()
 
 
 _IDB = _idb_binary()   # resolved once at import
@@ -601,6 +595,7 @@ class FlowRunner:
         self._runners: Dict[str, ScenarioRunner] = {}
         self._biz_account: Optional[str] = None
         self._biz_metro_ready = False
+        self._con_metro_ready = False
         # Set by request_flow_stop() when the user presses Stop. Checked between
         # steps and segments; never kills the thread (see _ACTIVE_FLOW_RUNS).
         self._cancel = threading.Event()
@@ -619,6 +614,11 @@ class FlowRunner:
         if role == "consumer":
             udid, bundle, wda = (self.devices.get("consumer") or DEFAULT_CONSUMER_UDID,
                                  self.consumer_bundle, 8100)
+            if not self._con_metro_ready:
+                # Point this device's consumer app at its environment's Metro
+                # (staging :8084). A simulator it never ran on has no
+                # RCT_jsLocation and falls back to :8081 -> "No bundle URL".
+                self._con_metro_ready = ensure_app_metro(udid, self.consumer_bundle)
         else:
             udid, bundle, wda = self._business_udid(), self.business_bundle, 8101
             if not self._biz_metro_ready:
@@ -3354,7 +3354,10 @@ class FlowRunner:
                                      for b in ("google", "apple", "facebook"))
                          # Prose is not a control: the explanatory paragraph on this
                          # screen contains "Sign in …" and outranked the real button.
-                         and e.get("type") != "StaticText"
+                         # Nor is an input: the email field is labelled "loginEmail"
+                         # and was "opened" four times instead of being filled.
+                         and e.get("type") not in ("StaticText", "TextField",
+                                                   "SecureTextField")
                          and len(str(e.get("label") or "")) <= 40]
                 entry = next((e for e in cands
                               if any(k in _norm(e.get("label"))
@@ -3402,16 +3405,29 @@ class FlowRunner:
             if len(fields) < 2:
                 notes.append("[warn] first run — sign-in form not recognised")
                 return False
-            fields[0].send_keys(email)
-            fields[1].send_keys(password)
+            # Through _fill_field (clear, type, read back, retype per character):
+            # a raw send_keys on a busy simulator dropped the first characters of
+            # the email, leaving an invalid address, so SIGN-IN stayed disabled.
+            for field, value in ((fields[0], email), (fields[1], password)):
+                name = field.get_attribute("name")
+                if not (name and _fill_field(r.d, name, value)):
+                    field.clear()
+                    field.send_keys(value)
             self._hide_keyboard(r, notes)
             btn = next((e for e in self._idb_els()
                         if _norm(e.get("label")) in ("signin", "login", "submit")), None)
             if btn:
                 self._idb_tap(btn["cx"], btn["cy"])
-            time.sleep(4)
-            notes.append(f"[ok] first run — signed in as {email}")
-            return True
+            # Report what happened, not what was attempted: still on the form
+            # means the sign-in did not go through.
+            for _ in range(10):
+                time.sleep(1.5)
+                if self._on_home() or not self._looks_signed_out():
+                    notes.append(f"[ok] first run — signed in as {email}")
+                    return True
+            notes.append(f"[warn] first run — still on the sign-in screen after "
+                         f"submitting {email} (check the consumer credentials)")
+            return False
         except Exception as e:
             notes.append(f"[warn] first run — sign-in failed: {str(e)[:120]}")
             return False
@@ -5461,14 +5477,20 @@ class FlowRunner:
         targets = {}   # udid -> (bundle, wda_port, needs_metro)
         for seg in self.flow["segments"]:
             if seg["role"] == "consumer":
+                # needs_metro for the consumer too: this prewarm launches and
+                # attaches to the app, so the Metro location must be set BEFORE it
+                # or the session holds a "No bundle URL present" instance.
                 targets[self.devices.get("consumer") or DEFAULT_CONSUMER_UDID] = \
-                    (self.consumer_bundle, 8100, False)
+                    (self.consumer_bundle, 8100, True)
             else:  # waiter + kitchen share the business device
                 targets[self._business_udid()] = (self.business_bundle, 8101, True)
 
         def _warm(udid, bundle, wda, needs_metro):
             try:
-                if needs_metro and not self._biz_metro_ready:
+                if needs_metro and bundle == self.consumer_bundle:
+                    if not self._con_metro_ready:
+                        self._con_metro_ready = ensure_app_metro(udid, bundle)
+                elif needs_metro and not self._biz_metro_ready:
                     # Pass the ACTUAL bundle. Called bare it defaults to the PROD
                     # bundle, so it writes RCT_jsLocation onto
                     # org.vyapy.sarls.vyabusinessipad and leaves the *staging*

@@ -21,7 +21,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional
 
 _CONFIG_PATH = Path(os.getenv(
     "CROSS_APP_CONFIG_PATH",
@@ -46,28 +46,78 @@ _DEFAULT_DEVICES = {
 
 
 def list_ios_simulators() -> List[Dict[str, str]]:
-    """Available iOS simulators, Booted first, for the role pickers."""
-    try:
-        out = subprocess.run(
-            ["xcrun", "simctl", "list", "devices", "available", "-j"],
-            capture_output=True, text=True, timeout=15,
-        ).stdout
-        data = json.loads(out)
-    except Exception:
-        return []
-    sims = []
-    for runtime, devs in data.get("devices", {}).items():
-        if "iOS" not in runtime:
-            continue
-        ios = runtime.split("iOS-")[-1].replace("-", ".") if "iOS-" in runtime else ""
-        for dev in devs:
-            if dev.get("isAvailable"):
-                sims.append({
-                    "udid": dev["udid"], "name": dev["name"],
-                    "state": dev.get("state", "Shutdown"), "ios": ios,
-                })
-    sims.sort(key=lambda s: (s["state"] != "Booted", s["name"]))
+    """Available iOS simulators for the role pickers: ones Appium can drive on
+    this Xcode first (see projects.simulators), then Booted, then by name."""
+    from automation.projects import simulators
+    sims = simulators.list_sims()
+    sdk = simulators.sdk_major()
+    for s in sims:
+        s["testable"] = simulators.is_testable(s, sdk)
+    sims.sort(key=lambda s: (not s["testable"], s["state"] != "Booted", s["name"]))
     return sims
+
+
+# Which kind of simulator each role needs.
+ROLE_KIND = {"consumer": "iPhone", "waiter": "iPad", "kitchen": "iPad"}
+
+
+def local_udid_for(kind: str, preferred: Optional[str] = None,
+                   exclude: Iterable[str] = (),
+                   sims: Optional[List[Dict[str, str]]] = None) -> Optional[str]:
+    """A simulator of *kind* ("iPhone"/"iPad") that exists on THIS Mac.
+
+    A UDID only exists on the Mac that created it, so every id written into
+    config or code (DA24A392… is one developer's iPhone 16 Pro) fails on every
+    other machine with "Invalid device or device pair". *preferred* is kept
+    when it exists here and Appium can drive it on this Xcode; otherwise the
+    nearest local match is chosen -- booted first, then the same model as
+    *preferred* was, then a Pro model, then any of that kind.
+    """
+    from automation.projects.simulators import testable
+    sims = list_ios_simulators() if sims is None else sims
+    # Only simulators Appium can drive with this Xcode: an iOS 18 sim exists and
+    # boots under Xcode 26, but WebDriverAgent cannot load on it.
+    sims = testable(sims)
+    if preferred and any(s["udid"] == preferred for s in sims):
+        return preferred
+    pool = [s for s in sims if s["name"].startswith(kind) and s["udid"] not in set(exclude)]
+    if not pool:
+        return None
+    model = _DEFAULT_MODEL.get(preferred or "", "")
+    pool.sort(key=lambda s: (s["state"] != "Booted",
+                             not s["name"].startswith(model or "\0"),
+                             "Pro" not in s["name"], s["name"]))
+    return pool[0]["udid"]
+
+
+# The models the hardcoded defaults were, so a replacement matches them.
+_DEFAULT_MODEL = {
+    "DA24A392-FF1B-4283-A5CE-CDDE0D000D21": "iPhone 16 Pro",
+    "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B": "iPad Pro 11",
+    "B1093E61-C510-4E6E-8A60-C2D05D150F64": "iPhone 16",
+}
+
+
+def localize_devices(devices: Dict[str, str],
+                     sims: Optional[List[Dict[str, str]]] = None) -> Dict[str, str]:
+    """Replace every role device that does not exist on this Mac with a local one.
+
+    Waiter and kitchen stay on ONE iPad when they were configured that way (the
+    shared-device account switch); consumer never shares with them.
+    """
+    sims = list_ios_simulators() if sims is None else sims
+    if not sims:
+        return devices          # simctl unavailable: cannot judge, change nothing
+    out = dict(devices)
+    shared = devices.get("waiter") == devices.get("kitchen")
+    out["consumer"] = local_udid_for("iPhone", devices.get("consumer"), sims=sims) \
+        or devices.get("consumer")
+    out["waiter"] = local_udid_for("iPad", devices.get("waiter"),
+                                   exclude=[out["consumer"]], sims=sims) or devices.get("waiter")
+    out["kitchen"] = out["waiter"] if shared else (
+        local_udid_for("iPad", devices.get("kitchen"), exclude=[out["consumer"]], sims=sims)
+        or devices.get("kitchen"))
+    return out
 
 
 def _seed_from_env() -> Dict[str, Any]:
@@ -90,6 +140,9 @@ def load_config() -> Dict[str, Any]:
     for role in ROLES:
         cfg["devices"].setdefault(role, _DEFAULT_DEVICES[role])
         cfg["credentials"].setdefault(role, {"email": "", "password": ""})
+    # A device id from another Mac (the defaults, or a copied config file) is
+    # swapped for this Mac's own simulator of the same kind.
+    cfg["devices"] = localize_devices(cfg["devices"])
     return cfg
 
 

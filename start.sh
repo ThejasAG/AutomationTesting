@@ -53,14 +53,26 @@ by_name = {}
 for name, udid, _state in devices:
     by_name.setdefault(name, udid)          # first wins: stable across runs
 
-# 1. This machine's own config, when someone has written one.
+# 0. The platform's own resolver: the role devices, swapped for THIS Mac's
+#    simulators and only ones Appium can drive on this Xcode (an iOS 18 sim
+#    boots fine under Xcode 26 but WebDriverAgent cannot run on it). Booting
+#    anything else just burns CPU next to the sims the runs actually use.
 picked = []
 try:
+    sys.path.insert(0, os.getcwd())
+    from automation.scenarios.cross_app_config import load_config
+    picked = sorted(set(load_config()["devices"].values()))
+except Exception:
+    picked = []
+
+# 1. This machine's own config, when someone has written one.
+if not picked:
+  try:
     with open("cross_app_config.json") as f:
         cfg = set(json.load(f).get("devices", {}).values())
     here = {u for _n, u, _s in devices}
     picked = sorted(cfg & here)             # only ones that exist HERE
-except Exception:
+  except Exception:
     pass
 
 # 2. Resolve the wanted names against what this Mac has.

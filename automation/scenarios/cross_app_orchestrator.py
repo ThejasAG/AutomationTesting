@@ -65,12 +65,25 @@ VYA_ENV = os.getenv("VYA_ENV", "staging")
 CONSUMER_BUNDLE = ENV_BUNDLES.get(VYA_ENV, ENV_BUNDLES["prod"])["consumer"]
 BUSINESS_BUNDLE = ENV_BUNDLES.get(VYA_ENV, ENV_BUNDLES["prod"])["business"]
 
-DEFAULT_CONSUMER_UDID = "DA24A392-FF1B-4283-A5CE-CDDE0D000D21"   # iPhone 16 Pro
-DEFAULT_BUSINESS_UDID = "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"   # iPad Pro 11"
+# Fallback devices, resolved to THIS Mac's simulators: the ids below are one
+# developer's machine and fail everywhere else ("Invalid device or device pair").
+# local_udid_for keeps an id that exists here and otherwise picks the nearest
+# local simulator of the same kind (booted first, then the same model).
+from automation.scenarios.cross_app_config import list_ios_simulators, local_udid_for
+_SIMS = list_ios_simulators()
+DEFAULT_CONSUMER_UDID = local_udid_for(
+    "iPhone", "DA24A392-FF1B-4283-A5CE-CDDE0D000D21", sims=_SIMS) \
+    or "DA24A392-FF1B-4283-A5CE-CDDE0D000D21"                        # iPhone 16 Pro
+DEFAULT_BUSINESS_UDID = local_udid_for(
+    "iPad", "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B", sims=_SIMS) \
+    or "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B"                        # iPad Pro 11"
 # Dedicated phone for the B-app (waiter+kitchen) when running "phone" mode — a SEPARATE
 # iPhone 16 (base), NOT the consumer's iPhone 16 Pro. Sharing one sim with the consumer
 # caused WDA session collisions; this device is its own sim with the staging B-app installed.
-DEFAULT_BUSINESS_PHONE_UDID = "B1093E61-C510-4E6E-8A60-C2D05D150F64"   # iPhone 16
+DEFAULT_BUSINESS_PHONE_UDID = local_udid_for(
+    "iPhone", "B1093E61-C510-4E6E-8A60-C2D05D150F64",
+    exclude=[DEFAULT_CONSUMER_UDID], sims=_SIMS) \
+    or "B1093E61-C510-4E6E-8A60-C2D05D150F64"                        # iPhone 16
 APPIUM_URL = "http://127.0.0.1:4723"
 
 # The Business app is a SEPARATE React Native app — it cannot share Metro on
@@ -108,9 +121,14 @@ def _business_metro_target(bundle: str):
     from automation.projects import deployment as _deploy
     from automation.projects import environments as _env
 
-    fallback = ((BUSINESS_STAGING_METRO_PORT, BUSINESS_STAGING_PROJECT_ID)
-                if (bundle or "").endswith("staging")
-                else (BUSINESS_METRO_PORT, BUSINESS_PROJECT_ID))
+    staging = (bundle or "").endswith("staging")
+    if "consumer" in (bundle or ""):
+        # The consumer app goes through here too (ensure_app_metro): a device that
+        # never ran it has no RCT_jsLocation and shows "No bundle URL present".
+        fallback = (8084 if staging else 8081, CONSUMER_PROJECT_ID)
+    else:
+        fallback = ((BUSINESS_STAGING_METRO_PORT, BUSINESS_STAGING_PROJECT_ID)
+                    if staging else (BUSINESS_METRO_PORT, BUSINESS_PROJECT_ID))
     if not bundle:
         return fallback
     try:
@@ -162,19 +180,46 @@ def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
                 pass
             time.sleep(1)
 
-    # Point the Business app at its own packager (RCTBundleURLProvider reads this).
+    # Point the app at its own packager (RCTBundleURLProvider reads this).
+    want = f"localhost:{port}"
+    # Generous timeouts: a freshly created simulator indexes media for its first
+    # half hour (mediaanalysisd at 500%+ CPU on Intel), and `simctl spawn` then
+    # took >15s -- the write was skipped and the app kept "No bundle URL". An
+    # unreadable current value is treated as "not set", never as a reason to skip.
     try:
-        subprocess.run(
-            ["xcrun", "simctl", "spawn", udid, "defaults", "write", bundle,
-             "RCT_jsLocation", f"localhost:{port}"],
-            check=False, timeout=15,
-        )
+        cur = subprocess.run(
+            ["xcrun", "simctl", "spawn", udid, "defaults", "read", bundle,
+             "RCT_jsLocation"], capture_output=True, text=True, timeout=90,
+        ).stdout.strip()
+    except Exception:
+        cur = ""
+    try:
+        if cur != want:
+            subprocess.run(
+                ["xcrun", "simctl", "spawn", udid, "defaults", "write", bundle,
+                 "RCT_jsLocation", want],
+                check=False, timeout=90,
+            )
+            # The bundle URL is read once, at launch. An instance already running
+            # (deployment launches it) keeps its red "No bundle URL" screen, and
+            # activate_app only brings that instance forward -- so end it and let
+            # the session start a fresh one that reads the new location.
+            subprocess.run(["xcrun", "simctl", "terminate", udid, bundle],
+                           capture_output=True, timeout=60)
     except Exception as e:
-        logger.warning("Could not set RCT_jsLocation for Business app: %s", e)
+        logger.warning("Could not set RCT_jsLocation for %s: %s", bundle, e)
     try:
         return httpx.get(f"http://localhost:{port}/status", timeout=3).status_code == 200
     except Exception:
         return False
+
+
+def ensure_app_metro(udid: str, bundle: str) -> bool:
+    """Any React Native app: its environment's Metro running, and *udid*'s copy of
+    the app pointed at it. Same mechanism as the Business app, which was the only
+    one that got it -- so the Consumer app on a simulator it had never run on
+    asked the default :8081 and showed "No bundle URL present"."""
+    return ensure_business_metro(udid, bundle)
 
 
 def _options(udid: str, bundle_id: str, wda_port: int) -> XCUITestOptions:

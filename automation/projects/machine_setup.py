@@ -10,6 +10,8 @@ platform, then the tools that build against it.
 
     xcode first launch   admin rights: one macOS password dialog, no terminal
     iOS platform         xcodebuild -downloadPlatform iOS (no admin needed)
+    simulators           an iPhone + iPad on Xcode's iOS (WDA cannot run on older)
+    idb                  fb-idb client in ~/.idb-venv (no admin needed)
     CocoaPods            gem --user-install, pinned for system Ruby 2.6
     nvm default          ~/.nvm/alias/default -> system
 
@@ -142,6 +144,42 @@ def fix_cocoapods(step: Step) -> bool:
     return False
 
 
+def fix_simulators(step: Step) -> bool:
+    """Make sure an iPhone and an iPad exist on Xcode's own iOS version -- the
+    only ones WebDriverAgent can run on."""
+    from automation.projects import simulators
+    simulators.create_missing(step)
+    return True
+
+
+def fix_idb(step: Step) -> bool:
+    """The idb client, which the flows read screens and tap through.
+
+    Installed into its own venv (~/.idb-venv) with the platform's Python -- no
+    admin rights, and isolated from the platform's own packages. idb_companion
+    (the device-side half) comes from Homebrew's facebook/fb tap and cannot be
+    installed silently, so its absence is reported with the command."""
+    import sys
+    from automation.scenarios import idb_path
+    ok = True
+    if not idb_path.find_idb():
+        step("idb client not found — installing fb-idb into ~/.idb-venv…")
+        venv_ok, out = _run([sys.executable, "-m", "venv", idb_path.IDB_VENV], 300)
+        if venv_ok:
+            venv_ok, out = _run([os.path.join(idb_path.IDB_VENV, "bin", "pip"),
+                                 "install", "--quiet", "fb-idb"], GEM_TIMEOUT)
+        if venv_ok and idb_path.find_idb():
+            step(f"idb installed: {idb_path.find_idb()}")
+        else:
+            step(f"Installing fb-idb failed: {out[-300:]}")
+            ok = False
+    if not me.which("idb_companion"):
+        step("idb_companion is not installed — screen reads and taps will not work. "
+             "Install once: brew tap facebook/fb && brew install idb-companion")
+        ok = False
+    return ok
+
+
 def fix_nvm_default(step: Step) -> bool:
     msg = me.ensure_nvm_default()
     if msg:
@@ -149,7 +187,8 @@ def fix_nvm_default(step: Step) -> bool:
     return True
 
 
-FIXERS = (fix_xcode_first_launch, fix_ios_platform, fix_cocoapods, fix_nvm_default)
+FIXERS = (fix_xcode_first_launch, fix_ios_platform, fix_simulators, fix_cocoapods,
+          fix_idb, fix_nvm_default)
 
 
 def auto_setup(step: Step = lambda m: logger.info(m)) -> bool:

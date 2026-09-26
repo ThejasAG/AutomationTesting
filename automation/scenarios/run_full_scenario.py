@@ -37,11 +37,15 @@ def _clean(step: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default="DA24A392-FF1B-4283-A5CE-CDDE0D000D21",
-                    help="iOS simulator UDID for the Consumer app")
+    ap.add_argument("--device", default=None,
+                    help="iOS simulator UDID for the Consumer app (default: this Mac's iPhone)")
     ap.add_argument("--save", action="store_true",
                     help="save the recorded Consumer pytest into e2e/")
     args = ap.parse_args()
+    if not args.device:
+        # This Mac's iPhone simulator -- a hardcoded UDID exists on one Mac only.
+        from automation.scenarios.cross_app_orchestrator import DEFAULT_CONSUMER_UDID
+        args.device = DEFAULT_CONSUMER_UDID
 
     doc = yaml.safe_load(open(SCENARIO_FILE))
     consumer = doc["apps"]["consumer"]
