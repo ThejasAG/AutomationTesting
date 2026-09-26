@@ -101,6 +101,9 @@ function ProjectHealth({ p }: { p: Project }) {
 
       <HealthCell label="Clone Status" value={<StatusPill status={p.clone_status} />} />
       <HealthCell label="Current Branch" value={<><GitBranch size={12} /> {p.current_branch ?? p.default_branch}</>} />
+      {p.environments?.length > 0 && (
+        <HealthCell label="Environment" value={p.environment ?? 'production (default)'} />
+      )}
       <HealthCell label="Last Pull" value={fmtDate(p.last_pull_at)} />
       <HealthCell
         label="Project Type"
@@ -229,7 +232,13 @@ export default function ProjectsPage() {
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
-  const openCreate = () => { setEditingId(null); setForm(EMPTY_FORM); setShowForm(true); };
+  // Environments of the project being edited (project-environments.json). A new
+  // project has none to offer until it exists and is matched.
+  const [formEnvs, setFormEnvs] = useState<Project['environments']>([]);
+
+  const openCreate = () => {
+    setEditingId(null); setForm(EMPTY_FORM); setFormEnvs([]); setShowForm(true);
+  };
 
   const openEdit = (p: Project) => {
     setEditingId(p.id);
@@ -237,7 +246,9 @@ export default function ProjectsPage() {
       name: p.name, description: p.description ?? '', git_url: p.git_url,
       default_branch: p.default_branch, platform: p.platform, repo_type: p.repo_type,
       group_id: p.group_id,
+      environment: p.environment ?? undefined,
     });
+    setFormEnvs(p.environments ?? []);
     setShowForm(true);
   };
 
@@ -551,6 +562,25 @@ export default function ProjectsPage() {
                 </select>
               </div>
             </div>
+
+            {formEnvs.length > 0 && (
+              <div>
+                <label style={{ display: 'block', marginBottom: 8, color: 'var(--text-secondary)' }}>
+                  Environment
+                  <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> · which backend the app is built against</span>
+                </label>
+                <select value={form.environment ?? ''}
+                  onChange={e => setForm({ ...form, environment: e.target.value || undefined })}
+                  style={inputStyle}>
+                  {!form.environment && <option value="">Not set (builds as production)</option>}
+                  {formEnvs.map(env => (
+                    <option key={env.name} value={env.name}>
+                      {env.name}{env.api_base_url ? ` — ${env.api_base_url}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: 16 }}>
               <div style={{ flex: 1 }}>

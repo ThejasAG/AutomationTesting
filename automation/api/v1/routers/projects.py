@@ -113,6 +113,10 @@ class ProjectCreate(BaseModel):
     # so it can only ever be the production id), which is exactly how a project named
     # "staging" ended up carrying a production artifact.
     app_bundle_id: Optional[str] = None
+    # A name from project-environments.json ("production", "staging"). Resolved to
+    # that environment's bundle id -- the dashboard picks an environment, never
+    # types a bundle id. Wins over app_bundle_id when both are sent.
+    environment: Optional[str] = None
 
 
 class ProjectUpdate(BaseModel):
@@ -125,6 +129,37 @@ class ProjectUpdate(BaseModel):
     repo_type: Optional[str] = None
     group_id: Optional[str] = None
     app_bundle_id: Optional[str] = None   # see ProjectCreate.app_bundle_id
+    environment: Optional[str] = None     # see ProjectCreate.environment
+
+
+def _environment_name(bundle_id: Optional[str]) -> Optional[str]:
+    from automation.projects import environments as envmod
+    return envmod.environment_for_bundle(bundle_id) if bundle_id else None
+
+
+def _environments_for(bundle_id: Optional[str], name: Optional[str]) -> list:
+    """The environments project-environments.json defines for this project."""
+    from automation.projects import environments as envmod
+    entry = envmod.find_project_entry(bundle_id=bundle_id, name=name)
+    envs = (entry or {}).get("environments") or {}
+    return [{"name": n, "bundle_id": e.get("bundle_id"),
+             "api_base_url": e.get("api_base_url")}
+            for n, e in sorted(envs.items())]
+
+
+def _bundle_for_environment(environment: str, bundle_id: Optional[str],
+                            name: Optional[str]) -> str:
+    """The bundle id that makes a project build as *environment*, or 400."""
+    from automation.projects import environments as envmod
+    try:
+        cfg = envmod.resolve(environment, bundle_id=bundle_id, name=name)
+    except envmod.EnvironmentNotConfigured as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not cfg.bundle_id:
+        raise HTTPException(status_code=400, detail=(
+            f"Environment '{cfg.environment}' declares no bundle_id in "
+            "project-environments.json, so it cannot be selected."))
+    return cfg.bundle_id
 
 
 def _validate_enums(platform: Optional[str], repo_type: Optional[str]) -> None:
@@ -224,6 +259,8 @@ def _serialize(p: TestProject, db: Optional[Session] = None) -> Dict[str, Any]:
         "clone_status": clone_status,
         "clone_error": p.clone_error,
         "app_bundle_id": p.app_bundle_id,
+        "environment": _environment_name(p.app_bundle_id),
+        "environments": _environments_for(p.app_bundle_id, p.name),
         "local_path": repo_path,
         "current_branch": repository_manager.get_current_branch(p.id),
         "has_automation_yaml": has_yaml,
@@ -259,6 +296,9 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     than the registration itself appearing to fail.
     """
     _validate_enums(project.platform, project.repo_type)
+    if project.environment:
+        project.app_bundle_id = _bundle_for_environment(
+            project.environment, project.app_bundle_id, project.name)
 
     project_id = str(uuid.uuid4())
     database.insert_test_project(db, {
@@ -300,6 +340,10 @@ def update_project(project_id: str, body: ProjectUpdate, db: Session = Depends(g
     updates = {
         k: v for k, v in raw.items() if v is not None or k == "group_id"
     }
+    environment = updates.pop("environment", None)
+    if environment:
+        updates["app_bundle_id"] = _bundle_for_environment(
+            environment, project.app_bundle_id, updates.get("name", project.name))
 
     # If the remote changed, the local checkout no longer corresponds to it.
     if "git_url" in updates and updates["git_url"] != project.git_url:

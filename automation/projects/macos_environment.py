@@ -207,6 +207,13 @@ def detect_host() -> Dict[str, Optional[str]]:
     else:
         host["iOS SDK"] = None
 
+    # After an Xcode update its system components (CoreDevice, Mercury) install
+    # on first launch. Until then Xcode.app aborts at startup ("quit
+    # unexpectedly") and device tooling is mismatched. Exit status 0 = done.
+    if host.get("Xcode"):
+        ok, _ = _run(["xcodebuild", "-checkFirstLaunchStatus"], timeout=30)
+        host["Xcode First Launch"] = "done" if ok else "pending"
+
     host["Node"] = _version("node", ["--version"])
     host["Yarn"] = _version("yarn", ["--version"])
     host["npm"] = _version("npm", ["--version"])
@@ -303,7 +310,14 @@ def _check_toolchain(host: Dict[str, Optional[str]]) -> List[Check]:
     for tool, cat, fix in (
         ("Node", ENVIRONMENT, "install Node 18+ (nvm, or brew install node)"),
         ("Xcode", XCODE, "install Xcode from the App Store, then xcode-select --install"),
-        ("CocoaPods", COCOAPODS, "sudo gem install cocoapods, or brew install cocoapods"),
+        # Not `brew install cocoapods` on Intel: Homebrew no longer ships Intel
+        # bottles, so it compiles LLVM + Rust + Ruby from source (hours).
+        ("CocoaPods", COCOAPODS,
+         "Apple Silicon: brew install cocoapods. Intel on system Ruby 2.6: "
+         "gem install --user-install zeitwerk -v 2.6.18 i18n -v 1.14.8 "
+         "minitest -v 5.15.0 public_suffix -v 4.0.7 drb -v 2.0.6 "
+         "activesupport -v 6.1.7.10 cocoapods -v 1.15.2, then "
+         "ln -sf ~/.gem/ruby/2.6.0/bin/pod /usr/local/bin/pod"),
     ):
         if host.get(tool):
             checks.append(Check(tool, PASS, str(host[tool]), cat))
@@ -314,6 +328,20 @@ def _check_toolchain(host: Dict[str, Optional[str]]) -> List[Check]:
     checks.append(Check("Yarn", PASS if host.get("Yarn") else WARN,
                         str(host.get("Yarn") or "not found"), ENVIRONMENT,
                         "" if host.get("Yarn") else "corepack enable, or npm i -g yarn"))
+
+    if host.get("Xcode First Launch") == "pending":
+        checks.append(Check(
+            "Xcode first launch", FAIL,
+            "Xcode's system components are not installed for this version "
+            "(Xcode.app quits unexpectedly at launch)", XCODE,
+            "sudo xcodebuild -license accept && sudo xcodebuild -runFirstLaunch"))
+    if host.get("Xcode") and not host.get("iOS SDK"):
+        checks.append(Check(
+            "iOS platform", FAIL,
+            f"Xcode {host['Xcode']} has no iOS Simulator SDK — builds fail with "
+            "'iOS … is not installed'", XCODE,
+            "xcodebuild -downloadPlatform iOS (or Xcode › Settings › Components)"))
+    checks.extend(_check_nvm(host))
 
     if host.get("Architecture") not in ("arm64", "x86_64"):
         checks.append(Check("Architecture", WARN, str(host.get("Architecture")), ENVIRONMENT))
@@ -332,6 +360,45 @@ def _check_toolchain(host: Dict[str, Optional[str]]) -> List[Check]:
         checks.append(Check("xcode-select", PASS, dev, XCODE))
 
     return checks
+
+
+def _nvm_needs_default(home: Optional[str] = None) -> bool:
+    """RN's find-node.sh sources ~/.nvm/nvm.sh and then runs `nvm use default`
+    (no .nvmrc in these apps). An nvm with no default alias makes that exit
+    non-zero, and every React Native script phase -- codegen first -- fails
+    with 'N/A: version "default" is not yet installed'."""
+    home = home or os.path.expanduser("~")
+    nvm = os.path.join(home, ".nvm")
+    return (os.path.isfile(os.path.join(nvm, "nvm.sh"))
+            and not os.path.isfile(os.path.join(nvm, "alias", "default")))
+
+
+def ensure_nvm_default(home: Optional[str] = None) -> Optional[str]:
+    """Point nvm's default at the system Node when nvm has none. Returns a message
+    when it changed something. Creates one file (~/.nvm/alias/default), the same
+    thing `nvm alias default system` writes; an existing default is never touched."""
+    home = home or os.path.expanduser("~")
+    if not _nvm_needs_default(home) or not which("node"):
+        return None
+    alias_dir = os.path.join(home, ".nvm", "alias")
+    try:
+        os.makedirs(alias_dir, exist_ok=True)
+        with open(os.path.join(alias_dir, "default"), "w") as f:
+            f.write("system\n")
+    except OSError as e:
+        logger.warning("could not set nvm default alias: %s", e)
+        return None
+    return ("nvm had no default Node — set `nvm alias default system` so React "
+            "Native's build scripts use the system Node")
+
+
+def _check_nvm(host: Dict[str, Optional[str]]) -> List[Check]:
+    if not _nvm_needs_default():
+        return []
+    return [Check("nvm default", WARN,
+                  "~/.nvm exists with no default alias — React Native build "
+                  "scripts abort on `nvm use default`", ENVIRONMENT,
+                  "nvm alias default system (the platform sets this before building)")]
 
 
 def _check_ruby(repo_path: str, host: Dict[str, Optional[str]]) -> List[Check]:

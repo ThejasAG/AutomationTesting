@@ -234,6 +234,12 @@ def _build_env() -> dict:
     for var in ("LC_ALL", "LANG", "LC_CTYPE"):
         if not env.get(var):
             env[var] = "en_US.UTF-8"
+    # RN's "Start Packager" build phase launches its own Metro on 8081 unless this
+    # is set. That stray server outlives the build, serves whatever the checkout
+    # held at that moment, and catches any app not explicitly pointed elsewhere
+    # ("Could not get BatchedBridge"). The platform starts Metro itself, on the
+    # environment's port, in ensure_metro.
+    env["RCT_NO_LAUNCH_PACKAGER"] = "1"
     return env
 
 
@@ -264,12 +270,18 @@ def _script_phase_context(out: str, limit: int = 25) -> List[str]:
                 or any(n in low for n in
                        ("no such file", "not found", "permission denied",
                         "command failed", "cannot find", "is not defined",
-                        "nonzero exit code", ": line "))):
+                        "nonzero exit code", ": line ",
+                        # RN's find-node.sh runs `nvm use default`; an nvm with
+                        # no default alias aborts every script phase with this.
+                        "is not yet installed", "nvm install"))):
             if s not in keep:
                 keep.append(s)
     return keep[-limit:] if keep else ["(the script produced no recognisable "
                                        "diagnostic — run the build directly to "
                                        "see its full output)"]
+
+
+_ERROR_LABEL = re.compile(r"(^|\s)(fatal )?error:")
 
 
 def _summarize_xcode_errors(out: str) -> str:
@@ -293,7 +305,11 @@ def _summarize_xcode_errors(out: str) -> str:
         w, e = stripped.find("warning:"), stripped.find("error:")
         if w != -1 and (e == -1 or w < e):
             continue
-        if "error:" in stripped and stripped not in errors:
+        # `error:` must be a severity label, not a substring: libc++'s header is
+        # literally named `system_error`, so "In file included from
+        # .../system_error:152:" would otherwise pass as the compiler error and
+        # hide a failed script phase (the branch below) behind a bogus line.
+        if _ERROR_LABEL.search(stripped) and stripped not in errors:
             errors.append(stripped)
         elif stripped.startswith("The following build commands failed"):
             failed_cmds.append(stripped)
@@ -2192,7 +2208,89 @@ class AppBuilder:
                     "26 SDK and the Podfile's post_install had not applied")
         return True
 
+    # Committed files whose content decides what `pod install` produces.
+    _POD_INPUTS = ("ios/Podfile", "ios/Podfile.lock", "Podfile", "Podfile.lock",
+                   "package.json", "yarn.lock", "package-lock.json", "patches")
+    _POD_STAMP = ".platform_pod_inputs"
+
+    def _pod_inputs_fingerprint(self, repo_path: str) -> Optional[str]:
+        """What the Pods were generated from, or None when there is nothing to key on.
+
+        Podfile.lock is keyed by its COMMITTED content: pod install rewrites it
+        (main's committed lock pins AppAuth 1.7.5, the Podfile resolves 1.7.6)
+        and every checkout restores it, so the on-disk file differs on every
+        Execute even though the Pods would come out identical.
+
+        Everything else is keyed by its ON-DISK content: fix_rn_compatibility
+        pins package.json locally (gesture-handler ^2.20.2 -> 2.9.0 for RN 0.68)
+        and reinstalls node_modules. Committed ids cannot see that, and Pods
+        generated for 2.20.2 then point at files 2.9.0 does not have ("Build
+        input file cannot be found: .../react-native-gesture-handler/apple/...").
+        """
+        import hashlib
+        parts = []
+        for rel in self._POD_INPUTS:
+            path = os.path.join(repo_path, rel)
+            if rel.endswith("Podfile.lock"):
+                r = subprocess.run(["git", "-C", repo_path, "rev-parse", f"HEAD:{rel}"],
+                                   capture_output=True, text=True, timeout=10)
+                parts.append(f"{rel}@HEAD="
+                             f"{(r.stdout or '').strip() if r.returncode == 0 else '-'}")
+                continue
+            files = ([os.path.join(path, n) for n in sorted(os.listdir(path))]
+                     if os.path.isdir(path) else [path])
+            h = hashlib.sha256()
+            seen = False
+            for f in files:
+                try:
+                    with open(f, "rb") as fh:
+                        h.update(os.path.basename(f).encode() + b"\0" + fh.read())
+                    seen = True
+                except OSError:
+                    continue
+            parts.append(f"{rel}={h.hexdigest() if seen else '-'}")
+        return "\n".join(parts) if any(not p.endswith("=-") for p in parts) else None
+
     def _pod_install(self, repo_path: str) -> Tuple[bool, str]:
+        """`pod install`, skipped when the Pods were built from the same inputs
+        (see _pod_inputs_fingerprint). The source tweaks that normally ride along with an install are
+        still applied, because a checkout has just reverted them."""
+        repo_path = os.path.abspath(repo_path)
+        fp = self._pod_inputs_fingerprint(repo_path)
+        for pod_dir in (os.path.join(repo_path, "ios"), repo_path):
+            if os.path.exists(os.path.join(pod_dir, "Podfile")):
+                break
+        else:
+            return self._pod_install_uncached(repo_path)
+        stamp = os.path.join(pod_dir, "Pods", self._POD_STAMP)
+        manifest = os.path.join(pod_dir, "Pods", "Manifest.lock")
+        try:
+            stamped = open(stamp).read() if os.path.isfile(stamp) else None
+        except OSError:
+            stamped = None
+        if (fp and stamped == fp and os.path.isfile(manifest)
+                and os.path.isdir(os.path.join(pod_dir, "Pods", "Pods.xcodeproj"))):
+            # Xcode's '[CP] Check Pods Manifest.lock' phase requires the two to be
+            # identical; the checkout restored the committed lock, so re-sync it
+            # locally (a tracked file, reverted by the next checkout -- never pushed).
+            shutil.copyfile(manifest, os.path.join(pod_dir, "Podfile.lock"))
+            self._silence_logbox(repo_path)
+            self._expose_table_sheet(repo_path)
+            self._expose_assign_table_sheet(repo_path)
+            logger.info("Pods unchanged since last install (same inputs) "
+                        "— skipping pod install")
+            return True, self._verify_pods(pod_dir, "Pods already installed (same inputs).")
+
+        ok, out = self._pod_install_uncached(repo_path)
+        if ok and fp:
+            try:
+                with open(stamp, "w") as f:
+                    f.write(fp)
+            except OSError as e:
+                logger.warning("could not record pod inputs: %s", e)
+        return ok, out
+
+    def _pod_install_uncached(self, repo_path: str) -> Tuple[bool, str]:
         """Run `pod install` in whichever directory actually holds the Podfile.
 
         For React Native this is ios/, NOT the repository root.
@@ -2378,6 +2476,12 @@ class AppBuilder:
         for warning in self.removed_framework_users(repo_path):
             logger.warning("[removed framework] %s", warning)
 
+        # RN's script phases run `nvm use default`; an nvm without one fails them.
+        from automation.projects.macos_environment import ensure_nvm_default
+        nvm_msg = ensure_nvm_default()
+        if nvm_msg:
+            logger.info(nvm_msg)
+
         # CocoaPods must be resolved before the workspace will build.
         ok, out = self._pod_install(repo_path)
         if not ok:
@@ -2420,9 +2524,22 @@ class AppBuilder:
             # commit builds prod or staging depending only on the bundle-id override,
             # so reusing on HEAD alone hands back a prod .app for a staging request --
             # which is exactly the silent mismatch that failed the staging preflight.
-            if (existing and cur_head and built_head == cur_head
+            # JS-only reuse needs a Debug build: Release embeds the JS bundle.
+            same_native = (built_head == cur_head) or (
+                configuration.lower() == "debug"
+                and self._only_js_changed(repo_path, built_head, cur_head))
+            if (existing and cur_head and built_head and same_native
                     and (not bundle_id or existing_bid == bundle_id)):
-                logger.info(f"Reusing iOS build (HEAD unchanged @ {cur_head[:8]})")
+                if built_head == cur_head:
+                    logger.info(f"Reusing iOS build (HEAD unchanged @ {cur_head[:8]})")
+                else:
+                    logger.info(f"Reusing iOS build: {built_head[:8]} → {cur_head[:8]} "
+                                f"changes JavaScript only; Metro serves it")
+                # A Debug app reads its JS from Metro at run time, so the
+                # environment's JS edits (staging API host) must be on disk even
+                # though nothing is compiled.
+                with self._env_source_edits(repo_path, env_config):
+                    pass
                 return BuildResult(
                     ok=True, artifact_path=existing, bundle_id=existing_bid
                 )
@@ -2700,6 +2817,34 @@ class AppBuilder:
             return False, f"Could not read the artifact executable: {e}"
 
         return True, "Artifact validated."
+
+    # Anything here changes the compiled binary; everything else in a React
+    # Native checkout is JavaScript/assets that a Debug app fetches from Metro.
+    _NATIVE_PREFIXES = ("ios/", "android/", "patches/")
+    _NATIVE_FILES = ("package.json", "yarn.lock", "package-lock.json",
+                     ".yarnrc.yml", "app.json", "react-native.config.js")
+
+    def _only_js_changed(self, repo_path: str, old: Optional[str],
+                         new: Optional[str]) -> bool:
+        """True when old..new touches no native input, so the built .app still fits.
+
+        Switching to an already-built branch used to recompile the whole app
+        (15+ min on Intel) even when the branches differ only in JS. Anything
+        uncertain -- unknown commit, git error, a Release build that embeds its
+        JS -- answers False and rebuilds.
+        """
+        if not old or not new or old == new:
+            return False
+        r = subprocess.run(["git", "-C", repo_path, "diff", "--name-only", old, new],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return False
+        for path in filter(None, r.stdout.splitlines()):
+            if (path.startswith(self._NATIVE_PREFIXES)
+                    or os.path.basename(path) in self._NATIVE_FILES
+                    or path.endswith(".podspec")):
+                return False
+        return True
 
     def _git_head(self, repo_path: str) -> Optional[str]:
         """Current git commit SHA of the checkout, or None if not a git repo."""

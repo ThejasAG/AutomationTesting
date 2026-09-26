@@ -411,6 +411,89 @@ class ProjectPreparationService:
             f"Patches: {applied} applied, {skipped} not applicable, {failed} failed")
         return messages
 
+    _QR_CSS_IMPORT = 'import { LocalSvg } from "react-native-svg/css";'
+    _QR_CSS_STUB = ('// platform: react-native-svg < 13 has no /css entry; LocalSvg '
+                    '(local-asset logos only) renders nothing.\n'
+                    'const LocalSvg = () => null;')
+
+    def _fix_qrcode_svg_css_import(self, repo_path: str) -> List[str]:
+        """Let Metro bundle react-native-qrcode-svg >= 6.3 against react-native-svg 12.
+
+        vya-consumer's own lockfile pairs qrcode-svg 6.3.12 (peer: svg >= 13.2)
+        with svg 12.5.1. qrcode-svg's LogoSVG imports `react-native-svg/css`,
+        which svg 12 does not ship, and Metro fails the WHOLE bundle on an
+        unresolvable import -- a red "Failed to compile" screen at launch, even
+        though the app never passes `logoSVG` and so never renders LocalSvg.
+        Only applied while the installed svg lacks the entry; node_modules only.
+        """
+        nm = os.path.join(repo_path, "node_modules")
+        logo = os.path.join(nm, "react-native-qrcode-svg", "src", "LogoSVG",
+                            "index.native.js")
+        if not os.path.isfile(logo) or os.path.exists(
+                os.path.join(nm, "react-native-svg", "css")):
+            return []
+        try:
+            with open(logo, encoding="utf-8") as fh:
+                src = fh.read()
+            if self._QR_CSS_IMPORT not in src:
+                return []
+            with open(logo, "w", encoding="utf-8") as fh:
+                fh.write(src.replace(self._QR_CSS_IMPORT, self._QR_CSS_STUB))
+        except OSError as e:
+            return [f"Toolchain fix FAILED on react-native-qrcode-svg LogoSVG: {e}"]
+        return ["Toolchain fix applied — react-native-qrcode-svg imports "
+                "react-native-svg/css, which the installed react-native-svg "
+                "does not have; stubbed LocalSvg so Metro can bundle"]
+
+    # `operator"" _pt` -> `operator""_pt`. Identical meaning; only the spelling
+    # newer clang accepts.
+    _LITERAL_OP_SPACE = re.compile(r'operator""\s+(_\w+)')
+
+    def apply_toolchain_fixes(self, repo_path: str) -> List[str]:
+        """Rewrite React Native source that the current Xcode refuses to compile.
+
+        WHY
+            RN <= 0.70's Yoga declares `operator"" _pt` (space before the
+            suffix). Xcode 26's clang warns -Wdeprecated-literal-operator on it,
+            and Yoga.podspec compiles with -Werror, so a spelling warning fails
+            the whole build. Other pods (Folly, boost, fmt) carry the same
+            spelling but do not use -Werror, so they only warn.
+
+        SAFE BY CONSTRUCTION
+            Same guarantee as apply_patch_package: only node_modules (generated,
+            gitignored) is edited, never the application's tracked files, and the
+            rewrite is token-for-token equivalent C++. Idempotent — a re-run finds
+            nothing to change.
+        """
+        messages: List[str] = self._fix_qrcode_svg_css_import(repo_path)
+        yoga_dir = os.path.join(repo_path, "node_modules", "react-native",
+                                "ReactCommon", "yoga")
+        if not os.path.isdir(yoga_dir):
+            return messages
+
+        for root, _dirs, files in os.walk(yoga_dir):
+            for fname in files:
+                if not fname.endswith((".h", ".hpp", ".cpp")):
+                    continue
+                path = os.path.join(root, fname)
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        src = fh.read()
+                    fixed, n = self._LITERAL_OP_SPACE.subn(r'operator""\1', src)
+                    if not n:
+                        continue
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(fixed)
+                except (OSError, UnicodeDecodeError) as e:
+                    messages.append(f"Toolchain fix FAILED on "
+                                    f"{os.path.relpath(path, repo_path)}: {e}")
+                    continue
+                messages.append(
+                    f"Toolchain fix applied — {os.path.relpath(path, repo_path)}: "
+                    f"{n} literal operator(s) respelled for Xcode 26 clang "
+                    f"(-Wdeprecated-literal-operator under Yoga's -Werror)")
+        return messages
+
     def _install_node_deps(
         self, project_id: str, repo_path: str, stage=None
     ) -> "tuple[bool, Optional[str]]":
@@ -730,6 +813,9 @@ class ProjectPreparationService:
         if project_type == ProjectType.REACT_NATIVE and deps_ok:
             for msg in self.apply_patch_package(repo_path):
                 step(msg)
+            # Old RN source that the current clang rejects — node_modules only.
+            for msg in self.apply_toolchain_fixes(repo_path):
+                step(msg)
 
         # 7b. Platform-injected dependencies: always reported, including "0".
         if project_type == ProjectType.REACT_NATIVE:
@@ -890,6 +976,20 @@ class ProjectPreparationService:
         # call build_ios would make — so pod timing/size is attributable instead
         # of hidden inside the build stage. `pod install` only; never pod update.
         if platform == "ios" and setup_report is not None:
+            # Pin RN-incompatible native modules BEFORE pods, not inside the build:
+            # pods installed first are generated for the unpinned versions, and
+            # the pin then swaps node_modules out from under them. build_ios runs
+            # it again and finds nothing left to do.
+            from automation.projects.macos_environment import ensure_nvm_default
+            nvm_msg = ensure_nvm_default()
+            if nvm_msg:
+                step(nvm_msg)
+            try:
+                for fixed in app_builder.fix_rn_compatibility(repo_path).get("fixed", []):
+                    step(f"React Native compatibility: {fixed}")
+            except Exception as e:
+                logger.warning("[%s] compatibility pinning failed early: %s",
+                               project_id, e)
             pods_stage = setup_report.stage("pods", "CocoaPods")
             pods_ok = measure.measure_pods(
                 pods_stage, repo_path, lambda: app_builder._pod_install(repo_path))
@@ -997,7 +1097,14 @@ class ProjectPreparationService:
         # A Debug React Native build loads its JS from Metro at launch. Start it
         # BEFORE launching, or the app comes up on a red error screen and Appium
         # would attach to a dead app.
-        metro_ok, metro_msg = app_builder.ensure_metro(repo_path)
+        # On the environment's port, with the app pointed at it: staging's Metro is
+        # 8084, and an app without RCT_jsLocation asks 8081 -- where it got a
+        # stale bundle from a build-spawned packager and died on launch.
+        metro_ok, metro_msg = app_builder.ensure_metro(
+            repo_path,
+            port=getattr(env_config, "metro_port", None),
+            udid=device_id if platform == "ios" else None,
+            bundle_id=result.bundle_id)
         step(f"Metro: {metro_msg}")
         if not metro_ok:
             # Not fatal — a native (non-JS) app does not need Metro at all, and a

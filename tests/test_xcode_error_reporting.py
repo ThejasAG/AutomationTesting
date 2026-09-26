@@ -104,3 +104,20 @@ def test_08_a_warning_that_mentions_error_is_not_an_error():
     out = _summarize_xcode_errors(log)
     assert "the real one" in out
     assert "inside a warning" not in out
+
+
+def test_09_libcxx_system_error_include_is_not_the_error():
+    # libc++'s header is named `system_error`, so its include-trace line
+    # contains "error:". Counted as the error, it hid the failed codegen script
+    # (nvm with no default alias) behind a meaningless line.
+    log = _noisy(
+        "In file included from /sdk/usr/include/c++/v1/system_error:152:\n"
+        "N/A: version \"default\" is not yet installed.\n"
+        "You need to run `nvm install default` to install and use it.\n"
+        "Command PhaseScriptExecution failed with a nonzero exit code\n"
+        "The following build commands failed:\n"
+        "\tPhaseScriptExecution [CP-User]\\ Generate\\ Specs /p/Script-1.sh\n")
+    out = _summarize_xcode_errors(log)
+    assert "system_error:152" not in out
+    assert "Generate\\ Specs" in out
+    assert "is not yet installed" in out

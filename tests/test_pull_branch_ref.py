@@ -14,6 +14,12 @@ Two things made that hard to see, and both are fixed here:
   - `pull --rebase origin <name>` lets git interpret <name> loosely
   - the error was truncated to its first 400 characters, and git prints its
     "fatal:" line LAST, so the decisive part was the part being cut
+
+It kept recurring because the real trigger was a race: `git pull` rebases onto
+whatever .git/FETCH_HEAD lists, and the dashboard's outdated check fetched
+concurrently into the same file. The pull is now fetch (into
+refs/remotes/origin/<branch>, without writing FETCH_HEAD) + rebase onto that
+named ref, so no other fetch can change what it rebases onto.
 """
 import pytest
 
@@ -44,20 +50,27 @@ def spy(tmp_path, monkeypatch):
 
 
 def _pull_argv(calls):
-    return next((c for c in calls if "pull" in c), None)
+    """The fetch that a pull runs, identified by its explicit refspec."""
+    return next((c for c in calls if "fetch" in c and "--no-write-fetch-head" in c
+                 and ":" in c[-1]), None)
+
+
+def _rebase_argv(calls):
+    return next((c for c in calls if "rebase" in c), None)
 
 
 def test_01_the_branch_is_fully_qualified(spy):
     rm.pull("proj", "preprod-2-May18")
     argv = _pull_argv(spy)
     assert argv is not None, spy
-    assert argv[-1] == "refs/heads/preprod-2-May18", argv
-    assert "preprod-2-May18" != argv[-1], "the bare name is ambiguous with a tag"
+    assert argv[-1] == ("+refs/heads/preprod-2-May18:"
+                        "refs/remotes/origin/preprod-2-May18"), argv
+    assert _rebase_argv(spy)[-1] == "refs/remotes/origin/preprod-2-May18"
 
 
 def test_02_surrounding_whitespace_is_stripped(spy):
     rm.pull("proj", "  preprod-2-May18  ")
-    assert _pull_argv(spy)[-1] == "refs/heads/preprod-2-May18"
+    assert _rebase_argv(spy)[-1] == "refs/remotes/origin/preprod-2-May18"
 
 
 @pytest.mark.parametrize("bad", ["main master", "a\nb", "", "   ", "x\ty"])
@@ -73,8 +86,8 @@ def test_04_autostash_is_still_applied(spy):
     """_reset_worktree deliberately keeps ios/Podfile.lock modified; rebase
     refuses to start with unstaged changes without this."""
     rm.pull("proj", "main")
-    argv = _pull_argv(spy)
-    assert "rebase.autoStash=true" in argv and "--rebase" in argv
+    argv = _rebase_argv(spy)
+    assert "rebase.autoStash=true" in argv, argv
 
 
 def test_05_the_error_keeps_gits_fatal_line(tmp_path, monkeypatch):
@@ -84,7 +97,7 @@ def test_05_the_error_keeps_gits_fatal_line(tmp_path, monkeypatch):
     stderr = f"From https://example.com/repo\n{long_fetch}\nfatal: Cannot rebase onto multiple branches."
 
     def _fake(args, cwd=None, **kw):
-        if "pull" in args:
+        if "rebase" in args and "--abort" not in args:
             return _Res(1, "", stderr)
         return _Res(0)
 
@@ -99,3 +112,10 @@ def test_05_the_error_keeps_gits_fatal_line(tmp_path, monkeypatch):
         rm.pull("proj", "main")
     assert "fatal: Cannot rebase onto multiple branches." in str(e.value), \
         "the decisive line was truncated away"
+
+
+def test_06_never_depends_on_fetch_head(spy):
+    """The concurrent outdated-check fetch rewrites FETCH_HEAD; pull must not read it."""
+    rm.pull("proj", "main")
+    assert not any("pull" in c for c in spy), "git pull reads FETCH_HEAD"
+    assert "FETCH_HEAD" not in " ".join(" ".join(c) for c in spy)

@@ -553,6 +553,10 @@ export interface Project {
     clone_error: string | null;
     /** Detected from the built app's Info.plist. Null until the project is built. */
     app_bundle_id: string | null;
+    /** Which project-environments.json environment the bundle id builds as. */
+    environment: string | null;
+    /** Environments this project can be built as (empty = not configured). */
+    environments: { name: string; bundle_id: string | null; api_base_url: string | null }[];
     local_path: string;
     current_branch: string | null;
     has_automation_yaml: boolean;
@@ -569,6 +573,8 @@ export interface ProjectInput {
     platform?: ProjectPlatform;
     repo_type?: RepoType;
     group_id?: string | null;
+    /** Environment name to build as, e.g. "staging". */
+    environment?: string;
 }
 
 // ── Application Groups ───────────────────────────────────────────────────────

@@ -389,11 +389,21 @@ class RepositoryManager:
             if not ref or len(ref.split()) != 1:
                 raise RuntimeError(
                     f"refusing to pull: branch name is not a single ref ({branch!r})")
+            # fetch + rebase onto the NAMED remote-tracking ref, not `git pull`.
+            # pull rebases onto whatever .git/FETCH_HEAD lists, and the dashboard's
+            # outdated check runs its own fetch concurrently; when the two overlap
+            # FETCH_HEAD holds several refs and git fails with "Cannot rebase onto
+            # multiple branches" -- intermittently, whatever the branch name.
             res = self._run_git(
-                ["-c", "rebase.autoStash=true", "pull", "--rebase", "origin",
-                 f"refs/heads/{ref}"],
+                ["fetch", "--no-write-fetch-head", "origin",
+                 f"+refs/heads/{ref}:refs/remotes/origin/{ref}"],
                 cwd=repo_path,
             )
+            if res.returncode == 0:
+                res = self._run_git(
+                    ["-c", "rebase.autoStash=true", "rebase", f"refs/remotes/origin/{ref}"],
+                    cwd=repo_path,
+                )
             if res.returncode != 0:
                 # Never leave the repo mid-rebase — that breaks every later run with a
                 # confusing state rather than a clear error.
@@ -406,7 +416,7 @@ class RepositoryManager:
                 # whether a rebase failure was onto one branch or several, which is
                 # the difference between a bad branch name and a bad refspec.
                 logger.error("Pull (rebase) failed in %s\n"
-                             "  command: git pull --rebase origin %r\n"
+                             "  command: git fetch + rebase origin/%r\n"
                              "  stdout: %s\n  stderr: %s",
                              repo_path, branch, res.stdout, res.stderr)
                 detail = res.stderr.strip()
@@ -449,7 +459,10 @@ class RepositoryManager:
         repo_path = self.get_repo_path(project_id)
 
         # A fetch is required for the remote ref to be up to date.
-        fetch = self._run_git(["fetch", "origin", branch], cwd=repo_path)
+        # --no-write-fetch-head: this runs from dashboard polling, concurrently with
+        # pull(); writing FETCH_HEAD here is what broke pull's rebase.
+        fetch = self._run_git(["fetch", "--no-write-fetch-head", "origin", branch],
+                              cwd=repo_path)
         if fetch.returncode != 0:
             # Offline / no remote access — cannot tell, assume up to date.
             return False

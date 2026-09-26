@@ -203,8 +203,10 @@ def test_14_pods_already_installed_is_still_verified(ios):
 def test_15_the_skip_path_is_wired_to_the_check(ios):
     """Structural: the early return must not go back to a bare string."""
     import inspect
-    src = inspect.getsource(app_builder._pod_install)
-    i = src.index("Pods already installed.")
-    line = src[src.rindex("\n", 0, i):i + 40]
-    assert "_verify_pods" in line, \
-        "the 'already installed' path returns without verifying the pod tree"
+    # Both skip paths: the cached one (same inputs) and the on-disk one.
+    for fn in (app_builder._pod_install, app_builder._pod_install_uncached):
+        src = inspect.getsource(fn)
+        i = src.index("Pods already installed")
+        line = src[src.rindex("\n", 0, i):i + 40]
+        assert "_verify_pods" in line, \
+            f"{fn.__name__}: 'already installed' returns without verifying the pod tree"
