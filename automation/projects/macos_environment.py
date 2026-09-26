@@ -334,13 +334,15 @@ def _check_toolchain(host: Dict[str, Optional[str]]) -> List[Check]:
             "Xcode first launch", FAIL,
             "Xcode's system components are not installed for this version "
             "(Xcode.app quits unexpectedly at launch)", XCODE,
+            "automatic on Prepare (asks for an admin password on this Mac), or: "
             "sudo xcodebuild -license accept && sudo xcodebuild -runFirstLaunch"))
     if host.get("Xcode") and not host.get("iOS SDK"):
         checks.append(Check(
             "iOS platform", FAIL,
             f"Xcode {host['Xcode']} has no iOS Simulator SDK — builds fail with "
             "'iOS … is not installed'", XCODE,
-            "xcodebuild -downloadPlatform iOS (or Xcode › Settings › Components)"))
+            "automatic on Prepare (xcodebuild -downloadPlatform iOS), or "
+            "Xcode › Settings › Components"))
     checks.extend(_check_nvm(host))
 
     if host.get("Architecture") not in ("arm64", "x86_64"):
@@ -398,7 +400,7 @@ def _check_nvm(host: Dict[str, Optional[str]]) -> List[Check]:
     return [Check("nvm default", WARN,
                   "~/.nvm exists with no default alias — React Native build "
                   "scripts abort on `nvm use default`", ENVIRONMENT,
-                  "nvm alias default system (the platform sets this before building)")]
+                  "automatic: machine_setup sets `nvm alias default system` before building")]
 
 
 def _check_ruby(repo_path: str, host: Dict[str, Optional[str]]) -> List[Check]:

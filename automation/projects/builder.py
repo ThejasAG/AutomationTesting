@@ -240,6 +240,15 @@ def _build_env() -> dict:
     # ("Could not get BatchedBridge"). The platform starts Metro itself, on the
     # environment's port, in ensure_metro.
     env["RCT_NO_LAUNCH_PACKAGER"] = "1"
+    # Tools the platform installs for itself (machine_setup) and the usual
+    # install prefixes -- a daemon launched outside a login shell often has a
+    # PATH without them, and then `pod` "is not installed" when it is.
+    import glob as _glob
+    extra = sorted(_glob.glob(os.path.expanduser("~/.gem/ruby/*/bin"))) + [
+        "/opt/homebrew/bin", "/usr/local/bin"]
+    parts = env.get("PATH", "").split(os.pathsep)
+    env["PATH"] = os.pathsep.join(
+        [d for d in extra if os.path.isdir(d) and d not in parts] + parts)
     return env
 
 

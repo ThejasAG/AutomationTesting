@@ -957,6 +957,16 @@ class ProjectPreparationService:
         # Read-only and non-fatal: it never blocks a build, because a check that
         # can veto is a check that gets bypassed. A genuine blocker still has to
         # come from the build itself.
+        # Fix the machine itself first (Xcode first-launch, iOS platform,
+        # CocoaPods, nvm) so a new Mac needs no hand-run commands. A no-op on a
+        # ready machine.
+        if platform == "ios":
+            try:
+                from automation.projects.machine_setup import auto_setup
+                auto_setup(step)
+            except Exception as e:
+                logger.warning("machine setup failed to run: %s", e)
+
         if platform == "ios":
             try:
                 from automation.projects.macos_environment import doctor
