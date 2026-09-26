@@ -86,3 +86,26 @@ def test_qrcode_left_alone_when_svg_ships_css(tmp_path):
     path = _qr(str(tmp_path), svg_has_css=True)
     assert preparation_service.apply_toolchain_fixes(str(tmp_path)) == []
     assert open(path).read() == QR_LOGO
+
+
+QR_BYTE_DATA = (
+    "function ByteData (data) {\n"
+    "  if (typeof (data) === 'string') {\n"
+    "    this.data = new TextEncoder().encode(data)\n"
+    "  }\n"
+    "}\n")
+
+
+def test_qrcode_textencoder_gets_a_utf8_fallback(tmp_path):
+    # qrcode 1.5.4 (nested under react-native-qrcode-svg 6.1.2) calls TextEncoder,
+    # which RN 0.68 lacks: the booking card's QR threw and blanked the screen.
+    d = tmp_path / "node_modules" / "react-native-qrcode-svg" / "node_modules" / "qrcode" / "lib" / "core"
+    d.mkdir(parents=True)
+    f = d / "byte-data.js"
+    f.write_text(QR_BYTE_DATA)
+    msgs = preparation_service.apply_toolchain_fixes(str(tmp_path))
+    src = f.read_text()
+    assert "typeof TextEncoder !== 'undefined'" in src
+    assert "encodeURIComponent" in src
+    assert any("TextEncoder" in m for m in msgs)
+    assert preparation_service.apply_toolchain_fixes(str(tmp_path)) == [], "idempotent"

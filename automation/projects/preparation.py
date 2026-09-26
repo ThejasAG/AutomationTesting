@@ -445,6 +445,43 @@ class ProjectPreparationService:
                 "react-native-svg/css, which the installed react-native-svg "
                 "does not have; stubbed LocalSvg so Metro can bundle"]
 
+    _QR_TEXTENCODER = "this.data = new TextEncoder().encode(data)"
+    # UTF-8 without TextEncoder: what qrcode <= 1.5.3 did via encode-utf8.
+    _QR_UTF8 = (
+        "this.data = typeof TextEncoder !== 'undefined'\n"
+        "      ? new TextEncoder().encode(data)\n"
+        "      // platform: RN 0.68's JavaScriptCore has no TextEncoder\n"
+        "      : new Uint8Array(unescape(encodeURIComponent(data)).split('')"
+        ".map(function (c) { return c.charCodeAt(0) }))")
+
+    def _fix_qrcode_textencoder(self, repo_path: str) -> List[str]:
+        """Let qrcode >= 1.5.4 encode text on React Native's JavaScriptCore.
+
+        qrcode 1.5.4 replaced its UTF-8 helper with `new TextEncoder()`, which RN
+        0.68 does not provide. react-native-qrcode-svg 6.1.2 (the RN-0.68
+        compatible version the platform pins) resolves a nested qrcode 1.5.4, so
+        every QR code -- the booking card's -- threw "Can't find variable:
+        TextEncoder" and blanked the screen. Any copy, top-level or nested.
+        """
+        import glob as _glob
+        out: List[str] = []
+        nm = os.path.join(repo_path, "node_modules")
+        for path in _glob.glob(os.path.join(nm, "**", "qrcode", "lib", "core",
+                                            "byte-data.js"), recursive=True):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    src = fh.read()
+                if self._QR_TEXTENCODER not in src or "platform: RN 0.68" in src:
+                    continue
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(src.replace(self._QR_TEXTENCODER, self._QR_UTF8))
+            except OSError as e:
+                out.append(f"Toolchain fix FAILED on {os.path.relpath(path, repo_path)}: {e}")
+                continue
+            out.append(f"Toolchain fix applied — {os.path.relpath(path, repo_path)}: "
+                       "UTF-8 fallback for TextEncoder (missing on RN 0.68)")
+        return out
+
     # `operator"" _pt` -> `operator""_pt`. Identical meaning; only the spelling
     # newer clang accepts.
     _LITERAL_OP_SPACE = re.compile(r'operator""\s+(_\w+)')
@@ -466,6 +503,7 @@ class ProjectPreparationService:
             nothing to change.
         """
         messages: List[str] = self._fix_qrcode_svg_css_import(repo_path)
+        messages += self._fix_qrcode_textencoder(repo_path)
         yoga_dir = os.path.join(repo_path, "node_modules", "react-native",
                                 "ReactCommon", "yoga")
         if not os.path.isdir(yoga_dir):
