@@ -61,7 +61,10 @@ picked = []
 try:
     sys.path.insert(0, os.getcwd())
     from automation.scenarios.cross_app_config import load_config
-    picked = sorted(set(load_config()["devices"].values()))
+    here = {u for _n, u, _s in devices}
+    # Only ids that exist HERE: load_config falls back to foreign defaults when
+    # it cannot match, and a non-empty `picked` would skip every fallback below.
+    picked = sorted(set(load_config()["devices"].values()) & here)
 except Exception:
     picked = []
 

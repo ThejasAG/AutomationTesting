@@ -125,7 +125,7 @@ def _business_metro_target(bundle: str):
     if "consumer" in (bundle or ""):
         # The consumer app goes through here too (ensure_app_metro): a device that
         # never ran it has no RCT_jsLocation and shows "No bundle URL present".
-        fallback = (8084 if staging else 8081, CONSUMER_PROJECT_ID)
+        fallback = (app_builder.metro_port_for(bundle), CONSUMER_PROJECT_ID)
     else:
         fallback = ((BUSINESS_STAGING_METRO_PORT, BUSINESS_STAGING_PROJECT_ID)
                     if staging else (BUSINESS_METRO_PORT, BUSINESS_PROJECT_ID))
@@ -186,13 +186,14 @@ def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
     # half hour (mediaanalysisd at 500%+ CPU on Intel), and `simctl spawn` then
     # took >15s -- the write was skipped and the app kept "No bundle URL". An
     # unreadable current value is treated as "not set", never as a reason to skip.
+    read_failed = False
     try:
         cur = subprocess.run(
             ["xcrun", "simctl", "spawn", udid, "defaults", "read", bundle,
              "RCT_jsLocation"], capture_output=True, text=True, timeout=90,
         ).stdout.strip()
     except Exception:
-        cur = ""
+        cur, read_failed = "", True
     try:
         if cur != want:
             subprocess.run(
@@ -204,8 +205,11 @@ def ensure_business_metro(udid: str, bundle: str = BUSINESS_BUNDLE) -> bool:
             # (deployment launches it) keeps its red "No bundle URL" screen, and
             # activate_app only brings that instance forward -- so end it and let
             # the session start a fresh one that reads the new location.
-            subprocess.run(["xcrun", "simctl", "terminate", udid, bundle],
-                           capture_output=True, timeout=60)
+            # Not when the read failed: the value may already have been right,
+            # and killing the app then gains nothing and can break a session.
+            if not read_failed:
+                subprocess.run(["xcrun", "simctl", "terminate", udid, bundle],
+                               capture_output=True, timeout=60)
     except Exception as e:
         logger.warning("Could not set RCT_jsLocation for %s: %s", bundle, e)
     try:

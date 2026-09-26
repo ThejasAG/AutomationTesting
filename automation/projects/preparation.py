@@ -1033,8 +1033,14 @@ class ProjectPreparationService:
             if nvm_msg:
                 step(nvm_msg)
             try:
-                for fixed in app_builder.fix_rn_compatibility(repo_path).get("fixed", []):
+                fixed_now = app_builder.fix_rn_compatibility(repo_path).get("fixed", [])
+                for fixed in fixed_now:
                     step(f"React Native compatibility: {fixed}")
+                if fixed_now:
+                    # build_ios will find nothing left to fix and so no longer
+                    # restarts Metro; a packager started against the old tree
+                    # would keep serving the replaced modules. Same kill it did.
+                    app_builder._kill_metro_for_repo(repo_path)
             except Exception as e:
                 logger.warning("[%s] compatibility pinning failed early: %s",
                                project_id, e)

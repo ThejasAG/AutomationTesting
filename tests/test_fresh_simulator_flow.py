@@ -66,3 +66,35 @@ def test_consumer_sign_in_types_through_verified_fill():
     src = inspect.getsource(F.FlowRunner._sign_in_consumer)
     assert "_fill_field(" in src, "raw send_keys dropped characters on a busy sim"
     assert "still on the sign-in screen" in src, "must not claim success blindly"
+
+
+def test_empty_screen_read_is_not_a_successful_sign_in():
+    src = inspect.getsource(F.FlowRunner._sign_in_consumer)
+    assert "self._idb_els() and not self._looks_signed_out()" in src
+
+
+def test_metro_setup_never_runs_under_a_live_consumer_session():
+    src = inspect.getsource(F.FlowRunner._session_for)
+    assert "udid not in self._sessions" in src.split("ensure_app_metro")[0]
+
+
+def test_failed_location_read_does_not_kill_the_app():
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        if "read" in cmd:
+            raise TimeoutError("busy simulator")
+        return type("R", (), {"stdout": "", "returncode": 0})()
+    with patch.object(O.subprocess, "run", run), \
+         patch.object(O.httpx, "get", lambda *a, **k: type("r", (), {"status_code": 200})()), \
+         patch.object(O, "_business_metro_target", lambda b: (8084, "p")):
+        O.ensure_app_metro("UDID", "org.vyapy.sarls.vyaconsumerstaging")
+    assert any("write" in c for c in calls)
+    assert not any("terminate" in c for c in calls)
+
+
+def test_prepare_pin_restarts_metro():
+    from automation.projects import preparation
+    src = inspect.getsource(preparation.ProjectPreparationService._build_and_install)
+    assert "_kill_metro_for_repo" in src

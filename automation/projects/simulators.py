@@ -6,8 +6,9 @@ WebDriverAgent built by Xcode 26.5 dies on an iOS 18.1 simulator ("built for
 iOS-sim 26.5 which is newer than running OS" / "Failed to load the test
 bundle") and every run fails at session start with ECONNREFUSED :8100.
 
-The rule used everywhere a simulator is picked: prefer simulators whose iOS
-major is at least the installed Xcode's iOS SDK major. When none exist the full
+The rule used everywhere a simulator is picked: with Xcode 26 or later, prefer
+simulators on iOS 26 or later. Older Xcodes drive older runtimes, so there the
+rule does nothing. When none exist the full
 list is returned unchanged -- this must never turn a working pick into none.
 """
 from __future__ import annotations
@@ -16,7 +17,6 @@ import json
 import logging
 import re
 import subprocess
-from functools import lru_cache
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -29,15 +29,26 @@ def _major(version: str) -> int:
         return 0
 
 
-@lru_cache(maxsize=1)
+_SDK_MAJOR: Optional[int] = None
+
+
 def sdk_major() -> int:
-    """Major version of the newest iOS Simulator SDK in the selected Xcode (0 if unknown)."""
+    """Major version of the newest iOS Simulator SDK in the selected Xcode (0 if unknown).
+
+    Cached once known; "unknown" is NOT cached, because machine_setup may install
+    the iOS platform later in the same process."""
+    global _SDK_MAJOR
+    if _SDK_MAJOR:
+        return _SDK_MAJOR
     try:
         out = subprocess.run(["xcodebuild", "-showsdks"], capture_output=True,
                              text=True, timeout=60).stdout
     except Exception:
         return 0
-    return max((_major(v) for v in re.findall(r"iphonesimulator([\d.]+)", out)), default=0)
+    found = max((_major(v) for v in re.findall(r"iphonesimulator([\d.]+)", out)), default=0)
+    if found:
+        _SDK_MAJOR = found
+    return found
 
 
 def list_sims() -> List[Dict[str, str]]:
@@ -60,9 +71,17 @@ def list_sims() -> List[Dict[str, str]]:
     return sims
 
 
+# The first Xcode whose XCTest cannot load on older simulator runtimes (it links
+# _LocationEssentials, which only iOS 26+ runtimes ship). Earlier Xcodes drive
+# older runtimes fine, so the rule must not fire there.
+XCTEST_NEEDS_SAME_MAJOR_FROM = 26
+
+
 def is_testable(sim: Dict[str, str], sdk: Optional[int] = None) -> bool:
     sdk = sdk_major() if sdk is None else sdk
-    return not sdk or _major(sim.get("ios", "")) >= sdk
+    if sdk < XCTEST_NEEDS_SAME_MAJOR_FROM:
+        return True
+    return _major(sim.get("ios", "")) >= XCTEST_NEEDS_SAME_MAJOR_FROM
 
 
 def testable(sims: List[Dict[str, str]], sdk: Optional[int] = None) -> List[Dict[str, str]]:

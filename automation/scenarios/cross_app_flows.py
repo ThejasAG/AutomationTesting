@@ -614,7 +614,9 @@ class FlowRunner:
         if role == "consumer":
             udid, bundle, wda = (self.devices.get("consumer") or DEFAULT_CONSUMER_UDID,
                                  self.consumer_bundle, 8100)
-            if not self._con_metro_ready:
+            if not self._con_metro_ready and udid not in self._sessions:
+                # Only before a session exists: the setup may terminate the app,
+                # which would kill a session the prewarm already attached.
                 # Point this device's consumer app at its environment's Metro
                 # (staging :8084). A simulator it never ran on has no
                 # RCT_jsLocation and falls back to :8081 -> "No bundle URL".
@@ -3422,7 +3424,13 @@ class FlowRunner:
             # means the sign-in did not go through.
             for _ in range(10):
                 time.sleep(1.5)
-                if self._on_home() or not self._looks_signed_out():
+                if self._on_home():
+                    notes.append(f"[ok] first run — signed in as {email}")
+                    return True
+                # An empty read (idb hiccup, loader mid-transition) proves
+                # nothing either way -- only a readable screen without the
+                # sign-in form counts as "past sign-in".
+                if self._idb_els() and not self._looks_signed_out():
                     notes.append(f"[ok] first run — signed in as {email}")
                     return True
             notes.append(f"[warn] first run — still on the sign-in screen after "
@@ -5713,7 +5721,12 @@ def start_flow_run(flow_id: str, env: str = "prod",
         # WDA session collisions ("Session does not exist"); this iPhone has its own WDA and
         # the staging B-app installed. (Kitchen derives from the waiter udid via _business_udid,
         # but set both for a clear device label.)
-        phone_udid = DEFAULT_BUSINESS_PHONE_UDID
+        # Exclude the consumer device THIS run uses (not just the default one):
+        # sharing it brings back the WDA "Session does not exist" collisions.
+        phone_udid = cfgmod.local_udid_for(
+            "iPhone", DEFAULT_BUSINESS_PHONE_UDID,
+            exclude=[devices.get("consumer") or DEFAULT_CONSUMER_UDID]) \
+            or DEFAULT_BUSINESS_PHONE_UDID
         devices["waiter"] = phone_udid
         devices["kitchen"] = phone_udid
         # Make sure that dedicated iPhone sim is booted (it's normally shut down).

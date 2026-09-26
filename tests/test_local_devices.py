@@ -78,3 +78,23 @@ def test_prepare_picker_skips_old_runtime(monkeypatch):
     monkeypatch.setattr(builder, "_run", lambda *a, **k: (True, json.dumps(data)))
     udid, note = builder.app_builder.resolve_ios_device("OLD", prefer="iPhone")
     assert udid == "NEW" and "older than Xcode" in note
+
+
+def test_older_xcode_does_not_filter_older_runtimes(monkeypatch):
+    # Only Xcode 26's XCTest needs an iOS 26 runtime; Xcode 16 drives iOS 17 fine,
+    # so a user's saved iOS 17 iPad must not be swapped out there.
+    from automation.projects import simulators
+    monkeypatch.setattr(simulators, "sdk_major", lambda: 18)
+    sims = [{"udid": "IPAD-17", "name": "iPad Pro 11-inch (M4)", "state": "Shutdown", "ios": "17.5"},
+            {"udid": "IPAD-18", "name": "iPad Pro 11-inch (M4)", "state": "Booted", "ios": "18.1"}]
+    assert local_udid_for("iPad", "IPAD-17", sims=sims) == "IPAD-17"
+
+
+def test_unknown_sdk_is_not_cached(monkeypatch):
+    from automation.projects import simulators
+    monkeypatch.setattr(simulators, "_SDK_MAJOR", None)
+    outs = iter(["", "iphonesimulator26.5"])
+    monkeypatch.setattr(simulators.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": next(outs)})())
+    assert simulators.sdk_major() == 0
+    assert simulators.sdk_major() == 26, "an SDK installed later must be seen"

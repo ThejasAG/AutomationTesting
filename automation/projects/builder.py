@@ -246,9 +246,11 @@ def _build_env() -> dict:
     import glob as _glob
     extra = sorted(_glob.glob(os.path.expanduser("~/.gem/ruby/*/bin"))) + [
         "/opt/homebrew/bin", "/usr/local/bin"]
+    # APPENDED, not prepended: a user-selected toolchain already first on PATH
+    # (nvm's node, a chosen ruby) must keep winning; these only fill gaps.
     parts = env.get("PATH", "").split(os.pathsep)
     env["PATH"] = os.pathsep.join(
-        [d for d in extra if os.path.isdir(d) and d not in parts] + parts)
+        parts + [d for d in extra if os.path.isdir(d) and d not in parts])
     return env
 
 

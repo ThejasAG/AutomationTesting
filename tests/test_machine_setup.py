@@ -5,7 +5,15 @@ platform now fixes it itself (machine_setup) instead of printing a command.
 """
 import os
 
+import pytest
+
 from automation.projects import machine_setup as ms
+
+
+@pytest.fixture(autouse=True)
+def _isolated_decline_mark(tmp_path, monkeypatch):
+    """Never write the real ~/.vya-platform marker from a test."""
+    monkeypatch.setattr(ms, "_FIRST_LAUNCH_MARK", str(tmp_path / "declined-mark"))
 
 
 class Fake:
@@ -154,3 +162,26 @@ def test_idb_found_outside_path(tmp_path, monkeypatch):
     monkeypatch.delenv("IDB_BINARY", raising=False)
     monkeypatch.setattr(idb_path, "IDB_VENV", str(tmp_path / ".idb-venv"))
     assert idb_path.find_idb() == str(local / "idb")
+
+
+def test_declined_admin_prompt_is_not_repeated(monkeypatch, tmp_path):
+    mark = tmp_path / "declined"
+    monkeypatch.setattr(ms, "_FIRST_LAUNCH_MARK", str(mark))
+    fake = _setup(monkeypatch, [(["xcodebuild", "-checkFirstLaunchStatus"], (False, "")),
+                                (["xcode-select"], (True, "/Applications/Xcode.app/Contents/Developer")),
+                                (["osascript"], (False, "User canceled."))])
+    assert ms.fix_xcode_first_launch(lambda m: None) is False
+    assert mark.exists()
+    n = sum(1 for c in fake.calls if c[0] == "osascript")
+    assert ms.fix_xcode_first_launch(lambda m: None) is False
+    assert sum(1 for c in fake.calls if c[0] == "osascript") == n, \
+        "unattended Prepares must not keep opening the dialog"
+
+
+def test_command_line_tools_is_reported_not_prompted(monkeypatch):
+    fake = _setup(monkeypatch, [(["xcodebuild", "-checkFirstLaunchStatus"], (False, "")),
+                                (["xcode-select"], (True, "/Library/Developer/CommandLineTools"))])
+    msgs = []
+    assert ms.fix_xcode_first_launch(msgs.append) is False
+    assert not any(c[0] == "osascript" for c in fake.calls)
+    assert any("xcode-select -s" in m for m in msgs)

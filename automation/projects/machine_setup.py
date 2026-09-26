@@ -19,7 +19,6 @@ CLI (one-time setup of a new Mac):  python -m automation.projects.machine_setup
 """
 from __future__ import annotations
 
-import glob
 import logging
 import os
 import subprocess
@@ -41,14 +40,13 @@ _RUBY26_PINS = [
     ("cocoapods", "1.15.2"),
 ]
 
-FIRST_LAUNCH_TIMEOUT = 15 * 60
+FIRST_LAUNCH_TIMEOUT = 5 * 60
+# After a cancelled/failed dialog, do not ask again for this long: Prepares run
+# unattended (dashboard, PR poller) and must not stall on a prompt nobody sees.
+FIRST_LAUNCH_RETRY_AFTER = 6 * 60 * 60
+_FIRST_LAUNCH_MARK = os.path.expanduser("~/.vya-platform/first_launch_declined")
 PLATFORM_DOWNLOAD_TIMEOUT = 3 * 60 * 60   # ~10 GB
 GEM_TIMEOUT = 15 * 60
-
-
-def user_gem_bin_dirs() -> List[str]:
-    """Where `gem install --user-install` puts executables (e.g. `pod`)."""
-    return sorted(glob.glob(os.path.expanduser("~/.gem/ruby/*/bin")))
 
 
 def _run(cmd: List[str], timeout: int) -> "tuple[bool, str]":
@@ -77,6 +75,21 @@ def fix_xcode_first_launch(step: Step) -> bool:
     ok, _ = _run(["xcodebuild", "-checkFirstLaunchStatus"], 60)
     if ok or not me.which("xcodebuild"):
         return True
+    dev_ok, dev = _run(["xcode-select", "-p"], 30)
+    if dev_ok and "CommandLineTools" in dev:
+        # The check fails for a different reason: there is no Xcode selected.
+        step("xcode-select points at the Command Line Tools, not Xcode. Run once: "
+             "sudo xcode-select -s /Applications/Xcode.app/Contents/Developer")
+        return False
+    import time as _time
+    try:
+        if _time.time() - os.path.getmtime(_FIRST_LAUNCH_MARK) < FIRST_LAUNCH_RETRY_AFTER:
+            step("Xcode first-launch setup is still pending (the admin prompt was "
+                 "declined recently). Run once: sudo xcodebuild -license accept && "
+                 "sudo xcodebuild -runFirstLaunch")
+            return False
+    except OSError:
+        pass
     step("Xcode's system components are not installed for this Xcode version "
          "(Xcode.app would quit at launch). Asking for an administrator password "
          "on this Mac to install them…")
@@ -85,9 +98,18 @@ def fix_xcode_first_launch(step: Step) -> bool:
         "The automation platform needs to finish setting up Xcode.")
     if ok:
         step("Xcode first-launch setup: done.")
+        try:
+            os.remove(_FIRST_LAUNCH_MARK)
+        except OSError:
+            pass
         return True
     step(f"Xcode first-launch setup did not complete ({out[-200:] or 'cancelled'}). "
          "Run once: sudo xcodebuild -license accept && sudo xcodebuild -runFirstLaunch")
+    try:
+        os.makedirs(os.path.dirname(_FIRST_LAUNCH_MARK), exist_ok=True)
+        open(_FIRST_LAUNCH_MARK, "w").close()
+    except OSError:
+        pass
     return False
 
 
