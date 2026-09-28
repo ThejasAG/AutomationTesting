@@ -139,7 +139,13 @@ def load_config() -> Dict[str, Any]:
     cfg.setdefault("credentials", {})
     for role in ROLES:
         cfg["devices"].setdefault(role, _DEFAULT_DEVICES[role])
-        cfg["credentials"].setdefault(role, {"email": "", "password": ""})
+        c = cfg["credentials"].setdefault(role, {"email": "", "password": ""})
+        # A saved file must not hide a login added to .env later: fill blanks only.
+        u, p = _ENV_SEED[role]
+        if not c.get("email") and os.getenv(u):
+            c["email"] = os.getenv(u)
+        if not c.get("password") and os.getenv(p):
+            c["password"] = os.getenv(p)
     # A device id from another Mac (the defaults, or a copied config file) is
     # swapped for this Mac's own simulator of the same kind.
     cfg["devices"] = localize_devices(cfg["devices"])

@@ -896,12 +896,18 @@ class FlowRunner:
                         notes: Optional[List[str]] = None) -> bool:
         creds = self.credentials.get(account, {})
         user, pw = creds.get("email", ""), creds.get("password", "")
-        if not user or not pw:
-            return False
 
         def _note(m: str) -> None:
             if notes is not None:
                 notes.append(m)
+
+        if not user or not pw:
+            from automation.scenarios.cross_app_config import _ENV_SEED
+            missing = " and ".join(w for w, v in (("email", user), ("password", pw)) if not v)
+            _note(f"[FAIL] no {account} {missing} configured — enter it under Automation › "
+                  f"Run Cross-App Suite › {account.title()}, or set "
+                  f"{_ENV_SEED[account][0 if not user else 1]} in .env and restart")
+            return False
 
         try:
             # 1) Detect the actual role/screen first — wait out any splash/loading.
@@ -1407,8 +1413,10 @@ class FlowRunner:
             self._biz_account = account
             notes.append(f"[ok] logged in as {account}")
             return True
-        notes.append(f"[FAIL] could not log in as {account} — still on the sign-in screen "
-                     f"(check creds / T&C checkbox / staging backend)")
+        creds = self.credentials.get(account, {})
+        if creds.get("email") and creds.get("password"):
+            notes.append(f"[FAIL] could not log in as {account} — still on the sign-in screen "
+                         f"(check creds / T&C checkbox / staging backend)")
         return False
 
     # -- @token handlers -----------------------------------------------------

@@ -23,6 +23,10 @@ def _ollama(system: str, user: str, max_tokens: int = 256) -> Optional[str]:
         return None
 
 
+# Statuses after which a run's outcome no longer changes.
+_FINAL = {"passed", "failed", "error", "cancelled", "canceled", "skipped", "completed", "aborted"}
+
+
 class TestSummaryGenerator:
     def generate_run_summary(self, run_id: str, db) -> Dict[str, Any]:
         """3–4 sentence, plain-English summary of a single run. Cached on the run."""
@@ -31,7 +35,12 @@ class TestSummaryGenerator:
         run = db.query(TestRun).filter(TestRun.id == run_id).first()
         if not run:
             return {"summary": "Run not found.", "cached": False}
-        if run.report_summary:
+        final = (run.status or "").lower() in _FINAL
+        # A summary written while the run was still going ("finished with status
+        # 'running'") must not outlive it: regenerate once the run has ended.
+        stale = (final and run.report_generated_at and run.completed_at
+                 and run.report_generated_at < run.completed_at)
+        if run.report_summary and not stale:
             return {"summary": run.report_summary, "cached": True,
                     "generated_at": run.report_generated_at.isoformat() if run.report_generated_at else None}
 
@@ -55,6 +64,9 @@ class TestSummaryGenerator:
             "no code, no bullet points. Be honest: if it failed, say what broke in business terms."
         )
         text = _ollama(system, "\n".join(facts)) or self._fallback_run_summary(run)
+        if not final:
+            # Not over yet: answer now, but do not store a summary of half a run.
+            return {"summary": text, "cached": False, "generated_at": None}
 
         run.report_summary = text
         run.report_generated_at = datetime.utcnow()
@@ -119,6 +131,8 @@ class TestSummaryGenerator:
             return (f"{name} failed on {run.device_name or 'the device'}. "
                     + (f"The issue was: {run.error_message[:200]}. " if run.error_message else "")
                     + "This flow is not safe to release until fixed.")
+        if status in ("running", "queued", "pending", "in_progress"):
+            return f"{name} is still {status} on {run.device_name or 'the device'}."
         return f"{name} finished with status '{run.status}'."
 
 
