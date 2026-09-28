@@ -126,3 +126,45 @@ def create_missing(step=lambda m: logger.info(m)) -> List[str]:
             step(f"Created simulator {pick['name']} (iOS {newest['version']}) — "
                  f"Appium needs one on the same iOS as Xcode")
     return created
+
+
+# Apple's on-device photo/media indexers. On a fresh iOS 26 simulator each one
+# runs flat out for a long time (~400% CPU per simulator was measured on an Intel
+# Mac), which starved the build and made `simctl install` time out at 300s. The
+# apps under test never need them. `launchctl disable` persists in the
+# simulator's data, so a reboot keeps them off; bootout stops the running copy.
+QUIET_DAEMONS = ("com.apple.mediaanalysisd", "com.apple.mediaanalysisd.service",
+                 "com.apple.photoanalysisd")
+_quieted: set = set()
+
+
+def quiet_background_daemons(udid: str) -> bool:
+    """Stop and disable the media indexers inside a booted simulator.
+
+    Idempotent and best-effort: done once per simulator per process, never raises.
+    Returns True when the simulator was quieted (now or earlier)."""
+    if not udid or udid in _quieted:
+        return bool(udid)
+    ok = True
+    for label in QUIET_DAEMONS:
+        for verb in ("disable", "bootout"):
+            try:
+                subprocess.run(["xcrun", "simctl", "spawn", udid, "launchctl", verb,
+                                f"system/{label}"], capture_output=True, text=True,
+                               timeout=60)
+            except Exception as e:
+                logger.debug("quiet %s %s on %s: %s", verb, label, udid[:8], e)
+                ok = False
+    if ok:
+        _quieted.add(udid)
+        logger.info("Simulator %s: media indexers disabled", udid[:8])
+    return ok
+
+
+def quiet_booted() -> List[str]:
+    """quiet_background_daemons for every booted simulator. Returns their udids."""
+    done = []
+    for s in list_sims():
+        if s["state"] == "Booted" and quiet_background_daemons(s["udid"]):
+            done.append(s["udid"])
+    return done

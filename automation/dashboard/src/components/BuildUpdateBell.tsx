@@ -82,9 +82,15 @@ export default function BuildUpdateBell() {
     }
   }, []);
 
-  useEffect(() => {
-    getScenarioDevices().then(r => setSims(r.simulators)).catch(() => {});
+  // Re-read on every open, not once per page load: a single slow/failed request
+  // (the Mac busy building) used to leave "No simulators found" up for good. A
+  // failed read keeps the list we already have.
+  const loadSims = useCallback(() => {
+    getScenarioDevices()
+      .then(r => { if (r.simulators?.length) setSims(r.simulators); })
+      .catch(() => {});
   }, []);
+  useEffect(() => { loadSims(); }, [loadSims]);
 
   // A fetch per project runs server-side on every check, so keep this slow.
   useEffect(() => {
@@ -138,7 +144,11 @@ export default function BuildUpdateBell() {
       setDeploy({ status: 'running', steps: [], results: [] });
       startPolling();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not start the deploy');
+      const msg = e instanceof Error ? e.message : 'Could not start the deploy';
+      // One is already going (started in another tab, or before a reload): show
+      // THAT deploy's progress instead of a red error. Pick again when it ends.
+      if (/already running/i.test(msg)) { syncDeploy(); return; }
+      setError(msg);
     }
   };
 
@@ -155,7 +165,7 @@ export default function BuildUpdateBell() {
   return (
     <>
       <button
-        onClick={() => { setOpen(true); refresh(); syncDeploy(); }}
+        onClick={() => { setOpen(true); refresh(); syncDeploy(); loadSims(); }}
         className="nav-link"
         title="Latest build — pull and install on every device"
         style={{

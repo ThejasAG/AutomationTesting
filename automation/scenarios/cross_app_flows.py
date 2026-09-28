@@ -5380,6 +5380,9 @@ class FlowRunner:
                     break
                 subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True)
                 time.sleep(1.5)
+        from automation.projects import simulators as _sims
+        for udid in udids:
+            _sims.quiet_background_daemons(udid)
 
         # 2. Ensure Appium is listening on 4723 (start it if not).
         def _appium_ready() -> bool:
@@ -5736,6 +5739,8 @@ def start_flow_run(flow_id: str, env: str = "prod",
                     capture_output=True, text=True, timeout=60)
         except Exception:
             pass  # already booted -> simctl returns non-zero; the session create will surface real issues
+        from automation.projects import simulators as _sims
+        _sims.quiet_background_daemons(phone_udid)
     credentials = cfg.get("credentials", {})
     run_id = str(uuid.uuid4())
     env_label = "Staging" if env == "staging" else "Old Vya"

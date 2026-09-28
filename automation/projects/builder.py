@@ -30,6 +30,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from automation.projects import simulators as _simulators
 
 logger = logging.getLogger(__name__)
 
@@ -3372,12 +3373,14 @@ class AppBuilder:
         ok, out = _run(["xcrun", "simctl", "bootstatus", device_id, "-b"], timeout=180)
         if ok or "current state: Booted" in out or "already booted" in out.lower():
             self._open_simulator_ui()
+            _simulators.quiet_background_daemons(device_id)
             return True, f"Simulator {device_id[:8]} is booted."
         # bootstatus -b boots then waits; if it refused, try a plain boot.
         ok2, out2 = _run(["xcrun", "simctl", "boot", device_id], timeout=120)
         if ok2 or "current state: Booted" in out2:
             _run(["xcrun", "simctl", "bootstatus", device_id], timeout=180)
             self._open_simulator_ui()
+            _simulators.quiet_background_daemons(device_id)
             return True, f"Simulator {device_id[:8]} booted."
         return False, f"Could not boot simulator {device_id[:8]}: {(out2 or out)[:200]}"
 

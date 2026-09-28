@@ -124,6 +124,10 @@ else
       warn "${nm:-$u} NOT booted"
     fi
   done
+  # Fresh iOS 26 simulators index photos/media at ~400% CPU each, which starves
+  # builds and makes installs time out. The apps under test never need it.
+  .venv/bin/python -c "from automation.projects.simulators import quiet_booted; quiet_booted()" \
+    >/dev/null 2>&1 && ok "simulator media indexers disabled"
 fi
 
 # ── 2. Appium ────────────────────────────────────────────────────────────────

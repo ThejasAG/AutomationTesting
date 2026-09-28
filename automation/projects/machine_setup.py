@@ -171,6 +171,9 @@ def fix_simulators(step: Step) -> bool:
     only ones WebDriverAgent can run on."""
     from automation.projects import simulators
     simulators.create_missing(step)
+    # Fresh iOS 26 simulators index media flat out; it starves builds and installs.
+    for udid in simulators.quiet_booted():
+        logger.debug("quieted %s", udid)
     return True
 
 
