@@ -6,7 +6,18 @@ Measured on iPad Pro 11: app frame 1210x834 (landscape), screenshot 834x1210
 -- confirmed live: tapping the rotated point opened the New Appointment form, the
 raw point did nothing.
 """
+import pytest
+
+from automation.scenarios import idb_coords
 from automation.scenarios.cross_app_flows import FlowRunner
+
+
+@pytest.fixture(autouse=True)
+def _no_cached_direction():
+    # The measured direction is cached per simulator; tests share udid "u".
+    idb_coords.forget()
+    yield
+    idb_coords.forget()
 
 
 def _runner(w, h):
@@ -21,6 +32,8 @@ def _rotate(r, x, y, w, h, monkey):
 
 
 def test_landscape_app_is_rotated(monkeypatch):
+    # No element to measure against -> the long-standing direction (see
+    # test_idb_coords.py for the measured one, both ways).
     r = object.__new__(FlowRunner)
     monkeypatch.setattr(
         "subprocess.run",

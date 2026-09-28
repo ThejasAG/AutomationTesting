@@ -1310,8 +1310,11 @@ class ScenarioRunner:
         try:
             import subprocess
             from automation.scenarios.idb_path import idb_binary
-            subprocess.run([idb_binary(), "ui", "tap", "--udid", self._device_udid(),
-                            str(pt[0]), str(pt[1])], timeout=15)
+            from automation.scenarios.idb_coords import to_device
+            udid = self._device_udid()
+            dx, dy = to_device(udid, pt[0], pt[1])
+            subprocess.run([idb_binary(), "ui", "tap", "--udid", udid,
+                            str(dx), str(dy)], timeout=15)
         except Exception:
             return False
         time.sleep(1.0)
@@ -1400,9 +1403,11 @@ class ScenarioRunner:
         try:
             import subprocess
             from automation.scenarios.idb_path import idb_binary
+            from automation.scenarios.idb_coords import to_device
             udid = self._device_udid()
+            dx, dy = to_device(udid, pt[0], pt[1], arr)
             subprocess.run([idb_binary(), "ui", "tap", "--udid", udid,
-                            str(pt[0]), str(pt[1])], timeout=15)
+                            str(dx), str(dy)], timeout=15)
             self._invalidate_source()   # the screen just changed under the cache
             return True
         except Exception:

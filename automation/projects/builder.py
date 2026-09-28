@@ -354,6 +354,28 @@ def _summarize_xcode_errors(out: str) -> str:
     return "\n".join(summary)
 
 
+METRO_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "logs")
+METRO_LOG_MAX = 20 * 1024 * 1024
+
+
+def metro_log_path(port: int) -> str:
+    return os.path.join(METRO_LOG_DIR, f"metro_{port}.log")
+
+
+def _metro_log(port: int):
+    """Append handle for Metro's output (one file per port, rolled at 20 MB).
+    Falls back to DEVNULL: logging must never stop Metro from starting."""
+    path = metro_log_path(port)
+    try:
+        os.makedirs(METRO_LOG_DIR, exist_ok=True)
+        if os.path.exists(path) and os.path.getsize(path) > METRO_LOG_MAX:
+            os.replace(path, path + ".1")
+        return open(path, "ab", buffering=0)
+    except OSError:
+        return subprocess.DEVNULL
+
+
 def _run(cmd, cwd=None, timeout=BUILD_TIMEOUT) -> Tuple[bool, str]:
     try:
         res = subprocess.run(
@@ -3148,11 +3170,16 @@ class AppBuilder:
 
         logger.info(f"Starting Metro bundler in {repo_path} on :{port}")
         try:
+            # Keep Metro's output: a debug app's console.log/console.error land
+            # here and nowhere else. The business app swallows a rejected booking
+            # into console.error (no toast, form stays open), so with DEVNULL a
+            # "Save does nothing" failure had no evidence anywhere.
+            log_f = _metro_log(port)
             subprocess.Popen(
                 ["npx", "react-native", "start", "--port", str(port)],
                 cwd=repo_path,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 # Vya's JS bundle is ~18MB; Metro's default ~2GB Node heap OOMs while
                 # building it ("FATAL ERROR: Reached heap limit"), leaving the port up

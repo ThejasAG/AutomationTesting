@@ -2033,34 +2033,11 @@ class FlowRunner:
             return False
 
     def _rotate_for_device(self, x, y, udid: str):
-        """Map an app-space point to the DEVICE space `idb ui tap` expects.
-
-        On the landscape iPad these are not the same space. Measured:
-            app frame     1210 x 834   (landscape, what describe-all reports)
-            screenshot     834 x 1210  (portrait, the physical device)
-            'addNewEvent' app (725, 723)  ->  really at device (723, 485)
-
-        So idb REPORTS rotated coordinates but TAPS in device coordinates, and every
-        coordinate tap on this iPad landed ~240pt away from its target. That is why
-        'addNewEvent' opened nothing, and why @save_appointment kept "tapping Save"
-        while the form sat there — the tap was never on the button. Portrait devices
-        (the phones) have both spaces identical, so this is a no-op there.
-
-            x_dev = y_app        y_dev = app_height_in_device_space - x_app
-        """
-        try:
-            import subprocess as _sp, json as _json
-            raw = _sp.run([_IDB, "ui", "describe-all", "--udid", udid],
-                          capture_output=True, text=True, timeout=15).stdout
-            app = next((e for e in _json.loads(raw or "[]")
-                        if (e.get("type") or "") == "Application"), None)
-            f = (app or {}).get("frame") or {}
-            w, h = f.get("width", 0), f.get("height", 0)
-            if w > h:                      # landscape app -> portrait device
-                return y, w - x
-        except Exception:
-            pass
-        return x, y
+        """Map an app-space point (describe-all) to the DEVICE space `idb ui tap`
+        expects. On the landscape iPad they differ, and in a direction that
+        depends on how the simulator was rotated -- idb_coords measures it."""
+        from automation.scenarios.idb_coords import to_device
+        return to_device(udid, x, y)
 
     def _steppers(self, r: ScenarioRunner):
         """Product quantity steppers on the menu — via idb (fast), not an Appium
@@ -3345,8 +3322,8 @@ class FlowRunner:
                                  f"id did not resolve, so it cannot be tapped reliably")
                     return False
                 try:
-                    _sp.run([_IDB, "ui", "tap", "--udid", udid, str(cx), str(cy)], timeout=10)
-                    time.sleep(1.0); tapped = True
+                    tapped = self._idb_tap(cx, cy, udid)   # rotates for a landscape iPad
+                    time.sleep(1.0)
                     notes.append(f"[ok] @first_time_slot — tapped time slot '{lbl}' via idb ({tag})")
                 except Exception as ex:
                     notes.append(f"[FAIL] @first_time_slot — could not select slot '{lbl}' ({ex})")
