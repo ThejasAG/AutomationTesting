@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { AlertTriangle, CheckCircle2, Crosshair, Loader2, RefreshCw } from 'lucide-react';
 import {
-    getInspectorScreenshot, getInspectorTree, getScenarioDevices,
+    getInspectorScreenshot, getInspectorTree, getScenarioDevices, tapInspector,
     type InspectorElement, type InspectorTree, type SimDevice,
 } from '../api';
 
@@ -45,6 +45,22 @@ export default function InspectorPage() {
             setErr(e?.message || 'Could not read the device');
             setTree(null); setShot(null);
         } finally { setBusy(false); }
+    }
+
+    // Selecting stays a pure inspection; tapping is explicit, so reading a screen
+    // can never change it by accident. Re-inspect afterwards: the screen moved.
+    async function tapSelected() {
+        if (!udid || !sel) return;
+        setBusy(true); setErr('');
+        try {
+            await tapInspector(udid, sel.centre.x, sel.centre.y);
+            await new Promise(r => setTimeout(r, 800));
+        } catch (e: any) {
+            setErr(e?.message || 'Tap failed');
+            setBusy(false);
+            return;
+        }
+        await load();
     }
 
     // The screenshot is in PIXELS, frames are in POINTS, and on a landscape device
@@ -144,6 +160,10 @@ export default function InspectorPage() {
                                 {sel.type} · x {sel.frame.x} y {sel.frame.y} · {sel.frame.w}×{sel.frame.h}
                                 {' · tap point '}({sel.centre.x}, {sel.centre.y})
                             </div>
+                            <button className="btn" onClick={tapSelected} disabled={busy}
+                                    style={{ marginTop: 10, display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                                {busy ? <Loader2 size={13} className="spin" /> : <Crosshair size={13} />} Tap on device
+                            </button>
                         </div>
                     )}
 

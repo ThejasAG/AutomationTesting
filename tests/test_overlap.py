@@ -61,6 +61,14 @@ def test_report_names_the_blocker_and_says_it_hits_the_tap_point():
     assert covered and "INCLUDING its tap point" in covered[0]["detail"]
 
 
+def test_neighbours_clipping_at_the_edge_are_not_reported():
+    """Real geometry, iPhone 17 Pro home screen: two wide icon buttons overlap by
+    12pt (11-12% of each), neither centre is touched, and both tap fine."""
+    wda = el("WebDriverAgentRunner-Runner", 195, 188, 105, 94)
+    vya = el("Vya Consumer", 288, 188, 104, 91)
+    assert report([wda, vya], 402, 874) == []
+
+
 def test_elements_without_a_usable_frame_are_skipped():
     assert rect_of({"AXLabel": "x", "frame": {}}) is None
     assert report([{"AXLabel": "x", "frame": {"x": 0, "y": 0, "width": 0, "height": 0}}],

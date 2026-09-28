@@ -16,6 +16,7 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from automation.api.v1.routers.auth import get_current_user
 from automation.inspector.overlap import label_of, rect_of, report
@@ -135,3 +136,37 @@ def inspect(udid: str,
         "problems": problems,
         "problem_count": len(problems),
     }
+
+
+class TapBody(BaseModel):
+    x: float
+    y: float
+
+
+@router.post("/{udid}/tap", dependencies=[Depends(get_current_user)])
+def tap(udid: str, body: TapBody) -> Dict[str, Any]:
+    """Tap the device at an app-space point (the same POINTS /tree reports).
+
+    Without this the Inspector was look-only: clicking an element selected it and
+    nothing reached the device, which read as "nothing can be tapped".
+
+    idb reports landscape frames but taps in the device's portrait space, so the
+    point is rotated exactly as FlowRunner._rotate_for_device does — on the iPad
+    an unrotated tap lands ~240pt from its target. Portrait phones are unaffected.
+    """
+    idb = _idb_path()
+    # The same MEASURED rotation the flows use (idb_coords): which way a landscape
+    # iPad's app is turned depends on how the simulator was last rotated, so the
+    # fixed formula (x, y) -> (y, w - x) was right one way only -- turned the other
+    # way every tap landed ~240pt off.
+    from automation.scenarios.idb_coords import to_device
+    x, y = to_device(udid, body.x, body.y)
+    try:
+        done = subprocess.run([idb, "ui", "tap", "--udid", udid, str(int(x)), str(int(y))],
+                              capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Tap failed: {e}")
+    if done.returncode != 0:
+        raise HTTPException(status_code=502,
+                            detail=f"Tap failed: {(done.stderr or done.stdout).strip()[:300]}")
+    return {"udid": udid, "tapped": {"x": int(x), "y": int(y)}}

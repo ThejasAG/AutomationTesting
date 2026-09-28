@@ -1915,6 +1915,16 @@ export async function getInspectorScreenshot(
     return await handleResponse(res);
 }
 
+/** Tap the device at an app-space point (POINTS, as the tree reports them). */
+export async function tapInspector(udid: string, x: number, y: number): Promise<{ udid: string }> {
+    const res = await fetch(`${API_BASE}/inspector/${udid}/tap`, {
+        method: 'POST',
+        headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x, y }),
+    });
+    return await handleResponse(res);
+}
+
 // ── Execution agent runner control ──────────────────────────────────────────
 
 export interface RunnerState {

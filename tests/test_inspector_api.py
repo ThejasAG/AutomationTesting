@@ -5,9 +5,15 @@ SRC = Path("automation/api/v1/routers/inspector.py").read_text()
 PAGE = Path("automation/dashboard/src/pages/InspectorPage.tsx").read_text()
 
 
-def test_both_routes_require_auth():
-    """A UI tree names every control in the app — not public."""
-    assert SRC.count("dependencies=[Depends(get_current_user)]") == 2
+def test_every_route_requires_auth():
+    """A UI tree names every control in the app — not public; and /tap drives the
+    device. All three routes (tree, inspect, tap) need a signed-in user."""
+    assert SRC.count("dependencies=[Depends(get_current_user)]") == 3
+
+
+def test_tap_uses_the_measured_rotation():
+    """A fixed rotation formula was right for one iPad orientation only."""
+    assert "to_device(udid, body.x, body.y)" in SRC
 
 
 def test_orientation_is_reported():

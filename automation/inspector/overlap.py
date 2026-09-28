@@ -78,7 +78,7 @@ def off_screen(el: Dict, screen_w: float, screen_h: float,
 
 
 def covered_by(target: Dict, others: Sequence[Dict],
-               min_fraction: float = 0.05) -> List[Tuple[Dict, float]]:
+               min_fraction: float = 0.25) -> List[Tuple[Dict, float]]:
     """Elements drawn over *target*, with the fraction of it they cover.
 
     Sorted worst first. A tap uses the CENTRE, so anything containing the centre is
@@ -88,6 +88,12 @@ def covered_by(target: Dict, others: Sequence[Dict],
     *min_fraction* defaults to 5%: on a real screen almost everything clips its
     neighbour by a pixel, and reporting those produced 60 findings of "covers 0% of
     it" — noise that buries the two that matter.
+
+    Raised to 25%: MEASURED on the iPhone home screen, two neighbouring icons with
+    long names ("WebDriverAgentRunner-Runner", "Vya Consumer") widen to 105pt and
+    clip each other by 11-12% — both tap fine, since neither centre is touched, yet
+    both were reported "Cannot be tapped". Edge contact between siblings is layout;
+    the centre rule above still catches every real blocker.
     """
     tr = rect_of(target)
     if tr is None:
