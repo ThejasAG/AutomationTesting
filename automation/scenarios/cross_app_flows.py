@@ -575,6 +575,50 @@ def flow_run_is_active(run_id: str) -> bool:
         return run_id in _ACTIVE_FLOW_RUNS
 
 
+# Which run holds each simulator. Appium allows ONE session per device: a second
+# run that opens a session on a busy simulator silently kills the first run's
+# session ("already in use by another session" -> InvalidSessionIdException
+# mid-step). Measured: a Retry pressed while a waiter demo was running made both
+# runs fail. A run now waits for its devices instead.
+_DEVICE_OWNERS: Dict[str, str] = {}
+_DEVICE_COND = threading.Condition()
+DEVICE_WAIT_TIMEOUT = 20 * 60
+
+
+def acquire_devices(run_id: str, udids, cancel: "threading.Event",
+                    on_wait=lambda owner, udid: None,
+                    timeout: float = DEVICE_WAIT_TIMEOUT) -> bool:
+    """Claim every simulator in *udids* for *run_id*, all or none.
+
+    Blocks while another run holds any of them. Returns False if cancelled or
+    timed out (nothing claimed)."""
+    want = sorted({u for u in udids if u})
+    deadline = time.time() + timeout
+    announced = set()
+    with _DEVICE_COND:
+        while True:
+            busy = [(u, _DEVICE_OWNERS[u]) for u in want
+                    if _DEVICE_OWNERS.get(u) not in (None, run_id)]
+            if not busy:
+                for u in want:
+                    _DEVICE_OWNERS[u] = run_id
+                return True
+            if cancel.is_set() or time.time() >= deadline:
+                return False
+            for u, owner in busy:
+                if (u, owner) not in announced:
+                    announced.add((u, owner))
+                    on_wait(owner, u)
+            _DEVICE_COND.wait(timeout=2.0)
+
+
+def release_devices(run_id: str) -> None:
+    with _DEVICE_COND:
+        for u in [u for u, o in _DEVICE_OWNERS.items() if o == run_id]:
+            del _DEVICE_OWNERS[u]
+        _DEVICE_COND.notify_all()
+
+
 class FlowRunner:
     """Execute one flow's segments in order, switching device/app/account."""
 
@@ -605,6 +649,14 @@ class FlowRunner:
         return self._cancel.is_set()
 
     # -- session management --------------------------------------------------
+    def _flow_udids(self) -> List[str]:
+        """The simulators this flow will open sessions on."""
+        out = []
+        for seg in self.flow.get("segments", []):
+            out.append(self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
+                       if seg["role"] == "consumer" else self._business_udid())
+        return sorted(set(out))
+
     def _business_udid(self) -> str:
         # Waiter and kitchen MUST share the iPad (account switch). Kitchen is
         # sometimes misconfigured onto the iPhone — force it to the waiter iPad.
@@ -5564,6 +5616,21 @@ class FlowRunner:
         with _ACTIVE_FLOW_RUNS_LOCK:
             _ACTIVE_FLOW_RUNS[self.run_id] = self._cancel
         try:
+            if not acquire_devices(
+                    self.run_id, self._flow_udids(), self._cancel,
+                    on_wait=lambda owner, udid: self.on_event({
+                        "type": "log",
+                        "message": f"waiting for simulator {udid[:8]} — run {owner[:8]} "
+                                   f"is using it (one run per device)"})):
+                if not self.cancelled:
+                    raise RuntimeError(
+                        f"simulator still busy with another run after "
+                        f"{DEVICE_WAIT_TIMEOUT // 60} min — stop that run and retry")
+                for seg in self.flow["segments"]:
+                    self._persist(seg, "SKIPPED",
+                                  ["[skipped] not run — the run was stopped while "
+                                   "waiting for its simulator."], 0.0)
+                return
             self._preflight()
             segments = self.flow["segments"]
             for i, seg in enumerate(segments):
@@ -5621,6 +5688,7 @@ class FlowRunner:
                     d.quit()
                 except Exception:
                     pass
+            release_devices(self.run_id)
             with SessionLocal() as db:
                 run = db.query(TestRun).filter_by(id=self.run_id).first()
                 if run is not None:
