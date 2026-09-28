@@ -575,14 +575,49 @@ def flow_run_is_active(run_id: str) -> bool:
         return run_id in _ACTIVE_FLOW_RUNS
 
 
-# Which run holds each simulator. Appium allows ONE session per device: a second
-# run that opens a session on a busy simulator silently kills the first run's
-# session ("already in use by another session" -> InvalidSessionIdException
-# mid-step). Measured: a Retry pressed while a waiter demo was running made both
-# runs fail. A run now waits for its devices instead.
-_DEVICE_OWNERS: Dict[str, str] = {}
-_DEVICE_COND = threading.Condition()
+# Which run holds each simulator. Appium allows ONE session per device, and a
+# run's preflight resets the app (Metro location -> terminate). A second run on a
+# busy simulator therefore kills the first mid-step: InvalidSessionIdException,
+# or "app crashed" on a step that had just passed. Measured both ways -- a Retry
+# pressed during a waiter demo, and a dashboard run started while a script
+# (scripts/dryrun.py, its own process) was finishing one.
+#
+# So the claim is an OS file lock per simulator, not an in-process dict: it holds
+# across the backend, scripts and agents, and the OS drops it if a process dies,
+# so a crash can never leave a simulator locked.
+DEVICE_LOCK_DIR = os.path.expanduser("~/.vya-platform/device-locks")
 DEVICE_WAIT_TIMEOUT = 20 * 60
+_HELD: Dict[str, List[int]] = {}
+_HELD_LOCK = threading.Lock()
+
+
+def _try_lock(udid: str, run_id: str):
+    """(fd, None) when claimed, else (None, owner run id)."""
+    import fcntl
+    os.makedirs(DEVICE_LOCK_DIR, exist_ok=True)
+    fd = os.open(os.path.join(DEVICE_LOCK_DIR, f"{udid}.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            owner = os.pread(fd, 64, 0).decode(errors="ignore").strip() or "another run"
+        except OSError:
+            owner = "another run"
+        os.close(fd)
+        return None, owner
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, run_id.encode(), 0)
+    return fd, None
+
+
+def _unlock(fds: List[int]) -> None:
+    import fcntl
+    for fd in fds:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def acquire_devices(run_id: str, udids, cancel: "threading.Event",
@@ -590,33 +625,36 @@ def acquire_devices(run_id: str, udids, cancel: "threading.Event",
                     timeout: float = DEVICE_WAIT_TIMEOUT) -> bool:
     """Claim every simulator in *udids* for *run_id*, all or none.
 
-    Blocks while another run holds any of them. Returns False if cancelled or
-    timed out (nothing claimed)."""
+    Blocks while another run (in any process) holds one of them. Returns False
+    if cancelled or timed out, with nothing claimed."""
     want = sorted({u for u in udids if u})
     deadline = time.time() + timeout
     announced = set()
-    with _DEVICE_COND:
-        while True:
-            busy = [(u, _DEVICE_OWNERS[u]) for u in want
-                    if _DEVICE_OWNERS.get(u) not in (None, run_id)]
-            if not busy:
-                for u in want:
-                    _DEVICE_OWNERS[u] = run_id
-                return True
-            if cancel.is_set() or time.time() >= deadline:
-                return False
-            for u, owner in busy:
-                if (u, owner) not in announced:
-                    announced.add((u, owner))
-                    on_wait(owner, u)
-            _DEVICE_COND.wait(timeout=2.0)
+    while True:
+        fds, busy = [], None
+        for u in want:
+            fd, owner = _try_lock(u, run_id)
+            if fd is None:
+                busy = (u, owner)
+                break
+            fds.append(fd)
+        if busy is None:
+            with _HELD_LOCK:
+                _HELD.setdefault(run_id, []).extend(fds)
+            return True
+        _unlock(fds)                       # never sit on a partial claim
+        if cancel.is_set() or time.time() >= deadline:
+            return False
+        if busy not in announced:
+            announced.add(busy)
+            on_wait(busy[1], busy[0])
+        cancel.wait(2.0)
 
 
 def release_devices(run_id: str) -> None:
-    with _DEVICE_COND:
-        for u in [u for u, o in _DEVICE_OWNERS.items() if o == run_id]:
-            del _DEVICE_OWNERS[u]
-        _DEVICE_COND.notify_all()
+    with _HELD_LOCK:
+        fds = _HELD.pop(run_id, [])
+    _unlock(fds)
 
 
 class FlowRunner:
