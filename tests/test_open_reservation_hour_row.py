@@ -112,8 +112,13 @@ def test_the_sheet_is_given_time_to_fetch_its_tables():
 def test_every_event_opening_flow_shares_one_implementation():
     """@open_order (serve) and @open_reservation (assign) must not drift apart — a
     fix to how an event is located has to apply to both."""
-    src = inspect.getsource(FlowRunner)
-    assert 'self._open_reservation(r, notes, statuses=("inprogress",)' in src
+    src = inspect.getsource(FlowRunner._handle_special)
+    i = src.index('if step == "@open_order":')
+    call = src[i:src.index("what=\"@open_order\")", i)]
+    assert "self._open_reservation(r, notes, statuses=(" in call
+    # After the kitchen's Ready the booking reads SERVE (measured on 4776) --
+    # 'inprogress' alone skipped it and timed out.
+    assert '"serve"' in call and '"inprogress"' in call
 
 
 # ── no horizontal sliding: open the hour's events list instead ───────────────
@@ -242,7 +247,9 @@ def test_the_booking_is_chosen_by_its_start_time():
 def test_the_status_is_checked_too():
     """An EXPIRED row at the same start time must not be opened instead."""
     src = inspect.getsource(FlowRunner._click_sidebar_row)
-    assert "statuses" in src and "_norm(lbl)" in src
+    # Whole-word status: 'reserved' CONTAINS 'serve', so a substring test would
+    # open a Reserved booking as the one the kitchen readied.
+    assert "_status_ok(lbl, statuses)" in src
 
 
 def test_opening_from_the_sidebar_is_not_read_as_a_missing_card():
@@ -254,9 +261,11 @@ def test_opening_from_the_sidebar_is_not_read_as_a_missing_card():
 def test_the_sidebar_close_button_does_not_count_as_an_opened_reservation():
     """'closeEventModal' is in OPENED, but it is the EVENTS LIST's own close button —
     so verifying with it would report success the instant the list appeared."""
-    src = inspect.getsource(FlowRunner._open_reservation)
-    i = src.index("SIDEBAR_SAFE")
-    assert "closeEventModal" not in src[i:src.index("for _ in range(12)", i)]
+    src = inspect.getsource(FlowRunner._reservation_opened)
+    i = src.index("SIDEBAR_SAFE = ")
+    assert "closeEventModal" not in src[i:src.index(")", i)]
+    # ...and both ways of opening a booking verify through it.
+    assert "_reservation_opened" in inspect.getsource(FlowRunner._open_reservation)
 
 
 def test_the_calendar_swipe_is_element_anchored():

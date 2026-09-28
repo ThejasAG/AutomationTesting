@@ -14,6 +14,7 @@ platform, then the tools that build against it.
     idb                  fb-idb client in ~/.idb-venv (no admin needed)
     CocoaPods            gem --user-install, pinned for system Ruby 2.6
     nvm default          ~/.nvm/alias/default -> system
+    screen reader        a Vision text reader for the My Orders panel (optional)
 
 CLI (one-time setup of a new Mac):  python -m automation.projects.machine_setup
 """
@@ -205,6 +206,18 @@ def fix_idb(step: Step) -> bool:
     return ok
 
 
+def fix_screen_reader(step: Step) -> bool:
+    """Pre-build the on-screen text reader (macOS Vision, via a small Swift tool)
+    that the flows use to read the waiter's My Orders panel -- its cards expose no
+    text to accessibility. Optional: without it the flows use the calendar route,
+    only slower. Built once per Mac (~25s), so do it here, not in a run."""
+    from automation.scenarios import screen_text
+    if screen_text.ocr_binary() is None:
+        step("On-screen text reader could not be built (needs Xcode's swiftc) — "
+             "flows will open bookings via the calendar instead of the My Orders panel.")
+    return True
+
+
 def fix_nvm_default(step: Step) -> bool:
     msg = me.ensure_nvm_default()
     if msg:
@@ -213,7 +226,7 @@ def fix_nvm_default(step: Step) -> bool:
 
 
 FIXERS = (fix_xcode_first_launch, fix_ios_platform, fix_simulators, fix_cocoapods,
-          fix_idb, fix_nvm_default)
+          fix_idb, fix_nvm_default, fix_screen_reader)
 
 
 def auto_setup(step: Step = lambda m: logger.info(m)) -> bool:

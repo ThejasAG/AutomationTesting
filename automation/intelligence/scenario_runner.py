@@ -431,6 +431,19 @@ class ScenarioRunner:
         the screen has not finished loading — conflating those makes a suite flaky.
         """
         deadline = time.time() + timeout
+        # idb first: one screen read (~1s) instead of a predicate over the whole
+        # Appium tree (~5s) before every step.
+        udid = self._device_udid()
+        if udid:
+            from automation.scenarios import idb_driver as _dv
+            els = _dv.describe_all(udid)
+            if els:
+                while _dv.busy(els):
+                    if time.time() >= deadline:
+                        return False
+                    time.sleep(0.4)
+                    els = _dv.describe_all(udid) or els
+                return True
         while time.time() < deadline:
             try:
                 busy = self.d.find_elements(
@@ -942,6 +955,21 @@ class ScenarioRunner:
             m = re.split(r"\s+in\s+", phrase, maxsplit=1)
             text = m[0].strip('"\' ')
             target = m[1] if len(m) > 1 else "search"
+            # idb first for a field named by its id: tap, clear, type, read back
+            # EXACTLY, close the keyboard -- ~5s against ~44s through Appium.
+            fid = target.strip()
+            if re.fullmatch(r"[A-Za-z][\w]*", fid):
+                udid = self._device_udid()
+                if udid:
+                    from automation.scenarios import idb_driver as _dv
+                    ok, _got = _dv.fill(udid, fid, text)
+                    if ok:
+                        self._invalidate_source()
+                        self._used_ids.add(fid)
+                        return StepResult(
+                            step=s, ok=True,
+                            action=f'typed "{text}" into "{fid}" (idb, verified; keyboard closed)',
+                            code=f'    by_id(driver, "{fid}").send_keys({text!r})')
             m = self._resolve(_locator_words(target), step=s)
             if not m:
                 return StepResult(step=s, ok=False, action=f'no field for "{target}"',
@@ -1414,6 +1442,27 @@ class ScenarioRunner:
             return False
 
     def _tap_step(self, s: str, phrase: str, words: List[str], inferred: bool = False) -> StepResult:
+        # A checkbox has its own verified path (see below) -- before anything else.
+        if phrase and self._looks_like_checkbox(phrase):
+            return self._tap_checkbox(s, phrase, words)
+
+        # FIRST: idb, VERIFIED (automation/scenarios/idb_driver.py). The element
+        # must be the only one with this exact label, and describe-point must
+        # return it at the tap point (an element scrolled out of its view still
+        # reports a frame; a blind tap there hits whatever is drawn on top). ~2s,
+        # against ~12-17s for _exact_id's Appium lookup + click on this app.
+        if phrase and not inferred:
+            udid = self._device_udid()
+            if udid:
+                from automation.scenarios import idb_driver as _dv
+                ok, how = _dv.tap(udid, [phrase])
+                if ok:
+                    self._invalidate_source()
+                    self._wait_settle()
+                    self._used_ids.add(phrase)
+                    return StepResult(step=s, ok=True, action=f'tapped "{phrase}" ({how})',
+                                      code=f'    by_id(driver, "{phrase}").click()')
+
         # Exact accessibility-id first (recorded testIDs), then word/text resolution.
         m = self._exact_id(phrase)
 
@@ -1424,15 +1473,11 @@ class ScenarioRunner:
         # four more times, which is where 276s of a 336s scenario went.
         # This is not a guess: an exact label match is strictly more precise than
         # the partial match it saves us from computing.
-        # A CHECKBOX must never go down the idb coordinate fast-path. Measured on the
-        # Business sign-in screen: that path tapped 'clickCheckBox', returned True
-        # because the tap command ran, and the step logged [ok] while the box stayed
-        # empty and Sign In stayed disabled — the run then "passed" 5 of 6 steps having
-        # achieved nothing. An Appium element click on the same control does toggle it,
-        # and a checkbox is the one control whose effect is cheap to confirm: its own
-        # pixels change. So resolve it properly and verify the state actually flipped.
-        if phrase and self._looks_like_checkbox(phrase):
-            return self._tap_checkbox(s, phrase, words)
+        # (A CHECKBOX never reaches this point -- see the top of this method. Measured
+        # on the Business sign-in screen: the idb coordinate path tapped
+        # 'clickCheckBox', returned True because the tap command ran, and the step
+        # logged [ok] while the box stayed empty and Sign In stayed disabled. An
+        # Appium click does toggle it, and _tap_checkbox verifies the state flipped.)
 
         if not m and phrase and not inferred:
             pt = self._idb_element(phrase)
@@ -1618,6 +1663,15 @@ class ScenarioRunner:
         else:
             where = ""
             code = f'    driver.execute_script("mobile: swipe", {{"direction": "{direction}"}})'
+            # Whole screen: the same gesture through idb (~0.7s, against ~5-10s).
+            udid = self._device_udid()
+            if udid:
+                from automation.scenarios import idb_driver as _dv
+                if _dv.swipe_screen(udid, direction):
+                    self._invalidate_source()
+                    self._wait_settle()
+                    return StepResult(step=s, ok=True, action=f"swiped {direction} (idb)",
+                                      code=code)
 
         try:
             self.d.execute_script("mobile: swipe", args)
@@ -1676,6 +1730,22 @@ class ScenarioRunner:
         # '[ok] tapped bookAppoitment by id', and the booking was never created — every later
         # segment then failed looking for a reservation that does not exist.
         # Same cost as the old gate (one predicate query), strictly more effective.
+        #
+        # idb first: the same Dismiss/Minimize controls from one screen read, tapped
+        # only once describe-point confirms them (Appium: up to four lookups, ~5s each).
+        udid = self._device_udid()
+        if udid:
+            from automation.scenarios import idb_driver as _dv
+            els = _dv.describe_all(udid)
+            if els:
+                btns = _dv.logbox_buttons(els)
+                if not btns:
+                    return False
+                ok, _how = _dv.tap(udid, [_dv.name(btns[0])], els, scroll=False)
+                if ok:
+                    time.sleep(0.5)
+                    self._invalidate_source()
+                return ok
         for label in ("Dismiss", "Minimize"):
             try:
                 btns = self.d.find_elements(
@@ -1912,6 +1982,23 @@ class ScenarioRunner:
         """
         # Cheap check: the RN red box surfaces identifiable static text. A targeted
         # find_elements beats snapshotting the whole tree on every step.
+        #
+        # idb first: the same text from one screen read (~1s against ~5s), and the
+        # native-crash check below is a 3ms queryAppState either way.
+        udid = self._device_udid()
+        if udid:
+            from automation.scenarios import idb_driver as _dv
+            els = _dv.describe_all(udid)
+            if els:
+                txt = _dv.crash_text(els)
+                if txt:
+                    return txt
+                try:
+                    if self.d.query_app_state(self.bid) == 1:
+                        return "app terminated (native crash — process no longer running)"
+                except Exception:
+                    pass
+                return None
         try:
             hits = self.d.find_elements(
                 AppiumBy.IOS_PREDICATE,

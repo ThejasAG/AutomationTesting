@@ -7,7 +7,7 @@ import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult,
   VisualRegressionItem, RiskPrediction, PerformanceResponse } from '../api';
 import { format } from 'date-fns';
 import { parseServerDate } from '../time';
-import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown } from 'lucide-react';
+import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown, SkipForward } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 
@@ -378,8 +378,10 @@ function LiveView({ runId, jobState }: LiveViewProps) {
                       {steps.map((line, j) => {
                         const ok = /^\s*\[ok\]/i.test(line);
                         const fail = /^\s*\[FAIL\]/i.test(line);
+                        // A step that did not apply (optional, or nothing left to do).
+                        const skip = /^\s*\[skip\]/i.test(line);
                         const now = /^\s*▶/.test(line);       // step currently executing
-                        const text = line.replace(/^\s*(\[(ok|FAIL)\]|▶)\s*/i, '');
+                        const text = line.replace(/^\s*(\[(ok|FAIL|skip)\]|▶)\s*/i, '');
                         return (
                           <div key={j} style={{ position: 'relative', display: 'flex', alignItems: 'flex-start', gap: 7,
                             fontSize: '0.76rem', lineHeight: 1.7,
@@ -390,9 +392,10 @@ function LiveView({ runId, jobState }: LiveViewProps) {
                             <span style={{ position: 'absolute', left: -14, top: 11, width: 10, height: 1, background: 'var(--border-color)' }} />
                             {ok ? <CheckCircle2 size={13} color="var(--success)" style={{ flexShrink: 0, marginTop: 3 }} />
                               : fail ? <AlertTriangle size={13} color="var(--danger)" style={{ flexShrink: 0, marginTop: 3 }} />
+                              : skip ? <SkipForward size={13} color="var(--text-muted)" style={{ flexShrink: 0, marginTop: 3 }} />
                               : now ? <Loader2 size={13} className="spin" color="var(--accent-primary)" style={{ flexShrink: 0, marginTop: 3 }} />
                               : <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--border-color)', flexShrink: 0, marginTop: 6 }} />}
-                            <span style={{ fontFamily: 'monospace' }}>{now ? `running: ${text}` : text}</span>
+                            <span style={{ fontFamily: 'monospace' }}>{now ? `running: ${text}` : skip ? `skipped: ${text}` : text}</span>
                           </div>
                         );
                       })}

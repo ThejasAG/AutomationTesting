@@ -49,12 +49,12 @@
 "ts": 1786101895
 },
 "selectallitemsbtn": {
-"hits": 5,
-"heals": 4,
-"drifts": 0,
+"hits": 6,
+"heals": 5,
+"drifts": 1,
 "method": "aid",
-"value": "selectAllItemsBtn",
-"ts": 1787302346
+"value": "selectAll",
+"ts": 1790592032
 },
 "emailvalue": {
 "hits": 1,

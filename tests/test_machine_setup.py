@@ -33,8 +33,9 @@ class Fake:
 def _setup(monkeypatch, answers, tools=("xcodebuild", "pod", "ruby", "idb_companion")):
     fake = Fake(answers)
     monkeypatch.setattr(ms, "_run", fake)
-    from automation.scenarios import idb_path
+    from automation.scenarios import idb_path, screen_text
     monkeypatch.setattr(idb_path, "find_idb", lambda: "/x/idb")
+    monkeypatch.setattr(screen_text, "ocr_binary", lambda: "/x/vya-ocr")
     monkeypatch.setattr(ms.me, "which", lambda t: f"/x/{t}" if t in tools else None)
     return fake
 
@@ -185,3 +186,11 @@ def test_command_line_tools_is_reported_not_prompted(monkeypatch):
     assert ms.fix_xcode_first_launch(msgs.append) is False
     assert not any(c[0] == "osascript" for c in fake.calls)
     assert any("xcode-select -s" in m for m in msgs)
+
+
+def test_screen_reader_missing_is_reported_not_fatal(monkeypatch):
+    from automation.scenarios import screen_text
+    monkeypatch.setattr(screen_text, "ocr_binary", lambda: None)
+    msgs = []
+    assert ms.fix_screen_reader(msgs.append) is True
+    assert any("calendar" in m for m in msgs)

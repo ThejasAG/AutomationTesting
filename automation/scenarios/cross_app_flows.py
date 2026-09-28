@@ -60,6 +60,7 @@ from automation.scenarios.cross_app_orchestrator import (
 )
 from automation.scenarios import cross_app_config as cfgmod
 from automation.scenarios import ui_health as _uih
+from automation.scenarios import idb_driver as _idbd
 
 logger = logging.getLogger("cross_app_flows")
 
@@ -193,7 +194,7 @@ _W_SERVE_NOTIFY = [
     "click selectAllItemsBtn",
     "click serveItemsBtn",
     "click notifyPaymentBtn",
-    "click Yes",
+    "?click Yes",                     # optional: this build confirms with a toast, no dialog
 ]
 
 # Waiter: settle in the B-App via E-Payment (amount>bill, verify change), close.
@@ -229,6 +230,25 @@ _SIDEBAR_ROW_RE = re.compile(r"\b\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}\b")
 #: events sidebar. A distinct object, not "" or None, so the "no card found" paths
 #: cannot mistake a success for a failure.
 _OPENED_VIA_SIDEBAR = object()
+
+
+def _row_status(label: str) -> str:
+    """The status WORD of an events-list / My Orders row, normalised.
+
+    Rows read '4776 <icon> SERVE 17:05 - 18:05 <icon> I2 17:00': the status sits
+    between the ticket number and the time window. Matching statuses as substrings
+    of the whole label is wrong here -- 'reserved' CONTAINS 'serve', so a Reserved
+    booking at the same time would pass for one the kitchen has made ready."""
+    m = _SIDEBAR_ROW_RE.search(label or "")
+    head = (label or "")[:m.start()] if m else (label or "")
+    return _norm(re.sub(r"^\s*\d+", "", head))
+
+
+def _status_ok(label: str, statuses) -> bool:
+    """Whole-word status match; a status may be the start of the word
+    ('payment' matches 'PAYMENT DONE' -> 'paymentdone')."""
+    st = _row_status(label)
+    return any(st == want or st.startswith(want) for want in statuses)
 
 
 def _norm(label) -> str:
@@ -722,7 +742,7 @@ class FlowRunner:
         if udid not in self._sessions:
             d = webdriver.Remote(APPIUM_URL, options=_options(udid, bundle, wda))
             d.activate_app(bundle)
-            self._wait_app_ready(d, bundle)   # poll instead of a blind sleep(10)
+            self._wait_app_ready(d, bundle, udid=udid)   # poll instead of a blind sleep(10)
             # Debug builds stack LogBox warnings over the UI; clear them once here
             # so the first real step doesn't tap into an overlay.
             # CONSUMER ONLY: the dismiss control's coordinates were verified on the
@@ -737,14 +757,26 @@ class FlowRunner:
         return self._runners[udid]
 
     @staticmethod
-    def _wait_app_ready(d, bundle: str, timeout: float = 12.0) -> None:
+    def _wait_app_ready(d, bundle: str, timeout: float = 12.0, udid: str = "") -> None:
         """Return as soon as the app is foreground AND has rendered something tappable,
         instead of blindly waiting 10s. Debug builds fetch the JS bundle on launch, so
-        the first render can lag — but it's usually ~1-2s, not 10."""
+        the first render can lag — but it's usually ~1-2s, not 10.
+
+        With a udid the render check is one idb screen read (~1s) rather than an
+        Appium predicate over the whole tree (~5s a poll); Appium stays the fallback."""
         from appium.webdriver.common.appiumby import AppiumBy
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
+                if udid and d.query_app_state(bundle) == 4:
+                    els = _idbd.describe_all(udid)
+                    if any(e.get("type") in ("StaticText", "Button")
+                           and (e.get("AXLabel") or "").strip() for e in els):
+                        time.sleep(0.4)
+                        return
+                    if els:                     # idb works; the UI is just not up yet
+                        time.sleep(0.5)
+                        continue
                 if d.query_app_state(bundle) == 4:  # 4 = running in foreground
                     # A rendered control means the JS bundle loaded and UI is up.
                     if d.find_elements(AppiumBy.IOS_PREDICATE,
@@ -857,6 +889,29 @@ class FlowRunner:
         # tap did nothing". Record the trail; behaviour is unchanged.
         self._last_logout_trail = []
         trail = self._last_logout_trail
+        # FAST PATH: idb, verified taps -- Menu, then Log Out, then wait for the
+        # sign-in screen. (The note below that "an idb tap does NOT navigate" dates
+        # from the landscape-iPad rotation bug: every idb tap then landed ~240pt off.
+        # With the rotation measured, the tap lands.) ~6s against ~40s of Appium
+        # lookups, including five probes for a confirm dialog this build never shows.
+        udid = self._business_udid()
+        ok_m, how_m = _idbd.tap(udid, ["menuBtn", "menuTab", "Menu"])
+        trail.append(f"idb menu tap: {ok_m} ({how_m})")
+        if ok_m:
+            ok_l = False
+            for _ in range(8):                       # the Menu screen renders in ~1s
+                time.sleep(0.6)
+                ok_l, how_l = _idbd.tap(udid, ["logOutBtn"])
+                if ok_l:
+                    trail.append("idb logOutBtn tapped")
+                    break
+            if ok_l:
+                for _ in range(12):
+                    time.sleep(1.0)
+                    if self._biz_role_state() == "login":
+                        trail.append("reached the sign-in screen (idb)")
+                        return
+                trail.append("idb logout did not reach sign-in -- Appium fallback")
         for _attempt in range(2):
             trail.append(f"attempt {_attempt + 1}: role={self._biz_role_state()}")
             # 1) Open the Menu. MEASURED: 'menuBtn' exists in NEITHER build (grep of
@@ -1113,23 +1168,37 @@ class FlowRunner:
             for attempt in range(1, ATTEMPTS + 1):
                 if self._biz_role_state() != "login":
                     break                            # a retry may have already landed us home
-                _fill_field(r.d, "emailValue", user)
-                _fill_field(r.d, "passwordValue", pw)
-                try:
-                    r.d.hide_keyboard()
-                except Exception:
-                    pass
-                # The T&C box is REQUIRED — Sign In stays disabled without it. It is also reset
-                # every time the app bounces back to the sign-in screen, so re-tick each attempt.
-                self._tick_tc_checkbox(r, _note)
-                btns = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "signInBtn")
-                if btns:
-                    btns[0].click()
+                # idb first: type + read back EXACTLY (secure field: bullet count), and
+                # Return closes the keyboard -- InputField has no submit handler, so it
+                # only blurs (App/Components/InputField). ~5s a field against ~20s.
+                udid = self._business_udid()
+                ok_e, _ = _idbd.fill(udid, "emailValue", user)
+                ok_p, _ = _idbd.fill(udid, "passwordValue", pw)
+                if ok_e and ok_p:
+                    ticked = self._tick_tc_idb(udid, _note)
+                    if not ticked:
+                        ticked = self._tick_tc_checkbox(r, _note)
+                else:
+                    _fill_field(r.d, "emailValue", user)
+                    _fill_field(r.d, "passwordValue", pw)
+                    try:
+                        r.d.hide_keyboard()
+                    except Exception:
+                        pass
+                    # The T&C box is REQUIRED — Sign In stays disabled without it. It is
+                    # also reset every time the app bounces back to the sign-in screen,
+                    # so re-tick each attempt.
+                    self._tick_tc_checkbox(r, _note)
+                ok_s, _ = _idbd.tap(udid, ["signInBtn"])
+                if not ok_s:
+                    btns = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "signInBtn")
+                    if btns:
+                        btns[0].click()
 
                 # 3) VERIFY the CORRECT role's home appears (the shared login resolves waiter vs
                 #    kitchen server-side from the account). Poll for it — never assume success.
-                for _ in range(12):                  # ~24s
-                    time.sleep(2)
+                for _ in range(24):                  # ~24s
+                    time.sleep(1)
                     if self._biz_role_state() == account:
                         if attempt > 1:
                             _note(f"    · signed in as {account} on attempt {attempt}/{ATTEMPTS} "
@@ -1291,8 +1360,9 @@ class FlowRunner:
         FORM_MARKERS = ("saveBtn", "New Appointment", "firstName", "closeEventModal")
 
         def form_open() -> bool:
-            labels = {(e["label"] or "").strip() for e in self._idb_els()}
-            labels |= {(e["id"] or "").strip() for e in self._idb_els()}
+            els = self._idb_els()            # ONE screen read (was two per check)
+            labels = {(e["label"] or "").strip() for e in els}
+            labels |= {(e["id"] or "").strip() for e in els}
             return any(m in labels for m in FORM_MARKERS)
 
         for attempt in range(1, 4):
@@ -1313,8 +1383,8 @@ class FlowRunner:
             if not tapped:
                 notes.append(f"[FAIL] @save_appointment — no saveBtn on screen (attempt {attempt})")
                 return False
-            for _ in range(8):                       # ~16s for the form to close
-                time.sleep(2)
+            for _ in range(16):                      # ~16-30s for the form to close
+                time.sleep(1)
                 if not form_open():
                     notes.append(f"[ok] @save_appointment — saved; the form closed"
                                  f"{'' if attempt == 1 else f' (attempt {attempt}/3)'}")
@@ -1439,6 +1509,40 @@ class FlowRunner:
                 return True
         _note("    · [WARN] could not tick the Terms & Conditions checkbox — Sign In stays "
               "disabled, so the login below will fail for that reason (not bad credentials)")
+        return False
+
+    def _tick_tc_idb(self, udid: str, _note) -> bool:
+        """_tick_tc_checkbox through idb: same geometry, same pixel proof, no Appium.
+
+        The row 'clickCheckBox' spans the whole sentence; the square is its
+        leftmost non-white pixel (10pt in on the iPhone, ~32pt on the iPad), and a
+        tick shifts the square's colour from near-white to purple (measured
+        (240,242,245) -> (199,189,206)). One simulator screenshot per reading
+        instead of Appium's, and no 7-9s is_keyboard_shown: the fill closed it."""
+        els = _idbd.describe_all(udid)
+        row = next((e for e in els if _idbd.name(e) == "clickCheckBox"), None)
+        if row is None:
+            _note("    · no T&C checkbox on screen (already agreed?)")
+            return False
+        if not _idbd.hittable(udid, row):
+            return False
+        x, y, w, h = _idbd.frame(row)
+        cy = y + h / 2
+        scan = [(x + i, cy) for i in range(0, int(min(w, 80)), 2)]
+        cols = _idbd.sample_colors(udid, scan, els, radius=0.5)
+        dx0 = next((i * 2 + int(h * 0.35) for i, c in enumerate(cols)
+                    if c and sum(c) < 720), None)
+        for dx in ([max(2, dx0)] if dx0 is not None else []) + [10, 32, 6, 14, 22, 3]:
+            pt = (x + dx, cy)
+            before = _idbd.sample_colors(udid, [pt], els, radius=h * 0.35)[0]
+            px, py = _idbd.to_device(udid, *pt)
+            _idbd._idb(["ui", "tap", "--udid", udid, str(px), str(py)])
+            time.sleep(0.6)
+            after = _idbd.sample_colors(udid, [pt], els, radius=h * 0.35)[0]
+            if before and after and sum(abs(a - b) for a, b in zip(after, before)) > 30:
+                _note(f"    · ticked the Terms & Conditions checkbox "
+                      f"(idb tap at x+{dx}, verified {before}->{after})")
+                return True
         return False
 
     @staticmethod
@@ -1587,6 +1691,14 @@ class FlowRunner:
             pass
         return "closed"
 
+    @staticmethod
+    def _raw_el(e: dict) -> dict:
+        """An _idb_els() dict back in idb's raw shape (for idb_driver checks)."""
+        return {"AXLabel": e.get("label") or "", "AXIdentifier": e.get("id") or "",
+                "type": e.get("type") or "",
+                "frame": {"x": e.get("x", 0), "y": e.get("y", 0),
+                          "width": e.get("w", 0), "height": e.get("h", 0)}}
+
     def _idb_els(self, udid: str = "") -> List[dict]:
         """Fast full-screen snapshot via idb (~1-2s) as a flat list of element dicts —
         replaces the expensive Appium IOS_PREDICATE traversals on this app's huge tree.
@@ -1720,7 +1832,8 @@ class FlowRunner:
                                      f"{hour_lbl or 'booked'} row — opened the first")
         return diner[0][1], ""
 
-    def _click_sidebar_row(self, slot: str, statuses: tuple, notes: List[str]) -> bool:
+    def _click_sidebar_row(self, slot: str, statuses: tuple, notes: List[str],
+                           max_pages: int = 8, where: str = "events list") -> bool:
         """Open the booking for *slot* from the hour's events sidebar.
 
         This is the whole point of using the sidebar. On the board, every booking in
@@ -1739,28 +1852,68 @@ class FlowRunner:
             return False
         want_hhmm = f"{int(want.group(1)):02d}:{want.group(2)}"
 
-        rows = []
-        for e in self._idb_els():
-            lbl = (e.get("label") or "").strip()
-            m = _SIDEBAR_ROW_RE.search(lbl)
-            if not m:
-                continue
-            start = m.group(0).split("-")[0].strip()
-            if f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}" != want_hhmm:
-                continue
-            if statuses and not any(st in _norm(lbl) for st in statuses):
-                continue
-            rows.append((e, lbl))
+        udid = self._business_udid()
 
-        if not rows:
-            return False
-        if len(rows) > 1:
-            notes.append(f"    · {len(rows)} sidebar rows start at {want_hhmm}; "
-                         f"opening the first")
-        e, lbl = rows[0]
-        notes.append(f"    · opening the {want_hhmm} booking from the events list: "
-                     f"{lbl[:60]!r}")
-        return self._idb_tap(e["cx"], e["cy"])
+        def matching(els):
+            out = []
+            for e in els:
+                lbl = _idbd.name(e)
+                m = _SIDEBAR_ROW_RE.search(lbl)
+                if not m:
+                    continue
+                start = m.group(0).split("-")[0].strip()
+                if f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}" != want_hhmm:
+                    continue
+                if statuses and not _status_ok(lbl, statuses):
+                    continue
+                out.append(e)
+            return out
+
+        # The list is not sorted by start time (measured: 4770 16:05, 4772 16:15,
+        # 4771 16:15, 4769, 4768 ... and the 16:35 booking further DOWN), so a late
+        # booking sits below the visible part of the sheet. Two cases:
+        #  * rendered but clipped -- idb still reports a frame for it, and a tap
+        #    at that frame lands on nothing (measured: "tapped the 16:35 row ...
+        #    the reservation did not open"). tap_el scrolls it into view slowly,
+        #    confirms it under the point, then taps.
+        #  * not rendered yet (a virtualised list only renders near the viewport):
+        #    scroll the list down a page and look again, until it stops moving.
+        seen_before = None
+        for page in range(max_pages):
+            els = _idbd.describe_all(udid)
+            rows = matching(els)
+            if rows:
+                if len(rows) > 1:
+                    notes.append(f"    · {len(rows)} sidebar rows start at {want_hhmm}; "
+                                 f"opening the first")
+                e = rows[0]
+                notes.append(f"    · opening the {want_hhmm} booking from the {where}: "
+                             f"{_idbd.name(e)[:60]!r}"
+                             + (f" (found after scrolling the list {page}x)" if page else ""))
+                ok, how = _idbd.tap_el(udid, e, els)
+                if ok:
+                    if "scrolled" in how:
+                        notes.append(f"    · scrolled the {where} to bring the "
+                                     f"{want_hhmm} row on screen")
+                    return True
+                # Too far down to reach in a few slow drags: page the list down and
+                # try again (bounded below by the page count and "list stopped").
+                notes.append(f"    · the {want_hhmm} row is in the list but not reachable "
+                             f"yet ({how}) — scrolling the {where} down")
+            all_rows = [e for e in els if _SIDEBAR_ROW_RE.search(_idbd.name(e))]
+            if not all_rows:
+                return False
+            labels = tuple(_idbd.name(e) for e in all_rows)
+            if labels == seen_before:
+                return False                       # the list did not move: its end
+            seen_before = labels
+            w, h = _idbd.app_size(els)
+            col_x = _idbd.centre(all_rows[0])[0]
+            # Finger travels UP (content moves up, later rows come into view), slowly
+            # enough to move the list 1:1 rather than fling past the row.
+            _idbd.swipe(udid, col_x, h * 0.78, col_x, h * 0.42, 1.6)
+            time.sleep(0.5)
+        return False
 
     def _table_sheet_open(self) -> bool:
         """Is the table-select sheet up, EVEN BEFORE its chips have loaded?
@@ -1806,6 +1959,23 @@ class FlowRunner:
         before = hour_positions()
         if not before:
             return False
+        # FASTEST: a slow idb drag moves the list 1:1 (measured: 200pt drag in >=1s
+        # -> 190pt of travel; faster drags fling unpredictably), so drag by exactly
+        # the distance to the target hour. ~1-2s a drag, no Appium round-trips.
+        target = getattr(self, "_scroll_target_hour", "")
+        if target and before.get(target) is not None:
+            udid = self._business_udid()
+            h_app = _idbd.app_size(_idbd.describe_all(udid))[1] or 834.0
+            want = before[target] - 0.4 * h_app
+            if abs(want) > 60:
+                travel = max(-0.6 * h_app, min(0.6 * h_app, want))
+                y_from = 0.8 * h_app if travel > 0 else 0.2 * h_app
+                _idbd.swipe(udid, 600, y_from, 600, y_from - travel,
+                            max(1.0, abs(travel) / 200.0))
+                time.sleep(0.5)
+                after = hour_positions()
+                if any(after.get(k) != v for k, v in before.items() if k in after):
+                    return True
         # Prefer a DIRECT DRAG to a stepwise swipe. 'mobile: swipe' costs a measured
         # 9.3s per call here (13.7s including the scans around it) and moves a fixed
         # ~590pt, so walking from 00:00 to 15:00 is six swipes and ~82s -- a third of
@@ -2314,6 +2484,50 @@ class FlowRunner:
             notes.append(("[ok] " if ok_confirm else "[FAIL] ") +
                           f"@pay:{method} — could not read the bill total (TUNE)")
         return ok_confirm
+
+    def _assign_table_idb(self, notes: List[str], table: str = "") -> bool:
+        """Assign a table through idb when the table sheet is already up.
+
+        The sheet reads: heading 'Select a table' (or 'Modify Table'), a row of
+        chips named after the free tables (I2, I3 ... -- the booked ones are not
+        offered), and Confirm (applyTableBtn / AssignTableBtn), which stays pale
+        until a chip is picked. So: tap the chip, SEE Confirm turn dark (its
+        enabled state is visible only in its colour), tap Confirm, and wait for
+        the sheet to close. False means "not decided here" -- the full Appium
+        routine below then runs as before. ~8s against the 53-75s it measured."""
+        udid = self._business_udid()
+        els = _idbd.describe_all(udid)
+        name, frame = _idbd.name, _idbd.frame
+        head = next((e for e in els if _norm(name(e)) in ("selectatable", "modifytable")
+                     and e.get("type") == "StaticText"), None)
+        commit = next((e for e in els if name(e) in ("applyTableBtn", "AssignTableBtn")), None)
+        if head is None or commit is None:
+            return False
+        top, bottom = frame(head)[1], frame(commit)[1]
+        chip_re = re.compile(r"(?:tableChip\w+|T\d+AssignAnyBtn|[A-Za-z]{1,2}\d{1,3})\Z")
+        chips = [e for e in els if chip_re.fullmatch(name(e))
+                 and top < frame(e)[1] < bottom and frame(e)[2] > 0]
+        if not chips:
+            return False
+        chips.sort(key=lambda e: frame(e)[0])
+        pick = next((c for c in chips if table and name(c).endswith(table)), chips[0])
+        ok, _how = _idbd.tap_el(udid, pick, els, scroll=False)
+        if not ok:
+            return False
+        time.sleep(0.6)
+        cx, cy, cw, ch = frame(commit)
+        if _idbd.is_dark(_idbd.sample_colors(udid, [(cx + 14, cy + ch / 2)])[0]) is not True:
+            return False                            # Confirm still pale: not selected
+        ok, _how = _idbd.tap_el(udid, commit, scroll=False)
+        if not ok:
+            return False
+        for _ in range(12):
+            time.sleep(1.0)
+            if not self._table_sheet_open():
+                notes.append(f"[ok] @assign_table — assigned '{name(pick)}' and the sheet "
+                             f"closed (idb)")
+                return True
+        return False
 
     def _assign_table(self, r: ScenarioRunner, notes: List[str],
                       table: str = "") -> bool:
@@ -2931,187 +3145,255 @@ class FlowRunner:
         notes.append("[ok] @ensure_order_items — no addItems button (already has items?); continuing")
         return True
 
-    def _kitchen_pick_products(self, r: ScenarioRunner, notes: List[str]) -> int:
-        """Tick the product rows on the kitchen card. Returns how many were ticked.
+    # Controls on the kitchen screen that end in 'Btn' but are NOT products.
+    # Kept as a safety net only: products are found by POSITION inside their order
+    # card (see _kitchen_cards), which is what actually keeps the nav rail out --
+    # this build added `inventoryBtn` to the rail, a name-only blacklist missed it,
+    # and the step tapped Inventory as a "product" and left the board.
+    _KITCHEN_STATIC = {
+        "kitchenAllBtn", "kitchenTableBtn", "kitchenPickupBtn",
+        "orderReadyBtn", "orderCloseBtn", "orderPrintBtn",
+        "preOrderBtn", "homeBtn", "historyBtn", "menuBtn", "inventoryBtn",
+        "allBtn", "tableBtn", "pickupBtn", "orderFilterBtn",
+        "addNewEvent", "qrScaner", "screenBackBtn", "walletBackBtn",
+    }
 
-        The kitchen board is NOT "tap Ready on a card". Ready is disabled until at
-        least one product of that order is selected:
+    def _kitchen_cards(self, els: List[dict]) -> List[dict]:
+        """The order cards on the kitchen board, top-left first.
 
-            disabled={!readyActive(orders?._id)}                 KitchenCards:1129
-            readyActive = id => selectedPrepList2.find(e => e.aptId == id)
+        Source (Components/KitchenCards): each card shows its ticket number, one
+        Radio per product labelled `${name}Btn` with spaces removed (only for
+        products with modifiers), then a button row -- orderPrintBtn on the left
+        and orderReadyBtn, or orderCloseBtn once every product is completed.
 
-        Each product is a Radio whose accessibilityLabel is the product name with
-        its spaces removed plus 'Btn' (KitchenCards:303) -- 'PennePolloBtn',
-        'TagliatellealSalmoneBtn'. There is no single id to search for, so find them
-        by SHAPE: a '<Name>Btn' on screen that is not one of the board's own
-        controls. Without this the step tapped a disabled button, changed nothing,
-        and reported an empty queue.
-        """
-        # The kitchen screen's STATIC controls are a closed, source-verified set.
-        #
-        # Every product row is `${order.data.name}Btn` (KitchenCards:303), and every
-        # other 'Btn' on this screen comes from one of two files. Grepping both for
-        # a literal accessibilityLabel gives the complete list:
-        #     kitchenAllBtn kitchenPickupBtn kitchenTableBtn        Screens/Home/kitchen.js
-        #     orderCloseBtn orderPrintBtn orderReadyBtn             Components/KitchenCards
-        # plus the persistent nav rail. So anything else ending 'Btn' IS a product.
-        #
-        # An earlier blacklist missed orderPrintBtn and preOrderBtn and tapped them
-        # as products, navigating off the kitchen board entirely -- the step then
-        # reported "kitchen queue empty" from the Pre-Orders screen. Geometry alone
-        # does not separate them either: the header tabs sit in the same band as a
-        # card near the top of the board.
-        STATIC = {
-            "kitchenAllBtn", "kitchenTableBtn", "kitchenPickupBtn",
-            "orderReadyBtn", "orderCloseBtn", "orderPrintBtn",
-            "preOrderBtn", "homeBtn", "historyBtn", "menuBtn",
-            "allBtn", "tableBtn", "pickupBtn", "orderFilterBtn",
-            "addNewEvent", "qrScaner", "screenBackBtn", "walletBackBtn",
-        }
-        names = []
-        for e in self._idb_els():
-            nm = (e.get("label") or "").strip()
-            if (nm.endswith("Btn") and nm not in STATIC
-                    and len(nm) > 3 and nm not in names):
-                names.append(nm)
-        if not names:
-            # NOT an error. The product radio renders only for items carrying
-            # modifiers (KitchenCards:299 gates on item.data[idx2]?.header); a plain
-            # item has no row at all and Ready is enabled from the start. MEASURED:
-            # ticket 4698 showed only '4698', 'I1' and the two buttons, with
-            # orderReadyBtn already enabled.
-            notes.append("    · @kitchen_ready — no product rows on this card "
-                         "(plain items); Ready needs no selection")
-            return 0
-
-        ticked = 0
-        for nm in names[:12]:                      # a ticket has a handful of items
-            try:
-                els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, nm)
-            except Exception:
+        A card's products are the 'Btn' elements INSIDE it: between its ticket
+        number and its button row, within the button row's width. Measured on
+        ticket 4772: TagliatellealSalmoneBtn / SpaghettiallaPuttanescaBtn at
+        x=155 inside the card (x 153-434); inventoryBtn at x=20 in the rail."""
+        name, frame, centre = _idbd.name, _idbd.frame, _idbd.centre
+        cards = []
+        for b in els:
+            kind = {"orderReadyBtn": "ready", "orderCloseBtn": "close"}.get(name(b))
+            if not kind:
                 continue
-            if not els:
+            bx, by, bw, bh = frame(b)
+            prints = [p for p in els if name(p) == "orderPrintBtn"
+                      and abs(frame(p)[1] - by) < 12 and frame(p)[0] < bx]
+            x0 = (max(frame(p)[0] for p in prints) if prints else bx - 150) - 16
+            x1 = bx + bw + 16
+            tickets = [t for t in els if t.get("type") == "StaticText"
+                       and re.fullmatch(r"\d{3,6}", name(t))
+                       and x0 <= centre(t)[0] <= x1 and frame(t)[1] < by]
+            ticket = max(tickets, key=lambda t: frame(t)[1]) if tickets else None
+            y0 = frame(ticket)[1] if ticket else 0.0
+            radios = [e for e in els
+                      if name(e).endswith("Btn") and name(e) not in self._KITCHEN_STATIC
+                      and e.get("type") != "StaticText"
+                      and x0 <= centre(e)[0] <= x1 and y0 < centre(e)[1] < by]
+            radios.sort(key=lambda e: frame(e)[1])
+            cards.append({"ticket": name(ticket) if ticket else "", "kind": kind,
+                          "button": b, "radios": radios})
+        cards.sort(key=lambda c: (frame(c["button"])[1], frame(c["button"])[0]))
+        return cards
+
+    def _kitchen_board(self, udid: str, notes: List[str], wait: float = 15.0) -> List[dict]:
+        """The kitchen board's elements, once an order card is on it (or the wait
+        runs out). Goes back Home if a previous step left another screen up."""
+        deadline, went_home = time.time() + wait, 0
+        els: List[dict] = []
+        while True:
+            els = _idbd.describe_all(udid)
+            names = {_idbd.name(e) for e in els}
+            if names & {"orderReadyBtn", "orderCloseBtn"} or time.time() >= deadline:
+                return els
+            if "My Orders" not in names and went_home < 2:
+                ok, _ = _idbd.tap(udid, ["homeBtn"], els, scroll=False)
+                went_home += 1
+                if ok:
+                    notes.append("    · @kitchen_ready — not on the kitchen board; went Home")
+                time.sleep(1.5)
                 continue
-            try:
-                els[0].click()
-                ticked += 1
-                time.sleep(0.6)
-            except Exception:
-                continue
-        if ticked:
-            notes.append(f"    · @kitchen_ready — selected {ticked} product(s): "
-                         + ", ".join(n[:-3] for n in names[:ticked]))
-        return ticked
+            time.sleep(1.0)
+
+    def _kitchen_select_items(self, r: ScenarioRunner, udid: str, card: dict,
+                              els: List[dict], notes: List[str]) -> List[str]:
+        """Tap every product dot on *card*, then CONFIRM each one filled in.
+
+        Accessibility does not expose the selection (measured: a radio reports the
+        same attributes selected or not), but the pixels do -- the dot fills with
+        the app's purple. So one screenshot after the taps checks every dot, and a
+        dot still empty gets one more tap. Returns the names confirmed selected."""
+        name, frame = _idbd.name, _idbd.frame
+
+        def dot(e):
+            x, y, w, h = frame(e)
+            return (x + h / 2, y + h / 2)          # the dot is the row's left square
+
+        # A dot TOGGLES: tapping one that is already selected unselects it. So read
+        # the dots first and tap only the empty ones.
+        before = _idbd.sample_colors(udid, [dot(e) for e in card["radios"]], els)
+        for e, c in zip(card["radios"], before):
+            if _idbd.is_dark(c):
+                continue                            # already selected
+            ok, _how = _idbd.tap_el(udid, e, els)
+            if not ok:                              # idb could not confirm it: Appium
+                try:
+                    found = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, name(e))
+                    if found:
+                        found[0].click()
+                except Exception:
+                    pass
+            time.sleep(0.4)
+        els[:] = _idbd.describe_all(udid) or els
+        cur = self._kitchen_card_by_ticket(els, card)
+        fresh = {name(e): e for e in cur["radios"]} if cur else {}
+        rows = [fresh.get(name(e), e) for e in card["radios"]]
+        colours = _idbd.sample_colors(udid, [dot(e) for e in rows], els)
+        missing = [e for e, c in zip(rows, colours) if _idbd.is_dark(c) is False]
+        for e in missing:                           # one more tap for an empty dot
+            _idbd.tap_el(udid, e, els)
+            time.sleep(0.4)
+        if missing:
+            colours = _idbd.sample_colors(udid, [dot(e) for e in rows], els)
+        return [name(e) for e, c in zip(rows, colours) if _idbd.is_dark(c) is not False]
+
+    def _kitchen_card_by_ticket(self, els: List[dict], card: dict) -> Optional[dict]:
+        cards = self._kitchen_cards(els)
+        if card.get("ticket"):
+            return next((c for c in cards if c["ticket"] == card["ticket"]), None)
+        return cards[0] if cards else None
 
     def _kitchen_ready(self, r: ScenarioRunner, notes: List[str]) -> bool:
-        """Kitchen KANBAN board: SELECT THE PRODUCTS, then Ready, then Close.
+        """The chef's job on one ticket: select every item -> Ready -> Close Order.
 
-        Each queued order card carries its own `orderReadyBtn` (mark it Prepared) and
-        each prepared order an `orderCloseBtn` (close the ticket). These are RN
-        buttons that IGNORE idb coordinate taps, so use Appium element clicks.
+        Source (Components/KitchenCards + Screens/Home/kitchen.js):
+          * each item with modifiers has a dot (a Radio labelled `${name}Btn`);
+          * Ready is disabled until an item is selected --
+                disabled={!readyActive(orders?._id)}
+            and it marks ONLY the selected items completed (updatePrepare), so
+            every dot must be selected first;
+          * once all items are completed the button becomes Close Order
+            (orderCloseBtn), which closes the ticket and removes it from the board.
 
-        The per-item step is NOT optional, which this docstring previously claimed
-        outright. Ready is rendered disabled until a product of that order is ticked:
+        Every tap is an idb tap verified under the point (the old note that these
+        buttons "ignore idb taps" dated from the iPad rotation bug -- measured now:
+        one idb tap fills the dot and enables Ready). The dots and Ready are
+        verified by pixel colour, which is where their state is visible.
 
-            disabled={!readyActive(orders?._id)}                 KitchenCards:1129
-
-        so tapping it first is a no-op on a disabled control -- indistinguishable
-        from an empty queue, and the reason the kitchen segment could never mark
-        anything Prepared. Order: pick products -> Ready -> Close."""
-        def _appium_click_first(idv: str) -> bool:
-            try:
-                els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, idv)
-                if els:
-                    els[0].click(); time.sleep(1.5)
-                    return True
-            except Exception:
-                pass
+        Marking Ready is the assertion; closing is the chef finishing the ticket.
+        A run that only closes a leftover ticket has readied nothing and FAILS."""
+        udid = self._business_udid()
+        name, frame = _idbd.name, _idbd.frame
+        els = self._kitchen_board(udid, notes)
+        cards = self._kitchen_cards(els)
+        queued = [c for c in cards if c["kind"] == "ready"]
+        if not queued:
+            leftover = next((c for c in cards if c["kind"] == "close"), None)
+            if leftover:
+                _idbd.tap_el(udid, leftover["button"], els)
+                notes.append("[FAIL] @kitchen_ready — nothing to mark Ready; only closed a "
+                             f"leftover prepared ticket {leftover['ticket']} (no queued order "
+                             "arrived from a waiter)")
+                return False
+            notes.append("[FAIL] @kitchen_ready — no order on the kitchen board (queue "
+                         "empty). This step needs a waiter to have sent an order first — "
+                         "run a full cross-app flow, not the standalone kitchen demo.")
             return False
 
-        # Let the board settle (after the account switch / first render).
-        for _ in range(6):
-            if r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "orderReadyBtn") or \
-               r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "orderCloseBtn"):
+        card = queued[0]
+        tag = f"ticket {card['ticket']}" if card["ticket"] else "the first ticket"
+        selected: List[str] = []
+        for round_ in range(1, 4):
+            if card["radios"]:
+                got = self._kitchen_select_items(r, udid, card, els, notes)
+                if not got:
+                    notes.append(f"[FAIL] @kitchen_ready — {tag}: tapped the item dots but "
+                                 f"none shows as selected, so Ready stays disabled")
+                    return False
+                selected += [g for g in got if g not in selected]
+            # Ready must be ENABLED now: its background turns from pale to dark
+            # purple (accessibility reports enabled=True either way).
+            b = card["button"]
+            bx, by, bw, bh = frame(b)
+            if _idbd.is_dark(_idbd.sample_colors(udid, [(bx + 14, by + bh / 2)], els)[0]) is False:
+                notes.append(f"[FAIL] @kitchen_ready — {tag}: Ready is still disabled after "
+                             f"selecting {len(selected)} item(s)")
+                return False
+            ok, _how = _idbd.tap_el(udid, b, els)
+            if not ok:
+                try:
+                    found = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "orderReadyBtn")
+                    if found:
+                        found[0].click()
+                        ok = True
+                except Exception:
+                    pass
+            if not ok:
+                notes.append(f"[FAIL] @kitchen_ready — {tag}: could not tap Ready")
+                return False
+            # The server marks the selected items completed; wait for the card to show it.
+            before = len(card["radios"])
+            now = None
+            for _ in range(15):
+                time.sleep(1.0)
+                els = _idbd.describe_all(udid) or els
+                now = self._kitchen_card_by_ticket(els, card)
+                if now is None or now["kind"] == "close" or len(now["radios"]) < before:
+                    break
+            if now is None:
+                notes.append(f"[ok] @kitchen_ready — {tag}: selected {len(selected)} item(s) "
+                             f"({', '.join(n[:-3] for n in selected) or 'no modifier rows'}), "
+                             f"marked Ready; the ticket left the board")
+                return True
+            card = now
+            if card["kind"] == "close":
                 break
-            time.sleep(2.5)
-
-        # 1) SELECT THE PRODUCTS FIRST. 'Ready' is disabled until at least one
-        #    product on the card is ticked:
-        #        disabled={!readyActive(orders?._id)}            KitchenCards:1129
-        #        readyActive = id => selectedPrepList2.find(e => e.aptId == id)
-        #    Each product row is a Radio labelled `${order.data.name}Btn` with the
-        #    spaces stripped (KitchenCards:303) -- 'PennePolloBtn',
-        #    'TagliatellealSalmoneBtn'. Tapping Ready without ticking one is a no-op
-        #    on a disabled button, which looked exactly like "the kitchen queue is
-        #    empty" and is why this step could never mark anything Prepared.
-        picked = self._kitchen_pick_products(r, notes)
-
-        # 2) Mark the queued order Ready (Prepared).
-        readied = _appium_click_first("orderReadyBtn")
-        if readied:
-            notes.append("[ok] @kitchen_ready — marked a queued order Ready (Prepared)")
-        elif picked:
-            notes.append("    · @kitchen_ready — products selected but no orderReadyBtn")
-        else:
-            notes.append("    · @kitchen_ready — no orderReadyBtn (no queued order to ready)")
-        time.sleep(1.0)
-
-        # 2) Close a prepared order ticket.
-        closed = _appium_click_first("orderCloseBtn")
-        if closed:
-            notes.append("[ok] @kitchen_ready — closed a prepared order ticket")
-
-        # Marking Ready is the ASSERTION; closing is cleanup after it. These used to be OR'd,
-        # so a run with nothing to ready still went green by closing a leftover prepared
-        # ticket — the step passed without once doing the thing it is named after.
-        if readied:
-            return True
-        if closed:
-            notes.append("[FAIL] @kitchen_ready — nothing to mark Ready; only closed a "
-                         "leftover prepared ticket (no queued order arrived from a waiter)")
+            if card["kind"] == "ready" and len(card["radios"]) >= before:
+                notes.append(f"[FAIL] @kitchen_ready — {tag}: tapped Ready but no item was "
+                             f"marked completed (the card did not change in 15s)")
+                return False
+        if card["kind"] != "close":
+            notes.append(f"[FAIL] @kitchen_ready — {tag}: items still waiting after 3 rounds "
+                         f"of select + Ready")
             return False
-        notes.append("[FAIL] @kitchen_ready — no order to Ready or Close (kitchen queue empty). "
-                     "This step needs a waiter to have sent an order first — run a full "
-                     "cross-app flow, not the standalone kitchen demo.")
-        return False
+        items = ", ".join(n[:-3] for n in selected) or "no modifier rows"
+        # Close Order: the chef finishes the ticket.
+        ok, _how = _idbd.tap_el(udid, card["button"], els)
+        closed = False
+        if ok:
+            for _ in range(12):
+                time.sleep(1.0)
+                els = _idbd.describe_all(udid) or els
+                if self._kitchen_card_by_ticket(els, card) is None or (
+                        card["ticket"] and card["ticket"] not in {name(e) for e in els}):
+                    closed = True
+                    break
+        if closed:
+            notes.append(f"[ok] @kitchen_ready — {tag}: selected {len(selected)} item(s) "
+                         f"({items}) → Ready → Close Order; the ticket left the board")
+        else:
+            notes.append(f"[ok] @kitchen_ready — {tag}: selected {len(selected)} item(s) "
+                         f"({items}) → Ready (all items completed)")
+            notes.append(f"    · @kitchen_ready — Close Order did not remove {tag} from "
+                         f"the board within 12s")
+        return True
 
     def _hide_keyboard(self, r: ScenarioRunner, notes: List[str]) -> bool:
-        """Dismiss the on-screen keyboard before tapping a control it may be covering.
-        On the iPad Business create-appointment form the keyboard opens after typing the
-        diner name and overlaps the 'Any' dining button — tapping that button then lands
-        on a keyboard key (typing a stray 'k') instead of the button. Blur the field first.
-        idb confirms whether the keyboard is really gone; never blocks."""
+        """Close the on-screen keyboard before tapping a control it may cover.
+
+        On the iPad create-appointment form the keyboard covers 'Any' and Save; a
+        tap there lands on a key (a stray 'k' was typed). idb cannot see the
+        keyboard at all on iOS 26 (it is a separate process), so nothing here can
+        ask "is it up?" -- and Appium's is_keyboard_shown costs 7-9s a call.
+
+        The Return key closes it: measured on the iPad, keyboard gone 0.4s after
+        one press, confirmed by screenshot. It is also exactly what Appium's
+        `mobile: hideKeyboard` presses ("Done"/"return"), in 2-11s. With no field
+        focused the key goes nowhere, so pressing it blind is safe."""
         udid = getattr(self, "_cur_udid", "") or self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
-        # 1) XCUITest native dismissal (Done/return) then Appium's hide_keyboard — neither
-        #    moves the view, so they're safe if they work.
-        try:
-            r.d.execute_script("mobile: hideKeyboard",
-                               {"keys": ["Done", "return", "Return", "next", "Next", "go"]})
-            time.sleep(0.4)
-        except Exception:
-            try:
-                r.d.hide_keyboard(); time.sleep(0.4)
-            except Exception:
-                pass
-        # 2) If keyboard keys are still in the tree, blur by tapping a non-interactive
-        #    label in the form's upper band (below any header/back button, above the
-        #    keyboard) — tapping a StaticText dismisses the keyboard without navigating.
-        try:
-            els = self._idb_els(udid)
-            kb_up = any((e.get("type") or "").endswith("Key") for e in els)
-            if kb_up:
-                labels = [e for e in els
-                          if (e.get("type") or "") == "StaticText"
-                          and 140 < e["cy"] < 380 and e["w"] > 40]
-                if labels:
-                    self._idb_tap(labels[0]["cx"], labels[0]["cy"], udid); time.sleep(0.5)
-                    notes.append("[ok] @hide_keyboard — blurred field (label tap) to close keyboard")
-                else:
-                    notes.append("[ok] @hide_keyboard — keyboard persisted; no safe blur target")
-            else:
-                notes.append("[ok] @hide_keyboard — keyboard down")
-        except Exception as e:
-            notes.append(f"[ok] @hide_keyboard — {type(e).__name__}; continuing")
+        _idbd.press_return(udid)
+        time.sleep(0.4)
+        notes.append("[ok] @hide_keyboard — keyboard closed (return key)")
         return True
 
     def _first_time_slot(self, r: ScenarioRunner, notes: List[str]) -> bool:
@@ -3295,15 +3577,26 @@ class FlowRunner:
                         e[0].click()
                         return True
                 return False
-            _ex = _fut.ThreadPoolExecutor(max_workers=1)
-            try:
-                tapped = bool(_ex.submit(_click_slot).result(timeout=35))
-                _ex.shutdown(wait=False)
-                if tapped:
-                    time.sleep(1.0)
-                    notes.append(f"[ok] @first_time_slot — selected slot '{lbl}' (appium, {tag})")
-            except Exception:
-                _ex.shutdown(wait=False)
+            # FIRST: idb, verified -- describe-point must confirm the chip is under
+            # the point, and the form is swiped to bring it into view if not. This
+            # is exactly the failure the Appium-first order was guarding against
+            # (a content-space frame that is really the Save button), now checked
+            # instead of avoided. ~2-5s against ~40-56s.
+            _ok_slot, _how = _idbd.tap(udid, [f"{safe}Btn", safe])
+            if _ok_slot:
+                tapped = True
+                time.sleep(0.6)
+                notes.append(f"[ok] @first_time_slot — selected slot '{lbl}' ({_how}, {tag})")
+            if not tapped:
+                _ex = _fut.ThreadPoolExecutor(max_workers=1)
+                try:
+                    tapped = bool(_ex.submit(_click_slot).result(timeout=35))
+                    _ex.shutdown(wait=False)
+                    if tapped:
+                        time.sleep(1.0)
+                        notes.append(f"[ok] @first_time_slot — selected slot '{lbl}' (appium, {tag})")
+                except Exception:
+                    _ex.shutdown(wait=False)
             # FALLBACK: idb coordinate tap (fine for the consumer's simple vertical list, where
             # content-space ~= screen-space). Only used if the Appium element wasn't found/clicked.
             if not tapped:
@@ -3321,13 +3614,14 @@ class FlowRunner:
                                  f"visible strip (x={cx:.0f} of {_vw:.0f}) and its chip "
                                  f"id did not resolve, so it cannot be tapped reliably")
                     return False
-                try:
-                    tapped = self._idb_tap(cx, cy, udid)   # rotates for a landscape iPad
-                    time.sleep(1.0)
-                    notes.append(f"[ok] @first_time_slot — tapped time slot '{lbl}' via idb ({tag})")
-                except Exception as ex:
-                    notes.append(f"[FAIL] @first_time_slot — could not select slot '{lbl}' ({ex})")
-                    return False
+                # The VERIFIED idb tap above already tried this chip (and swiped it
+                # into view). A raw coordinate tap now could only land on whatever
+                # is drawn over the chip's content-space frame -- measured: the Save
+                # button -- so refuse rather than press something else.
+                notes.append(f"[FAIL] @first_time_slot — slot '{lbl}' could not be reached: "
+                             f"idb could not confirm it under the tap point and Appium "
+                             f"could not click it ({_how})")
+                return False
 
             # VERIFY THE SELECTION TOOK.
             #
@@ -3340,7 +3634,9 @@ class FlowRunner:
             # (selectedTime === el ? '#d6d6d6' : '#eee'), which accessibility does
             # not expose -- so check the thing that DOES change: the app enables the
             # save control once a time is committed.
-            if not self._time_slot_committed(r, lbl):
+            # The idb path proved the same thing BEFORE tapping: describe-point
+            # returned the chip itself (so it was on screen and not under Save).
+            if not _ok_slot and not self._time_slot_committed(r, lbl):
                 notes.append(f"[FAIL] @first_time_slot — tapped '{lbl}' but no time is "
                              f"selected (the form still has none), so Save would be "
                              f"silently rejected")
@@ -3963,6 +4259,189 @@ class FlowRunner:
         except Exception:
             return False
 
+    # Steps that settle or close a booking. When the diner has already paid in full
+    # (a card pre-order in the C-App), "notify payment" COMPLETES the booking and the
+    # app returns to the board -- measured on 4777: the card read 'Completed' right
+    # after notifyPaymentBtn. There is then no bill to take and no table to close.
+    _SETTLE_IDS = {"closeTableBtn"}
+
+    def _optional_step(self, r: ScenarioRunner, inner: str, notes: List[str]) -> bool:
+        """A step marked '?' applies to some builds/states only ('?click Yes').
+
+        Wait briefly for its target; tap it if it appears, otherwise record that it
+        did not apply and move on. Measured: this build has NO 'Yes' after notify
+        payment (it shows a 'Payment Notified' toast), and the unconditional step
+        hung the segment for its full 240s looking for one."""
+        m = re.match(r"^\s*click\s+(.+?)\s*$", inner)
+        target = (m.group(1) if m else inner).strip()
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            els = _idbd.describe_all(udid)
+            if any(_idbd.name(e) == target or (e.get("AXLabel") or "").strip() == target
+                   for e in els):
+                ok, note, _fl = self._smart_click(r, inner)
+                notes.append(f"[{'ok' if ok else 'FAIL'}] {inner} — {note}")
+                return ok
+            time.sleep(1.0)
+        notes.append(f"[skip] {inner} — not shown here (optional step; this build "
+                     f"has no such control at this point)")
+        return True
+
+    def _already_settled(self) -> str:
+        """'booking 4777 is Completed' when the booked booking needs no more
+        payment, else ''. Read from the My Orders panel (exact start time + status),
+        or the diner's board card in the booked hour. Never while the payment or
+        close controls are still on screen."""
+        slot = getattr(self, "_booked_slot", "") or ""
+        want = re.match(r"^(\d{1,2}):(\d{2})", slot)
+        if not want:
+            return ""
+        want_hhmm = f"{int(want.group(1)):02d}:{want.group(2)}"
+        hour_lbl = f"{int(want.group(1)):02d}:00"
+        udid = self._business_udid()
+        done = ("completed", "paymentdone")
+        diner = _norm(CONSUMER_NAME).split()[0] if CONSUMER_NAME else ""
+        for _ in range(4):                 # the panel refreshes a beat after completion
+            els = _idbd.describe_all(udid)
+            names = {_idbd.name(e) for e in els}
+            if names & {"ePaymentBtn", "cashPaymentBtn", "foodVoucherBtn",
+                        "E-Payment", "Cash", "Food Voucher"}:
+                return ""                  # a bill is open: there is something to pay
+            # Close Table renders ONLY once the bill is paid:
+            #   !serve && !inprogress && payment_completed && reminder
+            #   && visited_restaurant                (Screens/Event/OrderSummary)
+            # Measured on 4780: after notify payment the order stayed up with
+            # PRE-ORDERED items, 'Total', closeTableBtn -- and no payment methods.
+            if "closeTableBtn" in names:
+                return "the bill is already paid (the app offers only Close Table)"
+            for e in els:
+                lbl = _idbd.name(e)
+                mm = _SIDEBAR_ROW_RE.search(lbl)
+                if not mm:
+                    continue
+                start = mm.group(0).split("-")[0].strip()
+                if f"{int(start.split(':')[0]):02d}:{start.split(':')[1]}" != want_hhmm:
+                    continue
+                st = _row_status(lbl)
+                if st in done:
+                    return f"booking {lbl.split()[0]} ({want_hhmm}) is already {st}"
+            hours = [(_idbd.name(e), _idbd.frame(e)[1]) for e in els
+                     if re.match(r"^\d{1,2}:00$", _idbd.name(e))]
+            for e in els:
+                nm, st = self._split_card(_idbd.name(e))
+                if not nm or not (st == "completed" or st.startswith("payment")) or \
+                        (diner and not _norm(nm).startswith(diner)):
+                    continue
+                top = _idbd.frame(e)[1]
+                near = min(hours, key=lambda h: abs(h[1] - top), default=None)
+                if near and near[0] == hour_lbl:
+                    return f"the diner's {hour_lbl} booking is already {st}"
+            time.sleep(1.5)
+        return ""
+
+    def _skip_if_settled(self, step: str, notes: List[str]) -> bool:
+        settled = self._already_settled()
+        if settled:
+            notes.append(f"[skip] {step} — nothing left to pay: {settled} (the diner paid "
+                         f"in full in the C-App, so notify payment completed it)")
+            return True
+        return False
+
+    # Status words as the panel PRINTS them, most specific first: 'SERVE' is inside
+    # 'RESERVED', so RESERVED must be tried before it.
+    _PANEL_STATUS_WORDS = ("CONFIRMATION PENDING", "PAYMENT DONE", "IN PROGRESS",
+                           "RESERVED", "COMPLETED", "CANCELLED", "EXPIRED", "DECLINED",
+                           "SERVE")
+
+    def _open_from_panel(self, slot: str, statuses: tuple, what: str,
+                         notes: List[str], pages: int = 2) -> bool:
+        """Open the booking straight from the right-hand My Orders panel.
+
+        The panel lists today's bookings with ticket, status and time window --
+        the fastest place to find one (no calendar scroll, no hour list). Its
+        cards expose NONE of that to accessibility (labelled `${el?.id}`, which is
+        'undefined' for a reserved booking), so the card text is READ from the
+        screen (screen_text), matched to the card by position, and the card is
+        then tapped with the usual describe-point check."""
+        from automation.scenarios import screen_text
+        want = re.match(r"^(\d{1,2}):(\d{2})", slot or "")
+        if not want:
+            return False
+        want_hhmm = f"{int(want.group(1)):02d}:{want.group(2)}"
+        udid = self._business_udid()
+        name, frame = _idbd.name, _idbd.frame
+        for page in range(pages):
+            els = _idbd.describe_all(udid)
+            head = next((e for e in els if name(e) == "My Orders"
+                         and e.get("type") == "StaticText"), None)
+            if head is None:
+                return False
+            w_app, h_app = _idbd.app_size(els)
+            x0 = frame(head)[0] - 30
+            cards = [e for e in els if e.get("type") == "GenericElement"
+                     and x0 - 40 <= frame(e)[0] < w_app
+                     and frame(e)[2] > 200 and frame(e)[3] > 80]
+            if not cards:
+                return False
+            top = min(frame(c)[1] for c in cards)
+            lines = screen_text.read_text(udid, (x0, top, w_app, h_app), els)
+            if not lines:
+                return False                       # cannot read the screen here
+            for c in cards:
+                cx, cy, cw, chh = frame(c)
+                inside = [t for t in lines
+                          if cx <= t[1] + t[3] / 2 <= cx + cw and cy <= t[2] + t[4] / 2 <= cy + chh]
+                times, status, ticket = None, "", ""
+                for txt, *_ in inside:
+                    found = re.findall(r"(\d{1,2})[:.](\d{2})", txt)
+                    if len(found) >= 2 and times is None:
+                        times = found
+                    up = txt.upper()
+                    for word in self._PANEL_STATUS_WORDS:
+                        if word in up and not status:
+                            status = word
+                    if re.fullmatch(r"\d{3,6}", txt.strip()) and not ticket:
+                        ticket = txt.strip()
+                if not times:
+                    continue
+                if f"{int(times[0][0]):02d}:{times[0][1]}" != want_hhmm:
+                    continue
+                st = _norm(status)
+                if not any(st == ok or st.startswith(ok) for ok in statuses):
+                    notes.append(f"    · My Orders panel: the {want_hhmm} booking "
+                                 f"{ticket} reads {status or '?'} — not "
+                                 f"{'/'.join(statuses)}")
+                    continue
+                notes.append(f"    · found the {want_hhmm} booking in the My Orders "
+                             f"panel: {ticket} {status}".rstrip())
+                ok, _how = _idbd.tap_el(udid, c, els)
+                return ok and self._reservation_opened(notes, what, slot, "My Orders panel")
+            if page + 1 < pages:                   # a later booking sits further down
+                col = x0 + (w_app - x0) / 2
+                _idbd.swipe(udid, col, h_app * 0.85, col, h_app * 0.45, 1.8)
+                time.sleep(0.5)
+        return False
+
+    def _reservation_opened(self, notes: List[str], what: str, slot: str,
+                            where: str) -> bool:
+        """Did tapping a booking row open the reservation? Verified against markers
+        that exist ONLY on the reservation screen. 'closeEventModal' is deliberately
+        excluded: it is the events list's OWN close button, so treating it as
+        "opened" would report success the instant the list appeared."""
+        SIDEBAR_SAFE = ("selectAllItemsBtn", "addItemsBtn", "assignToBtn",
+                        "sendToKitchenBtn", "AssignTableBtn", "closeModal")
+        for _ in range(16):
+            time.sleep(1.0)
+            els_now = self._idb_els()
+            seen = {e["id"] for e in els_now} | {e["label"] for e in els_now}
+            if any(m in seen for m in SIDEBAR_SAFE) or self._table_modal_up():
+                notes.append(f"    · {what} — opened the {slot} booking from the {where}")
+                return True
+        notes.append(f"    · {what} — tapped the {slot} row in the {where} but the "
+                     f"reservation did not open")
+        return False
+
     def _open_reservation(self, r: ScenarioRunner, notes: List[str],
                           statuses: tuple = ("reserved", "confirmationpending"),
                           what: str = "@open_reservation") -> bool:
@@ -4007,6 +4486,21 @@ class FlowRunner:
         ms = re.match(r"^(\d{1,2})", slot)
         hour_lbl = f"{int(ms.group(1)):02d}:00" if ms else ""    # booked hour row, e.g. '18:00'
         bundle = self.business_bundle
+
+        # FAST PATH -- the right-hand panel. The waiter's home lists today's bookings
+        # there, each with its exact window ('4776 SERVE 17:05 - 18:05 I2 17:00').
+        # When the booked slot is listed, open it straight away: no calendar scroll,
+        # no events badge. A few pages of that list are checked (a late booking sits
+        # further down); anything else falls back to the calendar route below.
+        if slot:
+            # An hour's events list may already be open in that panel (its rows DO
+            # carry their window in accessibility) -- else read the panel's cards.
+            if self._click_sidebar_row(slot, statuses, notes, max_pages=1,
+                                       where="events list"):
+                if self._reservation_opened(notes, what, slot, "events list"):
+                    return True
+            elif self._open_from_panel(slot, statuses, what, notes):
+                return True
 
         def hour_y(els):
             for e in els:
@@ -4375,23 +4869,7 @@ class FlowRunner:
         # which crashed with "'object' object has no attribute 'replace'" and took
         # the whole segment down.
         def _opened_from_sidebar() -> bool:
-            # Verify against markers that exist ONLY on the reservation, not on the
-            # sidebar. 'closeEventModal' is deliberately excluded: it is the events
-            # list's OWN close button, so treating it as "opened" would report
-            # success the instant the list appeared.
-            SIDEBAR_SAFE = ("selectAllItemsBtn", "addItemsBtn", "assignToBtn",
-                            "sendToKitchenBtn", "AssignTableBtn", "closeModal")
-            for _ in range(12):
-                time.sleep(1.5)
-                els_now = self._idb_els()
-                seen = {e["id"] for e in els_now} | {e["label"] for e in els_now}
-                if any(m in seen for m in SIDEBAR_SAFE) or self._table_modal_up():
-                    notes.append(f"    · {what} — opened the {slot} booking from the "
-                                 f"events list")
-                    return True
-            notes.append(f"    · {what} — tapped the {slot} row in the events list but "
-                         f"the reservation did not open; falling back to the board")
-            return False
+            return self._reservation_opened(notes, what, slot, "events list")
 
         label = _select_today_and_find()
         if label is _OPENED_VIA_SIDEBAR:
@@ -4736,7 +5214,12 @@ class FlowRunner:
             # Serve/settle segments run AFTER the kitchen role-switch, which drops the iPad
             # back on the bookings board — the order screen they assume is open is not. Re-open
             # the diner's now-InProgress ticket first (same machinery, later status).
-            return self._open_reservation(r, notes, statuses=("inprogress",), what="@open_order")
+            # After the kitchen marks the items Ready the booking reads SERVE (measured:
+            # '4776 SERVE 17:05 - 18:05'); 'inprogress' alone skipped it and the step
+            # timed out with the booking plainly listed. In Progress covers a partly
+            # readied order, Payment Done a diner who already paid in the C-App.
+            return self._open_reservation(r, notes, statuses=("serve", "inprogress", "payment"),
+                                          what="@open_order")
         if step == "@to_checkout":
             return self._to_checkout(r, notes)
         if step == "@pay_stripe":
@@ -4744,7 +5227,8 @@ class FlowRunner:
         if step == "@consumer_home":
             return self._consumer_home(r, notes)
         if step == "@assign_table":
-            return self._assign_table(r, notes)
+            # Fast, verified idb path when the sheet is up; the full routine otherwise.
+            return self._assign_table_idb(notes) or self._assign_table(r, notes)
         if step == "@ensure_order_items":
             return self._ensure_order_items(r, notes)
         if step == "@kitchen_ready":
@@ -4770,6 +5254,8 @@ class FlowRunner:
             return self._accept_appointment(r, notes)
         if step.startswith("@wait_screen:"):
             return self._await_screen(step.split(":", 1)[1].strip(), notes)
+        if step.startswith("@pay:") and self._skip_if_settled(step, notes):
+            return True
         if step.startswith("@pay:"):
             return self._pay(r, step.split(":", 1)[1], notes)
         notes.append(f"[FAIL] unknown token {step}")
@@ -4905,6 +5391,11 @@ class FlowRunner:
         snapshot misses deep cards like NylaiKitchen2). Falls back to the fuzzy
         resolver for plain-English steps or when the id isn't found directly.
         Returns (ok, short_note, flaky) — flaky=True when it only passed on a retry."""
+        # The simulator this step acts on. (Used below by the LogBox branch, which
+        # referenced an undefined `udid` -- a NameError swallowed by its except, so
+        # that retry never ran.)
+        udid = (getattr(self, "_cur_udid", "") or self.devices.get("consumer")
+                or DEFAULT_CONSUMER_UDID)
         m = re.match(r'^\s*click\s+([A-Za-z][\w]*)\s*$', step)
         ident = m.group(1) if m else None
         if ident is None:
@@ -4920,6 +5411,25 @@ class FlowRunner:
                 if len(parts) > 1:
                     ident = parts[0].lower() + "".join(p.capitalize() for p in parts[1:])
         if ident:
+            # FIRST: idb, VERIFIED. One screen read (~1s), then describe-point must
+            # confirm the element itself is under the tap point before tapping --
+            # an element scrolled out of its scroll view still reports a frame, and
+            # a blind tap there lands on whatever is drawn at those pixels (measured:
+            # a time chip's frame that was really the Save button). Unique name
+            # only; anything idb cannot confirm falls through to the paths below.
+            # ~2s a tap against ~12-17s for Appium's find + click on this tree.
+            # Not for a checkbox: a dispatched tap is not a toggled box, and only
+            # the Appium path below confirms the state (see ScenarioRunner._tap_step).
+            _ok_fast, _how = (False, "checkbox") if r._looks_like_checkbox(ident) \
+                else _idbd.tap(udid, self._id_candidates(ident))
+            if _ok_fast:
+                time.sleep(0.6)
+                return True, f"tapped {ident} ({_how})", False
+            if ident in self._SETTLE_IDS:
+                settled = self._already_settled()
+                if settled:
+                    return True, (f"not needed — {settled}; the app closed the "
+                                  f"booking itself"), False
             # idb FAST-PATH — ONLY for allow-listed ids (clean on-screen modal buttons whose
             # Appium full-tree snapshot hangs; e.g. preOrderBooking hung a run ~30 min). Not
             # used for anything else: it's too blunt for cards (it once matched a same-named
@@ -4937,7 +5447,8 @@ class FlowRunner:
                         for e in els:
                             if (e["id"] == ident or e["label"].strip() == ident) \
                                     and e["w"] > 0 and e["h"] > 0 \
-                                    and 0 <= e["cx"] <= sw and 0 <= e["cy"] <= sh:
+                                    and 0 <= e["cx"] <= sw and 0 <= e["cy"] <= sh \
+                                    and _idbd.hittable(udid, self._raw_el(e)):
                                 self._idb_tap(e["cx"], e["cy"]); time.sleep(0.8)
                                 return True, f"tapped {ident} (idb, {_attempt + 1} try)", False
                     except Exception:
@@ -4995,6 +5506,12 @@ class FlowRunner:
                                         f"{ident} is covered by {what[:40]!r} — refusing a blind "
                                         f"coordinate tap (it would hit the overlay, not {ident})",
                                         False)
+                        # Same rule as the fast path: only a point describe-point
+                        # confirms. A blind centre tap here opened the Wallet tab
+                        # (drawn over the bottom of a restaurant card) instead of
+                        # the restaurant.
+                        if not _idbd.hittable(udid, self._raw_el(e)):
+                            break
                         self._idb_tap(e["cx"], e["cy"]); time.sleep(0.6)
                         return True, f"tapped {ident} (idb exact-id)", False
             except Exception:
@@ -5040,12 +5557,25 @@ class FlowRunner:
         mt = re.match(r'^\s*type\s+(.+?)\s+in\s+([A-Za-z][\w]*)\s*$', step)
         if mt:
             _val, _field = mt.group(1), mt.group(2)
+            # idb first: tap, clear, type, read back EXACTLY, close the keyboard.
+            # ~5s against ~44s for Appium's click + clear + send_keys + read-back.
+            _ok_fill, _got = _idbd.fill(udid, _field, _val)
+            if _ok_fill:
+                return True, f'typed "{_val}" into "{_field}" (idb, verified)', False
             try:
                 if _fill_field(r.d, _field, _val):
                     time.sleep(0.3)
                     return True, f'typed "{_val}" into "{_field}" (direct id)', False
             except Exception:
                 pass
+        ms = re.match(r'^\s*(?:scroll|swipe)\s+(up|down|left|right)\s*$', step, re.I)
+        if ms:
+            # Same gesture as XCUITest's `mobile: swipe` on the app (finger travels
+            # that way, from the middle), in ~0.7s instead of ~49s through the
+            # resolver's per-step Appium checks.
+            if _idbd.swipe_screen(udid, ms.group(1).lower()):
+                time.sleep(0.6)
+                return True, f"swiped {ms.group(1).lower()} (idb)", False
         res = r.run_one(step, 0)
         flaky = False
         # Retry-with-backoff — a step that fails once then passes is FLAKY, not a
@@ -5085,9 +5615,15 @@ class FlowRunner:
         fail_step = None
         total_steps = len(seg["steps"])
         try:
+            _t_seg = time.time()
             r = self._session_for(role)
+            notes.append(f"[ok] session ready on {getattr(self, '_cur_udid', '')[:8]} "
+                         f"({time.time() - _t_seg:.1f}s)")
             if role in ("waiter", "kitchen"):
-                if not self._ensure_business_account(r, role, notes):
+                _t_login, _n_login = time.time(), len(notes)
+                _acct_ok = self._ensure_business_account(r, role, notes)
+                self._stamp_duration(notes, _n_login, time.time() - _t_login)
+                if not _acct_ok:
                     notes.append("[where] failed at step: 'login' (could not sign in)")
                     self._persist(seg, "FAIL", notes, time.time() - started,
                                   screenshot=self._capture_screenshot())
@@ -5113,6 +5649,8 @@ class FlowRunner:
                 # STEP_TIMEOUT, fail the segment fast instead of stalling the whole run.
                 def _exec_step():
                     _step = self._PLAIN_STEP_TOKENS.get(step, step)
+                    if _step.startswith("?"):
+                        return self._optional_step(r, _step[1:].strip(), notes), False
                     if _step.startswith("@"):
                         _ok = self._handle_special(r, _step, notes)
                         if not _ok:
@@ -5131,9 +5669,11 @@ class FlowRunner:
                 # timeout entirely (a step hung 28 min despite result(timeout=…) firing).
                 # Manage it manually and shutdown(wait=False) so a hung step is abandoned.
                 _watch = self._start_step_watchdog(step, seg)
+                _n_before, _t_step = len(notes), time.time()
                 _ex = _fut.ThreadPoolExecutor(max_workers=1)
                 try:
                     ok, step_flaky = _ex.submit(_exec_step).result(timeout=STEP_TIMEOUT)
+                    self._stamp_duration(notes, _n_before, time.time() - _t_step)
                     _wnote = self._finish_step_watchdog(_watch, step, ok)
                     if _wnote:
                         notes.append(f"    {_wnote}")
@@ -5201,6 +5741,15 @@ class FlowRunner:
         self._persist(seg, status, notes, time.time() - started, screenshot=fail_shot)
         return status == "PASS"
 
+    @staticmethod
+    def _stamp_duration(notes: List[str], start: int, secs: float) -> None:
+        """Append how long the step took to its own result line ('[ok] … (2.1s)'),
+        so a report shows where a run's time went, step by step."""
+        for i in range(len(notes) - 1, start - 1, -1):
+            if notes[i].startswith(("[ok]", "[flaky]", "[FAIL]", "[warn]", "[skip]")):
+                notes[i] = f"{notes[i]} ({secs:.1f}s)"
+                return
+
     def _collect_evidence(self, role: str) -> List[str]:
         """Why the app failed, in its own words — gathered ONCE at the failing step.
 
@@ -5235,7 +5784,12 @@ class FlowRunner:
             # each app repo runs its own on its own port.
             path = os.getenv("METRO_LOG_PATH") or ""
             if not path:
-                logs = sorted(glob.glob("/tmp/metro*.log"), key=os.path.getmtime, reverse=True)
+                # The platform's own Metro logs (builder.metro_log_path), plus the
+                # older /tmp location.
+                from automation.projects.builder import METRO_LOG_DIR
+                logs = sorted(glob.glob(os.path.join(METRO_LOG_DIR, "metro_*.log"))
+                              + glob.glob("/tmp/metro*.log"),
+                              key=os.path.getmtime, reverse=True)
                 path = logs[0] if logs else ""
             for line in read_js_console(path, max_lines=12):
                 out.append(f"    [evidence] js: {line[:220]}")
@@ -5345,7 +5899,11 @@ class FlowRunner:
                  "samples": 0, "errors": 0, "t0": time.time(), "first": [], "last": []}
 
             def _loop():
-                while not w["stop"].is_set():
+                # Wait BEFORE the first sample. It only matters for steps that run
+                # past the window (30s), and sampling at t=0 put a full idb screen
+                # read in parallel with every step's own first read -- on a step
+                # that now takes 2-5s in total.
+                while not w["stop"].wait(6.0):
                     try:
                         labels = [e["label"] for e in self._idb_els() if e.get("label")]
                         w["samples"] += 1
@@ -5360,7 +5918,6 @@ class FlowRunner:
                             w["spinner_all"] = False
                     except Exception:
                         w["errors"] += 1
-                    w["stop"].wait(6.0)      # 6s: each idb dump already costs ~2-3s
 
             t = _th.Thread(target=_loop, name="ui-watchdog", daemon=True)
             w["thread"] = t
@@ -5588,7 +6145,7 @@ class FlowRunner:
                 if udid not in self._sessions:
                     d = webdriver.Remote(APPIUM_URL, options=_options(udid, bundle, wda))
                     d.activate_app(bundle)
-                    self._wait_app_ready(d, bundle)
+                    self._wait_app_ready(d, bundle, udid=udid)
                     self._sessions[udid] = d
                     self._runners[udid] = ScenarioRunner(d, bundle, screenshot_dir=None)
                 return True

@@ -45,40 +45,9 @@ def test_no_segment_touches_an_order_after_a_role_switch():
     assert not bad, "segments acting on an order the role switch just closed:\n  " + "\n  ".join(bad)
 
 
-def test_kitchen_ready_only_passes_when_it_actually_marked_ready():
-    """Closing a leftover prepared ticket must NOT be enough to pass — that let a run go
-    green having never marked anything Ready, the one thing the step is named after."""
-    from automation.scenarios.cross_app_flows import FlowRunner
-
-    class FakeEl:
-        def click(self): pass
-
-    class FakeDriver:
-        def __init__(self, present): self.present = present
-        def find_elements(self, _by, value):
-            return [FakeEl()] if value in self.present else []
-
-    class FakeRunner:
-        def __init__(self, present): self.d = FakeDriver(present)
-
-    def ready_result(present):
-        notes = []
-        runner = FlowRunner.__new__(FlowRunner)          # no __init__: no devices needed
-        return FlowRunner._kitchen_ready(runner, FakeRunner(present), notes), notes
-
-    ok, _ = ready_result({"orderReadyBtn", "orderCloseBtn"})
-    assert ok, "readied (and closed) must pass"
-
-    ok, _ = ready_result({"orderReadyBtn"})
-    assert ok, "readied alone must pass"
-
-    ok, notes = ready_result({"orderCloseBtn"})
-    assert not ok, f"close-only must FAIL, it never marked anything ready; notes={notes}"
-
-    ok, notes = ready_result(set())
-    assert not ok, f"empty queue must FAIL; notes={notes}"
-
-
+# The kitchen-ready assertion (only readying counts; closing a leftover ticket
+# fails; an empty board fails) is covered behaviourally, against a fake board
+# that reacts like the app, in tests/test_kitchen_ready_selects_products.py.
 
 
 def test_multiword_click_reaches_the_fast_path():
@@ -112,6 +81,5 @@ def test_multiword_click_reaches_the_fast_path():
 if __name__ == "__main__":
     test_serve_list_navigates_first()
     test_no_segment_touches_an_order_after_a_role_switch()
-    test_kitchen_ready_only_passes_when_it_actually_marked_ready()
     test_multiword_click_reaches_the_fast_path()
     print("ok — navigation, kitchen-ready assertion, and multi-word click ids")

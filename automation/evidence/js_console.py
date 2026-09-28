@@ -40,6 +40,9 @@ _NOISE = re.compile(
     r"|Each child in a list"    # React key warning, present on every screen
     r"|Failed prop type"        # noisy in this app and never the cause
     r"|Require cycle:"
+    r"|ViewPropTypes will be removed"   # RN 0.68 deprecation, printed on every launch
+    r"|SSRProvider is not necessary"
+    r"|cannot calculate shadow efficiently"
 )
 
 # ANSI colour from Metro's pretty printer — unreadable once stored as JSON.
@@ -58,7 +61,12 @@ def extract_js_errors(text: str, max_lines: int = 50) -> List[str]:
         if not line.strip():
             continue
         if _SIGNAL.search(line) and not _NOISE.search(line):
-            keep.append(line.strip())
+            line = line.strip()
+            # One copy of a repeated line: the same warning twelve times buried the
+            # one line that mattered.
+            if line in keep:
+                keep.remove(line)
+            keep.append(line)
     return keep[-max_lines:] if max_lines and len(keep) > max_lines else keep
 
 
