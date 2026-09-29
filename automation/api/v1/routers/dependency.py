@@ -274,7 +274,9 @@ def _hybrid_app_configs(group: ApplicationGroup, db: Session) -> List[Dict[str, 
             "name": app["name"],
             "repo_path": app["path"],
             "app_type": app["type"],
-            "app_role": app["app_role"],
+            # Members carry no role (TestProject has none); a KeyError here
+            # made every Analyze a 500.
+            "app_role": app.get("app_role"),
             "test_suite": app["test_suite"],
             "project_id": app["project_id"],
             "cloned": app["cloned"],
@@ -432,6 +434,9 @@ def get_module_graph(project_id: str, db: Session = Depends(get_db)):
     if not graph.get("available"):
         raise HTTPException(
             status_code=503,
-            detail="Graphify is not installed — the module graph is unavailable.",
+            detail=(
+                "Graphify (the optional PyPI package 'graphifyy') is not installed, "
+                "so the module graph is unavailable."
+            ),
         )
     return graph

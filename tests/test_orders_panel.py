@@ -80,6 +80,56 @@ def test_in_progress_is_opened_for_open_order(panel):
     assert ok and taps == [420]
 
 
-def test_no_screen_reader_falls_back_quietly(panel):
+def test_no_screen_reader_says_why_it_falls_back(panel):
+    # It used to fall back silently, so a 106s calendar scroll had no explanation.
     ok, notes, taps = panel("18:05", ("reserved",), text=[])
-    assert not ok and taps == [] and notes == []
+    assert not ok and taps == []
+    assert notes == ["    · My Orders panel: could not read its text — trying the calendar"]
+
+
+# Measured 2026-09-29 (screenshot of the waiter board, panel text as read, in app
+# points): 4794 RESERVED 12:50 is the 5th card. The step scrolled the calendar
+# for 106s instead -- no accessibility card element was needed to see it here.
+TODAY = [("4789", 830, 180, 40, 14), ("IN PROGRESS", 1050, 182, 110, 10),
+         ("12:05 - 13:05", 830, 215, 100, 14), ("12:05", 1130, 214, 40, 14),
+         ("4791", 830, 310, 40, 14), ("RESERVED", 1070, 312, 90, 10),
+         ("12:20- 13:20 | YI", 830, 345, 100, 14), ("12:19", 1130, 345, 40, 14),
+         ("4790", 830, 440, 40, 14), ("RESERVED", 1070, 442, 90, 10),
+         ("12:20- 14:20 | YI", 830, 475, 100, 14), ("12:18", 1130, 475, 40, 14),
+         ("4792", 830, 570, 40, 14), ("SERVE", 1090, 572, 60, 10),
+         ("12:25- 13:25", 830, 605, 100, 14), ("12:31", 1130, 605, 40, 14),
+         ("4794", 830, 700, 40, 14), ("RESERVED", 1070, 702, 90, 10),
+         ("12:50- 13:50 | YI", 830, 735, 100, 14), ("12:43", 1130, 735, 40, 14)]
+
+
+def test_todays_booking_is_opened_from_the_text_without_card_elements(monkeypatch):
+    points = []
+    bare = [APP, el("My Orders", 822, 26, 124, 30, "StaticText")]   # no card elements
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: bare)
+    monkeypatch.setattr(screen_text, "read_text", lambda udid, region=None, els=None: TODAY)
+    monkeypatch.setattr(caf._idbd, "tap_point",
+                        lambda udid, x, y: points.append((x, y)) or (True, "idb"))
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: None)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner.devices = {"waiter": "IPAD"}
+    monkeypatch.setattr(runner, "_reservation_opened", lambda n, w, s, where: True, raising=False)
+    notes = []
+    assert runner._open_from_panel("12:50", ("reserved", "confirmationpending"),
+                                   "@open_reservation", notes)
+    assert points == [(880.0, 742.0)]                 # the 12:50 window of card 4794
+    assert "4794 RESERVED" in notes[-1]
+
+
+def test_serve_card_is_not_taken_for_reserved_today(monkeypatch):
+    monkeypatch.setattr(caf._idbd, "describe_all",
+                        lambda udid: [APP, el("My Orders", 822, 26, 124, 30, "StaticText")])
+    monkeypatch.setattr(screen_text, "read_text", lambda udid, region=None, els=None: TODAY)
+    monkeypatch.setattr(caf._idbd, "tap_point", lambda *a: pytest.fail("must not tap"))
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: None)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner.devices = {"waiter": "IPAD"}
+    notes = []
+    assert not runner._open_from_panel("12:25", ("reserved",), "@open_reservation", notes)
+    assert "4792 reads SERVE" in notes[0]

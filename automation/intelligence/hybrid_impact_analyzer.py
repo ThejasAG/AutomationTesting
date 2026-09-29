@@ -111,7 +111,8 @@ class HybridImpactAnalyzer:
 
     def _find_by_basename(self, repo: str, basename: str) -> Optional[str]:
         for root, dirs, files in os.walk(repo):
-            dirs[:] = [d for d in dirs if d not in _SKIP or not d.startswith(".")]
+            # `and`: with `or`, node_modules (not dotted) was walked in full.
+            dirs[:] = [d for d in dirs if d not in _SKIP and not d.startswith(".")]
             if basename in files:
                 return os.path.join(root, basename)
         return None

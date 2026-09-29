@@ -426,6 +426,15 @@ def _reap_orphaned_runs():
                     ScenarioResult.run_id == r.id,
                     ScenarioResult.status.in_(["running", "queued"]),
                 ).all():
+                    if row.status == "queued":
+                        # Written up front for Live Steps; it never started.
+                        row.status = "SKIPPED"
+                        for side in ("consumer_status", "business_status"):
+                            if getattr(row, side) == "queued":
+                                setattr(row, side, "SKIPPED")
+                        row.reasons = ["[skipped] not run — the backend restarted "
+                                       "before this segment started."]
+                        continue
                     row.status = "FAIL"
                     # Drop the '▶' in-flight marker — the dashboard spins on it, so
                     # leaving it keeps a step animating under a terminal badge.

@@ -93,8 +93,7 @@ def read_text(udid: str, region: Optional[Tuple[float, float, float, float]] = N
         if not w or not h:
             return []
         # The screenshot is the PORTRAIT framebuffer; turn it the way the app is.
-        idb_coords.to_device(udid, 1, 1, els)
-        mode = (idb_coords._CACHE.get(udid) or (0, "same"))[1]
+        mode = idb_coords.mode(udid, els)
         fd, shot = tempfile.mkstemp(suffix=".png")
         os.close(fd)
         crop_path = shot.replace(".png", "-crop.png")
@@ -102,7 +101,7 @@ def read_text(udid: str, region: Optional[Tuple[float, float, float, float]] = N
             subprocess.run(["xcrun", "simctl", "io", udid, "screenshot", shot],
                            capture_output=True, timeout=20)
             img = Image.open(shot).convert("RGB")
-            img = img.rotate({"ccw": 90, "cw": 270}.get(mode, 0), expand=True)
+            img = idb_coords.upright(img, mode)
             s = img.width / w
             x0, y0, x1, y1 = region or (0, 0, w, h)
             box = (int(x0 * s), int(y0 * s), int(x1 * s), int(y1 * s))

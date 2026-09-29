@@ -622,6 +622,17 @@ export async function updateGroup(id: string, data: { name?: string; description
     return body.group;
 }
 
+/** Replaces the group's membership with exactly these projects. */
+export async function setGroupProjects(id: string, projectIds: string[]): Promise<ApplicationGroup> {
+    const res = await fetch(`${API_BASE}/groups/${id}/projects`, {
+        method: 'PUT',
+        headers: getHeaders(),
+        body: JSON.stringify({ project_ids: projectIds }),
+    });
+    const body = await handleResponse(res);
+    return body.group;
+}
+
 /** Deletes the group. Member projects are detached, never deleted. */
 export async function deleteGroup(id: string): Promise<void> {
     const res = await fetch(`${API_BASE}/groups/${id}`, {

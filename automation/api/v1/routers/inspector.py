@@ -90,7 +90,22 @@ def screenshot(udid: str) -> Dict[str, Any]:
     try:
         from PIL import Image
         import io as _io
-        w, h = Image.open(_io.BytesIO(data)).size
+        img = Image.open(_io.BytesIO(data))
+        w, h = img.size
+        if h > w:
+            # The framebuffer is always portrait. A landscape iPad's app can be
+            # turned either way, depending on how the simulator was last rotated,
+            # so the page's fixed -90deg drew it upside down half the time. Turn
+            # it by the MEASURED direction -- the same one that makes taps land.
+            # Re-measured on every Inspect: the simulator may have been rotated.
+            from automation.scenarios import idb_coords
+            idb_coords.forget(udid)
+            m = idb_coords.mode(udid)
+            if m in ("ccw", "cw"):
+                img = idb_coords.upright(img, m)
+                buf = _io.BytesIO()
+                img.save(buf, format="PNG")
+                data, (w, h) = buf.getvalue(), img.size
     except Exception:
         w = h = 0
     return {"udid": udid, "width": w, "height": h,

@@ -43,7 +43,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from appium import webdriver
 from appium.webdriver.common.appiumby import AppiumBy
@@ -480,6 +480,8 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@assign_table", "help": "Assign a table on the Select A Table sheet"},
         {"step": "@ensure_order_items", "help": "Add items only if the order is empty"},
         {"step": "@kitchen_ready", "help": "Mark a queued order Ready"},
+        {"step": "@select_all_items", "help": "Select every item on the order (Select All)"},
+        {"step": "@send_to_kitchen", "help": "Tap SEND and confirm the order went to the kitchen"},
         {"step": "@pay:epay", "help": "Settle by E-Payment"},
         {"step": "@pay:cash", "help": "Settle by cash"},
         {"step": "@pay:voucher", "help": "Settle by food voucher"},
@@ -688,7 +690,19 @@ class FlowRunner:
         self.flow = flow
         self.devices = devices
         self.credentials = credentials
-        self.on_event = on_event or (lambda e: None)
+        # Setup (device lock, app check, WDA sessions) runs before any segment --
+        # 103s in a measured run -- and its log events were dropped (the runner is
+        # started without a callback), so Live Steps said "No steps recorded yet"
+        # while the devices were visibly working. They now land on segment 1.
+        self._setup_notes: List[str] = []
+        self._setup_stage_at: Optional[Tuple[str, float]] = None
+        _sink = on_event or (lambda e: None)
+
+        def _on_event(e: dict) -> None:
+            _sink(e)
+            if e.get("type") == "log" and self._setup_stage_at is not None:
+                self._setup_log(str(e.get("message") or ""))
+        self.on_event = _on_event
         # Which app pair to drive: "prod" (old Vya) or "staging" (STG-* apps).
         self.env = env if env in ENV_BUNDLES else "prod"
         self.consumer_bundle = ENV_BUNDLES[self.env]["consumer"]
@@ -3111,14 +3125,41 @@ class FlowRunner:
                {(e.get("id") or "").strip() for e in els}
         return bool(seen & {"addNewItemClose", "addNewItemInput", "addNewItemAll"})
 
+    def _order_has_items(self, r: ScenarioRunner, wait: float = 6.0) -> bool:
+        """Does the open Order Summary list any items? (Select All or Unselect is
+        in its header only then.) Read with idb; Appium only if idb is down."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        names = set(self._SELECT_ALL + self._UNSELECT)
+        deadline, empty_since = time.time() + wait, None
+        while True:
+            els = _idbd.describe_all(udid)
+            if not els:
+                break
+            if any(_idbd.name(e) in names or (e.get("AXLabel") or "").strip() in names
+                   for e in els):
+                return True
+            # The screen is up (Add is shown) with no selector in the header. Add can
+            # render before the items load, so only an empty state that HOLDS counts.
+            if any(_idbd.name(e) == "addItemsBtn" for e in els):
+                empty_since = empty_since or time.time()
+                if time.time() - empty_since >= 3.0:
+                    return False
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.5)
+        return any(r._resolve([i]) for i in self._id_candidates("selectAllItemsBtn"))
+
     def _ensure_order_items(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """On the opened Order Summary: if the booking was PRE-ORDERED, items are already
         there — do nothing. If it's an order-later booking with an EMPTY order, ADD items
         first so there's something to send to the kitchen. (Per the flow: 'add items if there
         is no pre-order one'.) Real ids: selectAllItemsBtn only renders once the order has
         products; addItemsBtn opens the menu; then assign the added products."""
-        # Pre-ordered items present?  selectAllItemsBtn is shown only when the order has items.
-        if r._resolve(["selectAllItemsBtn"]):
+        # Pre-ordered items present? The header's Select All / Unselect renders only
+        # when the order has items. It used to look for 'selectAllItemsBtn' alone --
+        # the PHONE id -- so on the iPad a pre-ordered order read as empty and got
+        # items added on top, after a slow Appium miss on the whole tree.
+        if self._order_has_items(r):
             notes.append("[ok] @ensure_order_items — pre-ordered items present; no add needed")
             return True
         # Empty order → add items.
@@ -3137,9 +3178,12 @@ class FlowRunner:
                 if self._add_items_sheet_up():
                     break
             self._add_all_products(r, notes)            # add a couple of products (idb)
+            udid = getattr(self, "_cur_udid", "") or self._business_udid()
             for bid in ("assignToBtn", "selectAll", "assignProductsBtn"):   # commit them to the order
-                if r._resolve([bid]):
-                    r.run_one(f"click {bid}", 0); time.sleep(0.8)
+                ok, why = _idbd.tap(udid, [bid])             # verified idb tap, ~1s
+                if not ok and why != "not on screen" and r._resolve([bid]):
+                    r.run_one(f"click {bid}", 0)             # present but not verifiable
+                time.sleep(0.8)
             notes.append("[ok] @ensure_order_items — no pre-order; added items to the order")
             return True
         notes.append("[ok] @ensure_order_items — no addItems button (already has items?); continuing")
@@ -4265,6 +4309,271 @@ class FlowRunner:
     # after notifyPaymentBtn. There is then no bill to take and no table to close.
     _SETTLE_IDS = {"closeTableBtn"}
 
+    # Order Summary header. Tablet (App/Screens/Event/OrderSummary.js:628-643) and
+    # phone (App/MobileScreens/Event/OrderSummary.js) spellings, then the text.
+    _SELECT_ALL = ("selectAll", "selectAllItemsBtn", "Select All")
+    _UNSELECT = ("unSelectAll", "unSelectItemsBtn", "Unselect")
+
+    def _select_all_items(self, notes: List[str], wait: float = 8.0) -> bool:
+        """Every item on the order selected, ready for SEND or SERVE.
+
+        The header shows Select All when nothing is selected and Unselect as soon
+        as ANYTHING is -- so Unselect alone does not mean everything is. Then:
+        Unselect, and Select All (the app selects every item that can be sent or
+        served). Fails in seconds, not STEP_TIMEOUT, when neither is on screen."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+
+        def on_screen(names):
+            els = _idbd.describe_all(udid)
+            return els, next((e for n in names for e in els
+                              if _idbd.name(e) == n or (e.get("AXLabel") or "").strip() == n),
+                             None)
+
+        def wait_for(names):
+            deadline = time.time() + wait
+            while True:
+                els, e = on_screen(names)
+                if e is not None or time.time() >= deadline:
+                    return els, e
+                time.sleep(0.5)
+
+        els, e = wait_for(self._SELECT_ALL + self._UNSELECT)
+        if e is None:
+            notes.append("[FAIL] select all items — neither Select All nor Unselect is "
+                         "on screen (is the order open, and does it have items?)")
+            return False
+        how = ""
+        if _idbd.name(e) in self._UNSELECT or (e.get("AXLabel") or "").strip() in self._UNSELECT:
+            ok, _ = _idbd.tap(udid, self._UNSELECT, els)
+            els, e = wait_for(self._SELECT_ALL) if ok else (els, None)
+            if e is None:
+                # Something is selected and Unselect did not respond: leave it as is.
+                notes.append("[ok] select all items — items were already selected "
+                             "(Unselect shown; could not reset the selection)")
+                return True
+            how = "reset the selection, then "
+        ok, why = _idbd.tap(udid, self._SELECT_ALL, els)
+        if not ok:
+            notes.append(f"[FAIL] select all items — could not tap Select All ({why})")
+            return False
+        if wait_for(self._UNSELECT)[1] is None:
+            notes.append("[FAIL] select all items — tapped Select All but nothing was "
+                         "selected (Unselect never appeared)")
+            return False
+        notes.append(f"[ok] select all items — {how}tapped Select All; every item is "
+                     f"selected (idb)")
+        return True
+
+    def _send_to_kitchen(self, notes: List[str], wait: float = 12.0) -> bool:
+        """SEND the selected items to the kitchen, and confirm they went.
+
+        SEND renders only while items are selected (OrderSummary.js: servedData
+        .length > 0) and its onPress posts the order, then refreshes the screen,
+        which clears the selection -- so the button going away is the sign the
+        order was sent. It stays on a failed post ('Error sending data')."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+
+        def send_shown() -> bool:
+            return any(_idbd.name(e) == "sendItemsBtn" for e in _idbd.describe_all(udid))
+
+        if not send_shown() and not self._select_all_items(notes):
+            notes.append("[FAIL] send to kitchen — no SEND button: nothing is selected")
+            return False
+        for attempt in (1, 2):
+            ok, why = _idbd.tap(udid, ["sendItemsBtn"])
+            if not ok:
+                notes.append(f"[FAIL] send to kitchen — could not tap SEND ({why})")
+                return False
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                time.sleep(1.0)
+                if not send_shown():
+                    notes.append(f"[ok] send to kitchen — tapped SEND; the order was "
+                                 f"sent (button cleared{', 2nd tap' if attempt == 2 else ''})")
+                    return True
+        notes.append(f"[FAIL] send to kitchen — tapped SEND twice but the order was not "
+                     f"sent (SEND still shown after {wait:.0f}s each time)")
+        return False
+
+    # Payment section of the waiter's order screen (App/Screens/Event/PaymentDetails.js).
+    # Note 'epaymentBtn' -- lower-case p; the old lookup tried 'ePaymentBtn' and the
+    # 'E-Payment' caption, found neither, and failed "payment method not found".
+    _PAY_BUTTONS = {
+        "epay": ("epaymentBtn", "ePaymentBtn", "E-Payment"),
+        "cash": ("cashPaymentBtn", "Cash"),
+        "voucher": ("foodVoucherBtn", "Food Voucher"),
+    }
+    _MONEY_RE = re.compile(r"^\s*(\d+(?:[.,]\d{1,2})?)\s*€\s*$")
+
+    def _pay_business(self, method: str, notes: List[str]) -> bool:
+        """Settle the diner's bill on the waiter's order screen.
+
+        The payment methods live INSIDE the diner's card ('R RoopaDaccordionCard'),
+        which starts collapsed -- the old step looked for them without opening it
+        (measured: 40s, "payment method not found"). So: open the card, pick the
+        method, type the bill total on the app's own keypad (a sheet of plain
+        digit keys; the amount shows in 'userAmountInput'), press Input, reopen
+        the card if it folded, and press Confirm Payment."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name = _idbd.name
+        buttons = self._PAY_BUTTONS[method]
+
+        def find(names, els):
+            return next((e for n in names for e in els
+                         if name(e) == n or (e.get("AXLabel") or "").strip() == n), None)
+
+        def diner_card(els):
+            return next((e for e in els if "accordionCard" in name(e)), None)
+
+        def wait_for(pick, secs=8.0):
+            deadline = time.time() + secs
+            while True:
+                els = _idbd.describe_all(udid)
+                hit = pick(els)
+                if hit is not None or time.time() >= deadline:
+                    return els, hit
+                time.sleep(0.5)
+
+        # 1. The diner's card, opened to its payment methods.
+        els, btn = wait_for(lambda es: find(buttons, es), 2.0)
+        if btn is None:
+            card = diner_card(els)
+            if card is None:
+                notes.append(f"[FAIL] @pay:{method} — no diner card on screen "
+                             f"(is the order open?)")
+                return False
+            _idbd.tap_el(udid, card, els)
+            els, btn = wait_for(lambda es: find(buttons, es))
+            if btn is None:
+                notes.append(f"[FAIL] @pay:{method} — opened the diner's card but no "
+                             f"payment methods appeared (payment not requested yet?)")
+                return False
+        bill = self._bill_total_idb(els)
+        if bill is None:
+            notes.append(f"[FAIL] @pay:{method} — could not read the bill total")
+            return False
+        # Cash is tendered over the bill so the change calculation gets checked.
+        amount = round(bill + PAY_OVER_BY, 2) if method == "cash" else bill
+
+        # 2. The method opens the keypad.
+        ok, why = _idbd.tap_el(udid, btn, els)
+        els, pad = wait_for(lambda es: find(("userInputBtn",), es))
+        if not ok or pad is None:
+            notes.append(f"[FAIL] @pay:{method} — tapped {name(btn)} but the amount "
+                         f"keypad did not open ({why})")
+            return False
+
+        # 3. The amount, on the app's keypad, read back from the amount box.
+        text = f"{amount:.2f}"
+        got = self._keypad_type(udid, text)
+        if got is None or text not in got.replace(",", "."):
+            notes.append(f"[FAIL] @pay:{method} — typed {text} on the keypad but the "
+                         f"amount reads {got!r}")
+            return False
+        _idbd.tap(udid, ["userInputBtn"])
+        els, _ = wait_for(lambda es: None if find(("userInputBtn",), es) else True)
+        notes.append(f"    · {method}: entered {text} € for a bill of {bill:.2f} € "
+                     f"and pressed Input")
+
+        # Several guests: a 'pay for' picker may ask whose share this is.
+        if find(("Apply",), els) is not None:
+            me = next((e for e in els if name(e).endswith("select")
+                       and name(e).lower().startswith(CONSUMER_NAME.lower().replace(" ", ""))), None)
+            if me is not None:
+                _idbd.tap_el(udid, me, els)
+            _idbd.tap(udid, ["Apply"])
+            els, _ = wait_for(lambda es: None, 1.0)
+
+        # 4. Confirm Payment. Measured on the iPad: the card stays OPEN after Input
+        # and Confirm appears a moment later, once it re-renders. Tapping the card
+        # "to reopen it" then CLOSED it. Wait for Confirm first; tap the card only
+        # when it has really folded (its payment methods are gone).
+        els, confirm = wait_for(lambda es: find(("paymentConfirmBtn",), es), 6.0)
+        if confirm is None and find(buttons, els) is None:
+            card = diner_card(els)
+            if card is not None:
+                _idbd.tap_el(udid, card, els)
+            els, confirm = wait_for(lambda es: find(("paymentConfirmBtn",), es))
+        if confirm is None:
+            notes.append(f"[FAIL] @pay:{method} — Confirm Payment not found after "
+                         f"entering the amount")
+            return False
+        ok, why = _idbd.tap_el(udid, confirm, els)
+        if not ok:
+            notes.append(f"[FAIL] @pay:{method} — could not tap Confirm Payment ({why})")
+            return False
+        # Paid: Confirm goes (or the close-table control appears). The next step,
+        # closeTableBtn, renders only once payment is complete, so it checks too.
+        els, done = wait_for(lambda es: True if (find(("closeTableBtn",), es) or
+                                                 not find(("paymentConfirmBtn",), es))
+                             else None, 15.0)
+        change = f", change {amount - bill:.2f} €" if method == "cash" else ""
+        notes.append(f"[ok] Bill check: total €{bill:.2f}, paid €{amount:.2f} by "
+                     f"{method}{change}; Confirm Payment "
+                     + ("accepted" if done else "tapped (result checked by close table)"))
+        return True
+
+    def _bill_total_idb(self, els: List[dict]) -> Optional[float]:
+        """The order's Total: the '36.05  €' text on the row of a 'Total' label
+        (the bottom-most such row, which is the order total, not a guest share)."""
+        name, frame = _idbd.name, _idbd.frame
+        best = None
+        for t in (e for e in els if name(e).strip().lower() == "total"):
+            ty = frame(t)[1] + frame(t)[3] / 2
+            for e in els:
+                m = self._MONEY_RE.match(name(e) or "")
+                if m and abs(frame(e)[1] + frame(e)[3] / 2 - ty) < 12 and frame(e)[0] > frame(t)[0]:
+                    if best is None or ty > best[0]:
+                        best = (ty, float(m.group(1).replace(",", ".")))
+        return best[1] if best else None
+
+    def _keypad_type(self, udid: str, text: str) -> Optional[str]:
+        """Type *text* on the payment keypad; returns what the amount box shows.
+
+        Keys carry no ids (App/Components/Keyboard): digits are plain '0'-'9'
+        texts, the decimal key is the icon LEFT of '0' and backspace the one to its
+        RIGHT. Only elements below the amount box count -- the header has a '0'."""
+        name, frame = _idbd.name, _idbd.frame
+
+        def keys():
+            els = _idbd.describe_all(udid)
+            box = next((e for e in els if name(e) == "userAmountInput"), None)
+            top = frame(box)[1] + frame(box)[3] if box else 0
+            pad = [e for e in els if frame(e)[1] > top and e.get("type") != "Application"
+                   and name(e) != "userInputBtn"]
+            digits = {name(e): e for e in pad if re.fullmatch(r"\d", name(e))}
+            zero = digits.get("0")
+            row = [e for e in pad if zero is not None and name(e) not in digits
+                   and abs(frame(e)[1] - frame(zero)[1]) < frame(zero)[3]]
+            dot = max((e for e in row if frame(e)[0] < frame(zero)[0]),
+                      key=lambda e: frame(e)[0], default=None) if zero else None
+            back = min((e for e in row if frame(e)[0] > frame(zero)[0]),
+                       key=lambda e: frame(e)[0], default=None) if zero else None
+            return els, box, digits, dot, back
+
+        def shown():
+            box = keys()[1]
+            return str((box or {}).get("AXValue") or name(box or {}) or "") if box else None
+
+        for attempt in (1, 2):
+            els, box, digits, dot, back = keys()
+            if box is None or len(digits) < 10:
+                return None
+            if attempt == 2 and back is not None:        # clear a bad entry, then retype
+                for _ in range(len(text) + 2):
+                    _idbd.tap_el(udid, back, els, scroll=False)
+                    time.sleep(0.15)
+            for ch in text:
+                key = dot if ch == "." else digits.get(ch)
+                if key is None:
+                    return None
+                _idbd.tap_el(udid, key, els, scroll=False)
+                time.sleep(0.2)
+            got = shown()
+            if got and text in got.replace(",", "."):
+                return got
+        return shown()
+
     def _optional_step(self, r: ScenarioRunner, inner: str, notes: List[str]) -> bool:
         """A step marked '?' applies to some builds/states only ('?click Yes').
 
@@ -4362,51 +4671,67 @@ class FlowRunner:
         the fastest place to find one (no calendar scroll, no hour list). Its
         cards expose NONE of that to accessibility (labelled `${el?.id}`, which is
         'undefined' for a reserved booking), so the card text is READ from the
-        screen (screen_text), matched to the card by position, and the card is
-        then tapped with the usual describe-point check."""
-        from automation.scenarios import screen_text
+        screen (screen_text) and grouped into cards by ticket number. The card
+        element under that text is tapped when accessibility has one, else the
+        text itself.
+
+        Measured 2026-09-29: 4794 RESERVED 12:50 was plainly in the panel and the
+        step still scrolled the calendar for 106s -- it gave up here without a
+        word, needing an accessibility card element for the match. Matching is
+        now text-only, and every fallback says why."""
+        from automation.scenarios import screen_text, idb_coords
         want = re.match(r"^(\d{1,2}):(\d{2})", slot or "")
         if not want:
             return False
         want_hhmm = f"{int(want.group(1)):02d}:{want.group(2)}"
         udid = self._business_udid()
         name, frame = _idbd.name, _idbd.frame
+
+        def skip(why: str) -> bool:
+            notes.append(f"    · My Orders panel: {why} — trying the calendar")
+            return False
+
         for page in range(pages):
             els = _idbd.describe_all(udid)
-            head = next((e for e in els if name(e) == "My Orders"
-                         and e.get("type") == "StaticText"), None)
-            if head is None:
-                return False
+            if not els:
+                return skip("could not read the screen (idb)")
             w_app, h_app = _idbd.app_size(els)
-            x0 = frame(head)[0] - 30
-            cards = [e for e in els if e.get("type") == "GenericElement"
-                     and x0 - 40 <= frame(e)[0] < w_app
-                     and frame(e)[2] > 200 and frame(e)[3] > 80]
-            if not cards:
-                return False
-            top = min(frame(c)[1] for c in cards)
-            lines = screen_text.read_text(udid, (x0, top, w_app, h_app), els)
+            head = next((e for e in els
+                         if name(e).startswith("My Orders")
+                         or (e.get("AXLabel") or "").strip().startswith("My Orders")), None)
+            # The panel is the right third of the landscape screen (x~795 of 1210).
+            x0 = (frame(head)[0] - 30) if head else w_app * 0.64
+            lines = screen_text.read_text(udid, (x0, 0, w_app, h_app), els)
+            tickets = sorted((t for t in lines if re.fullmatch(r"\d{3,6}", t[0].strip())),
+                             key=lambda t: t[2])
+            if not tickets and lines is not None:
+                # Unreadable text usually means the screenshot was turned the wrong
+                # way: re-measure the rotation once and read again.
+                idb_coords.forget(udid)
+                lines = screen_text.read_text(udid, (x0, 0, w_app, h_app), els)
+                tickets = sorted((t for t in lines if re.fullmatch(r"\d{3,6}", t[0].strip())),
+                                 key=lambda t: t[2])
             if not lines:
-                return False                       # cannot read the screen here
-            for c in cards:
-                cx, cy, cw, chh = frame(c)
-                inside = [t for t in lines
-                          if cx <= t[1] + t[3] / 2 <= cx + cw and cy <= t[2] + t[4] / 2 <= cy + chh]
-                times, status, ticket = None, "", ""
-                for txt, *_ in inside:
-                    found = re.findall(r"(\d{1,2})[:.](\d{2})", txt)
-                    if len(found) >= 2 and times is None:
-                        times = found
-                    up = txt.upper()
-                    for word in self._PANEL_STATUS_WORDS:
-                        if word in up and not status:
-                            status = word
-                    if re.fullmatch(r"\d{3,6}", txt.strip()) and not ticket:
-                        ticket = txt.strip()
-                if not times:
+                return skip("could not read its text")
+            if head is None and not any("MY ORDERS" in t[0].upper() for t in lines):
+                return skip("not on this screen")
+            if not tickets:
+                return skip("no bookings listed")
+            for i, tk in enumerate(tickets):
+                y_top = tk[2] - 15
+                y_end = tickets[i + 1][2] - 15 if i + 1 < len(tickets) else h_app
+                block = [t for t in lines if y_top <= t[2] < y_end]
+                window = next((t for t in block
+                               if len(re.findall(r"(\d{1,2})[:.](\d{2})", t[0])) >= 2), None)
+                if window is None:
                     continue
-                if f"{int(times[0][0]):02d}:{times[0][1]}" != want_hhmm:
+                hh, mm = re.findall(r"(\d{1,2})[:.](\d{2})", window[0])[0]
+                if f"{int(hh):02d}:{mm}" != want_hhmm:
                     continue
+                up = " ".join(t[0].upper() for t in block)
+                status = next((w for w in self._PANEL_STATUS_WORDS
+                               if re.search(rf"\b{w}\b", up)), "")
+                ticket = tk[0].strip()
                 st = _norm(status)
                 if not any(st == ok or st.startswith(ok) for ok in statuses):
                     notes.append(f"    · My Orders panel: the {want_hhmm} booking "
@@ -4415,13 +4740,19 @@ class FlowRunner:
                     continue
                 notes.append(f"    · found the {want_hhmm} booking in the My Orders "
                              f"panel: {ticket} {status}".rstrip())
-                ok, _how = _idbd.tap_el(udid, c, els)
+                wx, wy = window[1] + window[3] / 2, window[2] + window[4] / 2
+                card = next((e for e in els if e.get("type") != "Application"
+                             and frame(e)[2] > 200 and frame(e)[3] > 60
+                             and frame(e)[0] <= wx <= frame(e)[0] + frame(e)[2]
+                             and frame(e)[1] <= wy <= frame(e)[1] + frame(e)[3]), None)
+                ok, _how = (_idbd.tap_el(udid, card, els) if card is not None
+                            else _idbd.tap_point(udid, wx, wy))
                 return ok and self._reservation_opened(notes, what, slot, "My Orders panel")
             if page + 1 < pages:                   # a later booking sits further down
                 col = x0 + (w_app - x0) / 2
                 _idbd.swipe(udid, col, h_app * 0.85, col, h_app * 0.45, 1.8)
                 time.sleep(0.5)
-        return False
+        return skip(f"no {'/'.join(statuses)} booking at {want_hhmm}")
 
     def _reservation_opened(self, notes: List[str], what: str, slot: str,
                             where: str) -> bool:
@@ -5233,6 +5564,10 @@ class FlowRunner:
             return self._ensure_order_items(r, notes)
         if step == "@kitchen_ready":
             return self._kitchen_ready(r, notes)
+        if step == "@select_all_items":
+            return self._select_all_items(notes)
+        if step == "@send_to_kitchen":
+            return self._send_to_kitchen(notes)
         if step == "@hide_keyboard":
             return self._hide_keyboard(r, notes)
         if step == "@book_appointment":
@@ -5257,7 +5592,10 @@ class FlowRunner:
         if step.startswith("@pay:") and self._skip_if_settled(step, notes):
             return True
         if step.startswith("@pay:"):
-            return self._pay(r, step.split(":", 1)[1], notes)
+            method = step.split(":", 1)[1]
+            if method in self._PAY_BUTTONS:          # the Business app's payment section
+                return self._pay_business(method, notes)
+            return self._pay(r, method, notes)
         notes.append(f"[FAIL] unknown token {step}")
         return False
 
@@ -5276,7 +5614,17 @@ class FlowRunner:
     # exist for the full STEP_TIMEOUT (150s) and then reports a generic miss. Kept as
     # an ALIAS rather than rewriting the flow blocks because flows edited in the
     # dashboard are stored in the DB with this plain-English wording.
-    _PLAIN_STEP_TOKENS = {"accept the appointment": "@accept_appointment"}
+    _PLAIN_STEP_TOKENS = {
+        "accept the appointment": "@accept_appointment",
+        # Select All is 'selectAll' on the iPad and 'selectAllItemsBtn' on a phone,
+        # and on either it is REPLACED by 'Unselect' once anything is selected --
+        # as it is right after the waiter adds items. The plain click then hunted
+        # a control that could not appear and hung the segment for 240s.
+        "click selectAllItemsBtn": "@select_all_items",
+        "click selectAll": "@select_all_items",
+        # A tap on SEND was reported as done without checking the order went.
+        "click sendItemsBtn": "@send_to_kitchen",
+    }
 
     # ONE map, shared with ScenarioRunner (which the Scenarios page runs through) so a
     # tablet/phone id pair fixed in one runner cannot stay broken in the other.
@@ -5604,7 +5952,9 @@ class FlowRunner:
         the failure needed to be read from."""
         import concurrent.futures as _fut
         role = seg["role"]
-        notes: List[str] = []
+        # Segment 1 keeps the setup lines it showed while the devices got ready.
+        notes: List[str] = list(getattr(self, "_setup_notes", []))
+        self._setup_notes = []
         started = time.time()
         status = "PASS"
         flaky_steps = 0
@@ -5616,11 +5966,16 @@ class FlowRunner:
         total_steps = len(seg["steps"])
         try:
             _t_seg = time.time()
+            # Live Steps: session start and sign-in take 20-30s on a role switch,
+            # and the segment used to appear only after both.
+            self._persist(seg, "running", notes + [f"▶ starting the {role} session"], 0.0)
             r = self._session_for(role)
             notes.append(f"[ok] session ready on {getattr(self, '_cur_udid', '')[:8]} "
                          f"({time.time() - _t_seg:.1f}s)")
             if role in ("waiter", "kitchen"):
                 _t_login, _n_login = time.time(), len(notes)
+                self._persist(seg, "running", notes + [f"▶ signing in as {role}"],
+                              time.time() - started)
                 _acct_ok = self._ensure_business_account(r, role, notes)
                 self._stamp_duration(notes, _n_login, time.time() - _t_login)
                 if not _acct_ok:
@@ -5672,7 +6027,8 @@ class FlowRunner:
                 _n_before, _t_step = len(notes), time.time()
                 _ex = _fut.ThreadPoolExecutor(max_workers=1)
                 try:
-                    ok, step_flaky = _ex.submit(_exec_step).result(timeout=STEP_TIMEOUT)
+                    ok, step_flaky = self._await_step(_ex.submit(_exec_step), seg, step,
+                                                      notes, _n_before, started)
                     self._stamp_duration(notes, _n_before, time.time() - _t_step)
                     _wnote = self._finish_step_watchdog(_watch, step, ok)
                     if _wnote:
@@ -5740,6 +6096,34 @@ class FlowRunner:
             notes.append(f"[where] failed at step: '{fail_step}'")
         self._persist(seg, status, notes, time.time() - started, screenshot=fail_shot)
         return status == "PASS"
+
+    LIVE_REFRESH = 2.0
+
+    def _await_step(self, future, seg, step: str, notes: List[str], shown: int,
+                    started: float):
+        """The step's result, within STEP_TIMEOUT (raises TimeoutError, as
+        future.result did).
+
+        Meanwhile, whatever the step has noted so far is shown in Live Steps. A long
+        step (@add_all_products: 19s, one line per item) otherwise showed only
+        'running: <step>' until it returned. `shown` is len(notes) before the step
+        started: counting after submit misses a line the step writes at once."""
+        import concurrent.futures as _fut
+        deadline = time.time() + STEP_TIMEOUT
+        while True:
+            try:
+                return future.result(timeout=max(0.05, min(self.LIVE_REFRESH,
+                                                           deadline - time.time())))
+            except _fut.TimeoutError:
+                if time.time() >= deadline:
+                    raise
+            if len(notes) != shown:
+                shown = len(notes)
+                try:
+                    self._persist(seg, "running", list(notes) + [f"▶ {step}"],
+                                  time.time() - started)
+                except Exception:                # display only; never fail the step
+                    logger.debug("could not show step progress", exc_info=True)
 
     @staticmethod
     def _stamp_duration(notes: List[str], start: int, secs: float) -> None:
@@ -5981,6 +6365,67 @@ class FlowRunner:
         self.on_event({"type": "segment_result", "num": seg["num"],
                        "name": seg["name"], "status": status})
 
+    def _timeline(self, event: str) -> None:
+        """Append to the run's Execution Timeline. Only the remote-agent path wrote
+        it, so every cross-app run showed "No timeline data available"."""
+        import json as _json
+        try:
+            with SessionLocal() as db:
+                run = db.query(TestRun).filter_by(id=self.run_id).first()
+                if run is None:
+                    return
+                try:
+                    events = _json.loads(run.timeline) if run.timeline else []
+                except ValueError:
+                    events = []
+                # Local clock: the person reading it is on this Mac.
+                events.append({"time": datetime.now().strftime("%H:%M:%S"), "event": event})
+                run.timeline = _json.dumps(events)
+                db.commit()
+        except Exception:                        # display only; never fail a run
+            logger.debug("could not write timeline event", exc_info=True)
+
+    # -- Live Steps before the first step -------------------------------------
+
+    def _queue_segments(self) -> None:
+        """Write every segment as 'queued' up front, so Live Steps shows the whole
+        flow from the first poll instead of growing one row at a time."""
+        for seg in self.flow["segments"]:
+            self._persist(seg, "queued", [], 0.0)
+
+    def _setup_stage(self, stage: str) -> None:
+        """Close the previous setup stage (with its duration) and show this one
+        as running on segment 1."""
+        if not hasattr(self, "_setup_notes"):
+            return
+        prev = getattr(self, "_setup_stage_at", None)
+        if prev is not None:
+            self._setup_notes.append(f"· setup: {prev[0]} ({time.time() - prev[1]:.1f}s)")
+        self._setup_stage_at = (stage, time.time())
+        self._show_setup()
+
+    def _setup_log(self, message: str) -> None:
+        line = (message.strip().splitlines() or [""])[0][:160]
+        if line:
+            self._setup_notes.append(f"· {line}")
+            self._show_setup()
+
+    def _setup_done(self) -> None:
+        if getattr(self, "_setup_stage_at", None) is not None:
+            self._setup_stage(":done")          # closes the last stage
+            self._setup_stage_at = None
+
+    def _show_setup(self) -> None:
+        stage = self._setup_stage_at
+        if not self.flow["segments"] or stage is None or stage[0] == ":done":
+            return
+        try:
+            self._persist(self.flow["segments"][0], "running",
+                          self._setup_notes + [f"▶ setup: {stage[0]}"],
+                          time.time() - stage[1])
+        except Exception:                        # progress display must never fail a run
+            logger.debug("could not show setup progress", exc_info=True)
+
     def _preflight(self) -> None:
         """Bring up everything a run needs BEFORE any segment: the target sims booted
         and the Appium server listening. Previously a run just assumed both were up and
@@ -5989,6 +6434,7 @@ class FlowRunner:
         import shutil
         import subprocess
         import urllib.request
+        self._setup_stage("booting the simulators and Appium")
         # 1. Boot each distinct sim this flow uses (consumer + waiter + kitchen).
         udids = {u for u in (self.devices.get("consumer"), self.devices.get("waiter"),
                              self.devices.get("kitchen"), DEFAULT_CONSUMER_UDID) if u}
@@ -6081,6 +6527,7 @@ class FlowRunner:
                 role="business",
                 bundle_id=self.business_bundle,
                 device_id=self._business_udid()))
+        self._setup_stage("checking the apps are installed")
         try:
             results = _deploy.prepare_scenario(
                 required,
@@ -6101,6 +6548,7 @@ class FlowRunner:
                            "message": "preflight: could not verify the required apps "
                                       "— simctl did not answer in time (busy machine); "
                                       "continuing, the session will report a missing app"})
+            self._setup_stage("starting the device sessions")
             self._prewarm_sessions()
             return
         passed = all(r.installed for r in results)
@@ -6112,6 +6560,7 @@ class FlowRunner:
         # build (~60s per device). Doing it lazily meant the iPad's WDA built at the first
         # C-App -> B-App switch, stalling the handoff. Building consumer (:8100) and
         # business (:8101) WDAs simultaneously here makes segment switches near-instant.
+        self._setup_stage("starting the device sessions")
         self._prewarm_sessions()
 
     def _prewarm_sessions(self) -> None:
@@ -6187,7 +6636,11 @@ class FlowRunner:
         # Stop pressed during it must not be silently dropped.
         with _ACTIVE_FLOW_RUNS_LOCK:
             _ACTIVE_FLOW_RUNS[self.run_id] = self._cancel
+        _t_run = time.time()
         try:
+            self._timeline("Run started")
+            self._queue_segments()
+            self._setup_stage("reserving the simulators")
             if not acquire_devices(
                     self.run_id, self._flow_udids(), self._cancel,
                     on_wait=lambda owner, udid: self.on_event({
@@ -6204,6 +6657,8 @@ class FlowRunner:
                                    "waiting for its simulator."], 0.0)
                 return
             self._preflight()
+            self._setup_done()
+            self._timeline(f"Devices ready ({time.time() - _t_run:.0f}s)")
             segments = self.flow["segments"]
             for i, seg in enumerate(segments):
                 if self.cancelled:
@@ -6212,7 +6667,13 @@ class FlowRunner:
                                       ["[skipped] not run — the run was stopped by the user."],
                                       0.0)
                     break
-                if self._run_segment(seg):
+                self._timeline(f"Segment {seg['num']}: {seg['name']}")
+                _t_seg = time.time()
+                _passed = self._run_segment(seg)
+                self._timeline(f"Segment {seg['num']} "
+                               f"{'passed' if _passed else 'stopped' if self.cancelled else 'Failed'}"
+                               f" ({time.time() - _t_seg:.0f}s)")
+                if _passed:
                     continue
                 if self.cancelled:
                     # Stopped mid-segment, not a real failure. _run_segment has
@@ -6279,7 +6740,18 @@ class FlowRunner:
                            if self.cancelled else
                            "the run ended while this step was still running")
                     for row in rows:
-                        if (row.status or "").lower() in ("running", "queued"):
+                        if (row.status or "").lower() == "queued":
+                            # Written up front for Live Steps, and the run ended
+                            # before this segment started: it never ran.
+                            row.status = "SKIPPED"
+                            if row.consumer_status == "queued":
+                                row.consumer_status = "SKIPPED"
+                            if row.business_status == "queued":
+                                row.business_status = "SKIPPED"
+                            row.reasons = ["[skipped] not run — the run ended before "
+                                           "this segment started."]
+                            continue
+                        if (row.status or "").lower() == "running":
                             row.status = terminal
                             # Clear the '▶' in-flight marker on the step that never
                             # finished. The UI spins on that marker, so leaving it
@@ -6297,6 +6769,7 @@ class FlowRunner:
                                 row.consumer_status = terminal
                             if row.business_status == "running":
                                 row.business_status = terminal
+                    ran = [r for r in rows if r.status != "SKIPPED"]
                     # A crash, or a run that never produced ANY segment result, is a
                     # FAILURE — never report a false 'passed' just because no row said FAIL.
                     if self.cancelled:
@@ -6306,11 +6779,24 @@ class FlowRunner:
                         # just written, so a stopped run reappeared minutes later
                         # as passed/failed and looked like it had never stopped.
                         run.status = "stopped"
-                    elif crashed is not None or not rows:
+                    # Segment rows now exist from the start (queued), so 'no rows'
+                    # became 'no segment actually ran'.
+                    elif crashed is not None or not ran:
                         run.status = "failed"
                     else:
                         run.status = "failed" if any(r.status == "FAIL" for r in rows) else "passed"
                     run.job_state = run.status
+                    try:
+                        import json as _json
+                        _events = _json.loads(run.timeline) if run.timeline else []
+                    except ValueError:
+                        _events = []
+                    _events.append({"time": datetime.now().strftime("%H:%M:%S"),
+                                    # 'Failed' capitalised: the timeline paints it red.
+                                    "event": {"failed": "Run Failed"}.get(
+                                        run.status, f"Run {run.status}")
+                                             + f" ({time.time() - _t_run:.0f}s)"})
+                    run.timeline = _json.dumps(_events)
                     # Persist WHY. This wrote status and nothing else, so a run that
                     # died in preflight -- before any segment could produce a row --
                     # reached the dashboard as "FAILED" with no RCA, no timeline and
@@ -6326,7 +6812,7 @@ class FlowRunner:
                             detail = (f"{type(crashed).__name__}: a simulator command "
                                       f"did not return in time — {detail}")
                         run.error_message = f"{type(crashed).__name__}: {detail}"[:2000]
-                    elif not rows and hasattr(run, "error_message"):
+                    elif not ran and hasattr(run, "error_message"):
                         run.error_message = ("The run produced no scenario results — it "
                                              "failed before any segment executed.")
                     run.completed_at = datetime.utcnow()

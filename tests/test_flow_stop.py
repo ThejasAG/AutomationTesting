@@ -150,8 +150,12 @@ def test_a_stranded_running_segment_is_reconciled():
     """
     src = inspect.getsource(FlowRunner.run)
     finally_block = src[src.index("finally:"):]
-    assert 'in ("running", "queued")' in finally_block, (
-        "run()'s finally must reconcile segment rows still marked running/queued")
+    # 'queued' rows (every segment is written up front for Live Steps) never
+    # started, so they become SKIPPED; a stranded 'running' one gets a verdict.
+    assert '.lower() == "queued"' in finally_block and 'row.status = "SKIPPED"' in finally_block, (
+        "run()'s finally must reconcile segment rows still marked queued")
+    assert '.lower() == "running"' in finally_block, (
+        "run()'s finally must reconcile segment rows still marked running")
     assert 'terminal = "STOPPED" if self.cancelled else "FAIL"' in finally_block, (
         "a stranded row must become STOPPED on the stop path and FAIL otherwise — "
         "never left running, and never silently PASS")

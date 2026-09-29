@@ -186,6 +186,9 @@ function BotBadge({ botType }: { botType?: string }) {
 
 // ── Live View Component ──────────────────────────────────────────────────────
 
+/** Segment statuses that mean "this stage is over". */
+const TERMINAL = new Set(['PASS', 'FAIL', 'STOPPED', 'SKIPPED']);
+
 const ACTIVE_JOB_STATES = new Set([
   'queued',
   'running',
@@ -239,8 +242,14 @@ function LiveView({ runId, jobState }: LiveViewProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, isActive]);
 
+  // The in-flight stage. Every segment is written up front as 'queued', so the
+  // last row is no longer the one running: it is the first that has not finished.
+  const current = scenarios.findIndex(s => (s.status || '').toLowerCase() === 'running');
+  const inFlight = current >= 0 ? current
+    : scenarios.findIndex(s => !TERMINAL.has(s.status) && (s.status || '').toLowerCase() !== 'queued');
+
   // Re-baseline only when the in-flight stage changes, or its reported elapsed does.
-  const last = scenarios[scenarios.length - 1];
+  const last = scenarios[inFlight >= 0 ? inFlight : scenarios.length - 1];
   const lastNum = last?.scenario_num ?? '';
   const lastSecs = last?.launch_time ?? 0;
   useEffect(() => {
@@ -288,14 +297,15 @@ function LiveView({ runId, jobState }: LiveViewProps) {
             // Any status the backend considers terminal. STOPPED and SKIPPED are
             // terminal too: treating only PASS/FAIL as done left a stopped run's
             // last segment looking like it was still in flight.
-            const done = s.status === 'PASS' || s.status === 'FAIL'
-              || s.status === 'STOPPED' || s.status === 'SKIPPED';
+            const done = TERMINAL.has(s.status);
             // Only spin while the RUN itself is still active. A finished run can
             // still carry a segment row stranded at 'running' (it is written before
             // each step and only overwritten when that step returns), and rendering
             // s.status raw showed a RUNNING badge on a run whose header said
             // STOPPED — which reads as "Stop did nothing".
-            const running = isActive && i === scenarios.length - 1 && !done;
+            const running = isActive && i === inFlight && !done;
+            // Written up front so the whole flow shows; not started yet.
+            const queued = !running && (s.status || '').toLowerCase() === 'queued';
             const staleRunning = !isActive && !done
               && (s.status || '').toLowerCase() === 'running';
             const isLast = i === scenarios.length - 1;
@@ -313,15 +323,17 @@ function LiveView({ runId, jobState }: LiveViewProps) {
               : s.status === 'FAIL' ? 'rgba(248,113,113,0.15)'
               : running ? 'rgba(129,140,248,0.12)' : 'var(--bg-secondary, rgba(255,255,255,0.03))';
             const badgeBg = s.status === 'PASS' ? 'rgba(52,211,153,0.15)'
-              : s.status === 'FAIL' ? 'rgba(248,113,113,0.15)' : 'rgba(129,140,248,0.15)';
+              : s.status === 'FAIL' ? 'rgba(248,113,113,0.15)'
+              : queued ? 'rgba(255,255,255,0.06)' : 'rgba(129,140,248,0.15)';
             const badgeFg = s.status === 'PASS' ? 'var(--success)'
-              : s.status === 'FAIL' ? 'var(--danger)' : 'var(--accent-primary)';
+              : s.status === 'FAIL' ? 'var(--danger)'
+              : queued ? 'var(--text-muted)' : 'var(--accent-primary)';
             // The spine below a node is solid+colored once the stage resolves, so the
             // flow reads as "connected" and progress flows top→bottom.
             const spineColor = s.status === 'PASS' ? 'var(--success)'
               : s.status === 'FAIL' ? 'var(--danger)' : 'var(--border-color)';
             return (
-              <div key={s.id || i} style={{ display: 'flex', gap: 14, alignItems: 'stretch' }}>
+              <div key={s.id || i} style={{ display: 'flex', gap: 14, alignItems: 'stretch', opacity: queued ? 0.55 : 1 }}>
                 {/* Left rail: the stage node + the connecting spine to the next stage. */}
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 32, flexShrink: 0 }}>
                   <div style={{
@@ -351,7 +363,7 @@ function LiveView({ runId, jobState }: LiveViewProps) {
                     <span style={{ fontSize: '0.88rem', fontWeight: 600 }}>{s.scenario_name}</span>
                     <span className="badge" style={{ background: badgeBg, color: badgeFg, fontSize: '0.62rem' }}>
                       {running ? <><Loader2 size={10} className="spin" /> running</>
-                        : staleRunning ? 'INCOMPLETE' : s.status}
+                        : queued ? 'queued' : staleRunning ? 'INCOMPLETE' : s.status}
                     </span>
                     {(() => {
                       // In flight: count up from the last reported elapsed. Finished:
@@ -360,7 +372,7 @@ function LiveView({ runId, jobState }: LiveViewProps) {
                       const secs = running && b && b.num === s.scenario_num
                         ? b.secs + (Date.now() - b.at) / 1000
                         : s.launch_time;
-                      if (secs == null) return null;
+                      if (secs == null || queued) return null;
                       return (
                         <span style={{
                           marginLeft: 'auto', fontSize: '0.72rem',

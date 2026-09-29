@@ -71,6 +71,14 @@
 "method": "aid",
 "value": "passwordValue",
 "ts": 1787814732
+},
+"selectall": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "selectAll",
+"ts": 1790661551
 }
 },
 "org.vyapy.sarls.vyaconsumerstaging": {

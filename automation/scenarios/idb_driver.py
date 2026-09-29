@@ -283,6 +283,16 @@ def tap_el(udid: str, e: dict, els: Optional[List[dict]] = None,
         return False, f"idb error: {type(ex).__name__}"
 
 
+def tap_point(udid: str, x: float, y: float) -> Tuple[bool, str]:
+    """Tap an app-space point (e.g. the centre of text read off the screen)."""
+    try:
+        px, py = to_device(udid, x, y)
+        _idb(["ui", "tap", "--udid", udid, str(px), str(py)])
+        return True, "idb"
+    except Exception as ex:
+        return False, f"idb error: {type(ex).__name__}"
+
+
 def press_return(udid: str) -> None:
     """Return key: closes the keyboard on a single-line field (what Appium's
     hideKeyboard presses too). Measured on the iPad: keyboard gone in 0.4s."""

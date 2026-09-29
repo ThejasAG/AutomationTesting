@@ -3,13 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import * as d3 from 'd3';
 import {
   getAppGroups, scanDependencies, getDependencyGraph, analyzeHybridImpact,
-  getDevices, getProjects, getModuleGraph,
+  getDevices, getProjects, getModuleGraph, addGroup, setGroupProjects,
 } from '../api';
 import type {
   AppGroup, DependencyGraphData, GraphNode, HybridImpact, Device, Project,
 } from '../api';
 import {
-  Radar, Loader2, AlertTriangle, Play, Zap, Info, Network, CheckCircle2, FileCode,
+  Radar, Loader2, AlertTriangle, Play, Zap, Info, Network, CheckCircle2, FileCode, Layers,
 } from 'lucide-react';
 
 type GraphType = 'api' | 'module';
@@ -36,6 +36,64 @@ function LegendRow({ swatch, label }: { swatch: React.ReactNode; label: string }
   );
 }
 
+/** Shown when no app group exists. The cross-app graph is built per group, and
+ *  a group used to be creatable only on the Projects page -- so this page just
+ *  said "create an app group first" and showed nothing. */
+function CreateGroupPanel({ projects, busy, onCreate, onOpenProjects }: {
+  projects: Project[];
+  busy: boolean;
+  onCreate: (name: string, projectIds: string[]) => void;
+  onOpenProjects: () => void;
+}) {
+  const [name, setName] = useState('All apps');
+  const [picked, setPicked] = useState<string[]>([]);
+  // Every cloned app is ticked: the usual group is "all our apps".
+  useEffect(() => setPicked(projects.map(p => p.id)), [projects]);
+
+  if (!projects.length) {
+    return (
+      <div style={{ padding: 60, textAlign: 'center', color: 'var(--text-muted)' }}>
+        No cloned projects to map yet.{' '}
+        <button onClick={onOpenProjects} style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', padding: 0, font: 'inherit' }}>
+          Add and clone one on the Projects page.
+        </button>
+      </div>
+    );
+  }
+
+  const toggle = (id: string) =>
+    setPicked(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+  const ready = !busy && picked.length > 0 && name.trim().length > 0;
+
+  return (
+    <div style={{ padding: '40px 24px', maxWidth: 460, margin: '0 auto', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+      <h3 style={{ margin: '0 0 6px', fontSize: '1rem', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Layers size={16} /> No app group yet
+      </h3>
+      <p style={{ margin: '0 0 16px', color: 'var(--text-muted)' }}>
+        The cross-app graph joins the apps in one group through the endpoints they share.
+        Pick the apps to group, then scan them.
+      </p>
+      <label style={{ display: 'block', marginBottom: 6 }}>Group name</label>
+      <input value={name} onChange={e => setName(e.target.value)}
+        style={{ width: '100%', boxSizing: 'border-box', padding: 9, borderRadius: 6, marginBottom: 14, background: 'var(--bg-base, #0d1117)', color: 'var(--text-primary)', border: '1px solid rgba(255,255,255,0.1)' }} />
+      <div style={{ marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {projects.map(p => (
+          <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input type="checkbox" checked={picked.includes(p.id)} onChange={() => toggle(p.id)} />
+            {p.name}
+          </label>
+        ))}
+      </div>
+      <button onClick={() => onCreate(name.trim(), picked)} disabled={!ready}
+        style={{ width: '100%', padding: 10, borderRadius: 6, background: 'var(--primary)', color: '#fff', border: 'none', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, cursor: ready ? 'pointer' : 'not-allowed', opacity: ready ? 1 : 0.5 }}>
+        {busy ? <Loader2 size={16} className="spin" /> : <Radar size={16} />}
+        {busy ? 'Grouping and scanning…' : `Group ${picked.length} app${picked.length === 1 ? '' : 's'} and scan`}
+      </button>
+    </div>
+  );
+}
+
 export default function GraphPage() {
   const navigate = useNavigate();
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -52,6 +110,7 @@ export default function GraphPage() {
   const [loading, setLoading] = useState(true);
   const [moduleLoading, setModuleLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -139,20 +198,36 @@ export default function GraphPage() {
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
-  const doScan = async () => {
-    if (!groupId) return;
+  const doScan = async (id: string = groupId) => {
+    if (!id) return;
     setScanning(true); setError(null);
     try {
-      const res = await scanDependencies(groupId);
+      const res = await scanDependencies(id);
       if (res.skipped_not_cloned?.length) {
         setError(`Scanned, but not cloned (skipped): ${res.skipped_not_cloned.join(', ')}`);
       }
-      setGraph(await getDependencyGraph(groupId));
+      setGraph(await getDependencyGraph(id));
       setImpact(null);
     } catch (e: any) {
       setError(e.message ?? 'Scan failed.');
     } finally {
       setScanning(false);
+    }
+  };
+
+  // The same /groups endpoints the Projects page uses -- one source of truth.
+  const createGroupAndScan = async (name: string, projectIds: string[]) => {
+    setCreating(true); setError(null);
+    try {
+      const g = await addGroup({ name, description: 'Created from the Dependency Graph page.' });
+      await setGroupProjects(g.id, projectIds);
+      setGroups(await getAppGroups());
+      setGroupId(g.id);
+      await doScan(g.id);
+    } catch (e: any) {
+      setError(e.message ?? 'Could not create the group.');
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -464,7 +539,7 @@ export default function GraphPage() {
 
         {graphType === 'api' && (
           <>
-            <button onClick={doScan} disabled={!groupId || scanning}
+            <button onClick={() => doScan()} disabled={!groupId || scanning}
               style={{ padding: '10px 16px', borderRadius: 6, background: 'var(--primary)', color: '#fff', border: 'none', display: 'flex', alignItems: 'center', gap: 8, cursor: !groupId || scanning ? 'not-allowed' : 'pointer', opacity: !groupId || scanning ? 0.5 : 1 }}>
               {scanning ? <Loader2 size={16} className="spin" /> : <Radar size={16} />}
               {scanning ? 'Scanning…' : 'Scan'}
@@ -517,13 +592,16 @@ export default function GraphPage() {
               <Loader2 size={28} className="spin" />
               Building the module graph from the app's AST…
             </div>
+          ) : graphType === 'api' && !groups.length ? (
+            <CreateGroupPanel projects={projects} busy={creating || scanning}
+              onCreate={createGroupAndScan} onOpenProjects={() => navigate('/projects')} />
           ) : !graph?.nodes.length ? (
             <div style={{ padding: 60, textAlign: 'center', color: 'var(--text-muted)' }}>
               {graphType === 'module'
                 ? <>Select a cloned project to see its internal file dependencies.</>
-                : groups.length
-                ? <>No graph yet. Click <strong>Scan</strong> to map this group.</>
-                : <>Create an app group first, then scan it.</>}
+                : scanning
+                ? <>Scanning the group's apps for the endpoints they call…</>
+                : <>No graph yet. Click <strong>Scan</strong> to map this group.</>}
             </div>
           ) : (
             <>

@@ -44,7 +44,7 @@ def test_run_segment_reports_whether_it_passed():
 def test_run_loop_stops_on_a_failed_segment():
     """The flow loop must branch on the result and break."""
     src = inspect.getsource(FlowRunner.run)
-    assert "if self._run_segment(seg)" in src, (
+    assert "_passed = self._run_segment(seg)" in src and "if _passed:" in src, (
         "the segment loop must branch on _run_segment's result; calling it and "
         "discarding the return value is how the kitchen segment ran after the "
         "waiter segment had already failed")

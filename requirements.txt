@@ -57,6 +57,7 @@ pillow>=12.0
 pytest>=9.1
 
 # Deliberately NOT listed:
-#   graphify        optional; hybrid_impact_analyzer.py guards it with a try/except
+#   graphify        optional (PyPI name 'graphifyy'); hybrid_impact_analyzer.py guards
+#                   it with a try/except. Without it the Module (files) graph is off.
 #   redis           the service is used, but nothing imports the Python client
 #   python-dateutil declared historically, zero usages

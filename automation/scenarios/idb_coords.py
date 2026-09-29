@@ -100,6 +100,19 @@ def to_device(udid: str, x: float, y: float,
         return int(x), int(y)
 
 
+def mode(udid: str, elements: Optional[list] = None) -> str:
+    """Which way the app is turned on the device: 'same', 'ccw' or 'cw'
+    (measured, then cached like to_device)."""
+    to_device(udid, 1, 1, elements)
+    return (_CACHE.get(udid) or (0, "same"))[1]
+
+
+def upright(image, mode_: str):
+    """A PIL image of the device framebuffer (always portrait) turned the way the
+    app is, so it lines up with describe-all frames."""
+    return image.rotate({"ccw": 90, "cw": 270}.get(mode_, 0), expand=True)
+
+
 def forget(udid: str = "") -> None:
     """Drop the cached direction (e.g. after the simulator was rotated)."""
     if udid:

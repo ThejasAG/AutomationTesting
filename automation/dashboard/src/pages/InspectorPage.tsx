@@ -76,7 +76,11 @@ export default function InspectorPage() {
     // and left the picture lying on its side, so the overlaid element frames (drawn
     // from the tree, in landscape) lined up with nothing.
     //
-    // Rotate only when the two genuinely disagree; a portrait device needs none.
+    // The backend now turns the raster by the MEASURED direction (idb_coords), so
+    // it normally arrives landscape and nothing is rotated here. A fixed -90deg was
+    // right for one of the iPad's two landscape directions only: the other drew
+    // the screen upside down. What follows is a fallback for when it could not
+    // measure. Rotate only when the two genuinely disagree; portrait needs none.
     const shotLandscape = !!shot && shot.width > shot.height;
     const treeLandscape = !!tree && tree.screen.width > tree.screen.height;
     const needsRotate = !!shot && !!tree && shotLandscape !== treeLandscape;
