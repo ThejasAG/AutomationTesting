@@ -56,6 +56,42 @@ Confirm: `paymentConfirmBtn`. Already-paid view: `paidEpaymentBtn`/`paidCashPaym
 Per-diner accordion: `` `${username}accordionCard`.replace(/\s+/g,'') ``. Voucher code: `inputVoucher` (ApplyFoodVoucher.js).
 `remindPayment`, `addGuestBtn`.
 
+> **Overlay trap (measured 2026-10-01):** the VOID/COMP reason dialog, the swipe-SPLIT dialog
+> and the "which units" dialog are magnus `Overlay`s — accessibility (idb AND Appium) sees ONE
+> screen-sized element labelled with all the ids below joined by spaces. Their ids cannot be
+> tapped; use the `@void_item` / `@comp_item` / `@split_item` handlers (they tap by OCR text).
+
+### Order row swipe: VOID / COMP / SPLIT (Event/OrderSummary.js:757, RNGH `Swipeable`)
+Swipe a row LEFT (start on its price, not its radio). The three buttons have **NO id**, only
+their text `VOID` / `COMP` / `SPLIT`; while a row is closed they sit 10000pt off-screen.
+Rows are `<ProductNameNoSpaces>card` and are NOT unique (one dish for four people = four rows).
+- VOID: only before the item is prepared. COMP: only after Serve and before Notify Payment.
+  SPLIT: not on a comped or already-split line.
+- VOID / COMP reason dialog (Modal/index.js:5742): **nothing preselected**. Void reasons
+  `entryError`, `customerChangedMind`, `itemUnavailable`, `duplicateOrder`,
+  `allergyDietaryConcern`, `managerOverride`; comp reasons `birthday`, `managerDiscretion`,
+  `serviceRecovery`; comp discount chips `5Btn` `10Btn` `15Btn` `25Btn` `30Btn` `40Btn` `100Btn`
+  (comp needs a reason AND a discount). Notes `voidOtherReasonInput` / `compOtherReasonInput`.
+  Apply = **`assignProductsBtn`**. Quantity > 1 adds a units dialog: `ApplyBtn` (void) /
+  `assignProductsBtn` (comp).
+- SPLIT dialog (AssignSplitProductModal): the row's owner is hidden; profiles
+  `` `${name}select` `` (spaces stripped: `RoopaDselect`, `Guest1select`), selected ones show
+  `` `${name}close` ``; Apply = `assignProductsBtn`.
+
+### ADD NEW ITEM → Assign / Split (Event/AddNewItem.js, Modal/index.js:1423)
+`addItemsBtn` opens it; products `` `${name}Item` `` (spaces stripped); a dish with options
+needs `applyOptionBtn`; **`assignToBtn`** (ASSIGN / SPLIT) opens "Assign to or split among…":
+profiles `<Name>select` / `<Name>close`, `selectAll`, `addNewGuest`, and TWO buttons both
+`assignProductsBtn` — the LEFT is Assign (≥1 selected, one of the dish per person), the RIGHT is
+Split (≥2). Assign/Split is the commit; there is no separate add button.
+
+### Notify Payment / Pay For (OrderSummary.js:1312, PaymentDetails.js)
+`notifyPaymentBtn` (also REMIND PAYMENT) → confirm dialog "Yes" / "No" (**no ids**, text only).
+Profile card: `<Name>accordionCard` (on the name text). **`payForBtn` is disabled until that
+profile is the current payer** — pressing its `epaymentBtn` (then `numberPadClose`) makes it so.
+Pay For dialog: payer preselected, profiles `<Name>select` / `<Name>close`, Apply = `applyPayment`.
+Amount pad (tablet): `userAmountInput` (display), digit keys `VirtualKeyboard-0..9`, `userInputBtn`.
+
 ### Booking action "⋮" modal (Modal/EventAction/index.js)
 `cancelEvent`, `transferBtn`, `` `${username}Btn` ``, `confirmEventBtn`.
 
@@ -81,6 +117,13 @@ Book button: **`bookAppoitment`** (note the misspelling). Dynamic: `modifyReserv
 `browseMenu` on the menu tab. `MessageInput`, `addImageButton`.
 **Duration** is a DRAG slider (`CustomSlider`) — **no tappable id**; `durationIndexChange(0..3)` →
 '1 hr'/'2 hr'/'3 hr'/'Not Sure'. Can't select by id — needs a swipe/drag or leave default.
+**Persons steppers** (Components/CustomCounter.js): `counterMinus` / `counterPlus` — the adult
+and child steppers share these labels (adult = the LEFT pair). The adult +/− does not count by
+itself: it opens **My Contacts** (Components/Contacts): `guestAdd` (each tap adds an unnamed
+"Guest N", chip `Guest Ncancel`), `newContactAdd`, `contactSearch`, phone contacts by name,
+**`inviteUsers`** (Invite → closes; Persons = 1 + invitees). The Guest row renders only when the
+phone has ≥1 contact with a number and the app can read contacts (iOS: no explicit request).
+After BOOK NOW only a **1 hr** booking shows the pre-order dialog; Not Sure / 2 / 3 hrs go to Wallet.
 
 ### Booking-Confirmed modal (Components/Modal/index.js)
 `preOrderBooking` (YES, PRE-ORDER → menu), `orderLater` (ORDER LATER → wallet),

@@ -135,10 +135,17 @@ def _is_overlay_strip(hit: dict, els: List[dict]) -> bool:
 
 def swipe(udid: str, x1: float, y1: float, x2: float, y2: float,
           duration: float = 0.25) -> None:
-    """A drag between two APP-space points (converted for a landscape iPad)."""
+    """A drag between two APP-space points (converted for a landscape iPad).
+
+    Never raises: a swipe idb could not finish is a swipe that did not scroll.
+    Measured 2026-10-01: one hung for 20s on the iPad and the TimeoutExpired took
+    down a whole waiter segment ("segment error") before it had done anything."""
     p1, p2 = to_device(udid, x1, y1), to_device(udid, x2, y2)
-    _idb(["ui", "swipe", "--udid", udid, "--duration", str(duration),
-          str(p1[0]), str(p1[1]), str(p2[0]), str(p2[1])])
+    try:
+        _idb(["ui", "swipe", "--udid", udid, "--duration", str(duration),
+              str(p1[0]), str(p1[1]), str(p2[0]), str(p2[1])])
+    except Exception as ex:
+        logger.warning("idb swipe on %s did not complete: %s", udid[:8], ex)
 
 
 def swipe_screen(udid: str, direction: str, els: Optional[List[dict]] = None) -> bool:
@@ -319,7 +326,8 @@ def _landed(got: Optional[str], text: str, secure: bool) -> bool:
     return bool(got) and len(got) == len(text) and set(got) <= {"•", "●", "*"}
 
 
-def fill(udid: str, field: str, text: str, close_keyboard: bool = True) -> Tuple[bool, str]:
+def fill(udid: str, field: str, text: str, close_keyboard: bool = True,
+         info: Optional[dict] = None) -> Tuple[bool, str]:
     """Type *text* into the field named *field* and VERIFY it holds exactly that.
 
     (ok, what the field holds). The field is cleared first (the apps run with
@@ -329,7 +337,17 @@ def fill(udid: str, field: str, text: str, close_keyboard: bool = True) -> Tuple
     Shift is pressed once before typing. A field with auto-capitalisation arms
     the keyboard's shift at the start (measured: 'probe' -> 'Probe',
     'emp2A@...' -> 'Emp2A@...'); one Shift press cancels that, and pressed when
-    nothing is armed it does nothing (measured: mid-text 'x' stayed 'x')."""
+    nothing is armed it does nothing (measured: mid-text 'x' stayed 'x').
+
+    Efficient on purpose (the sign-in took several attempts per field):
+      * a field that already holds exactly *text* is left alone -- no clear, no
+        retype (a visible value only; a masked one cannot be read, so it is typed);
+      * after typing, the read-back WAITS for the app to update the field (up to
+        ~1.2s). Reading once after 0.2s saw the field mid-update, called a correct
+        entry wrong, and cleared and retyped it.
+    *info*, when given, receives {'attempts': n, 'skipped': bool}."""
+    info = info if info is not None else {}
+    info.update(attempts=0, skipped=False)
     try:
         els = describe_all(udid)
         fields = [e for e in _find(els, [field]) if e.get("type") in FIELD_TYPES]
@@ -339,11 +357,15 @@ def fill(udid: str, field: str, text: str, close_keyboard: bool = True) -> Tuple
         if e is None or e.get("type") not in FIELD_TYPES:
             return False, ""
         secure = e.get("type") == "SecureTextField"
+        got: Optional[str] = e.get("AXValue") or ""
+        if got == text:                              # already right: leave it alone
+            info["skipped"] = True
+            return True, got
         px, py = to_device(udid, *centre(e))
         _idb(["ui", "tap", "--udid", udid, str(px), str(py)])
         time.sleep(0.35)
-        got: Optional[str] = e.get("AXValue") or ""
         for attempt in (1, 2, 3):
+            info["attempts"] = attempt
             n = min(max(len(got or ""), len(text)) + 2, 120)
             _idb(["ui", "key-sequence", "--udid", udid,
                   *([KEY_DELETE_FORWARD] * n + [KEY_BACKSPACE] * n)])
@@ -355,13 +377,16 @@ def fill(udid: str, field: str, text: str, close_keyboard: bool = True) -> Tuple
                 for i in range(0, len(text), 3):
                     _idb(["ui", "text", text[i:i + 3], "--udid", udid])
                     time.sleep(0.05)
-            time.sleep(0.2)
-            got = _value(udid, field)
-            if _landed(got, text, secure):
-                if close_keyboard:
-                    press_return(udid)
-                    time.sleep(0.3)
-                return True, got or ""
+            for _read in range(4):                   # let the field catch up
+                time.sleep(0.3)
+                got = _value(udid, field)
+                if _landed(got, text, secure):
+                    if close_keyboard:
+                        press_return(udid)
+                        time.sleep(0.3)
+                    return True, got or ""
+                if got is not None and len(got) >= len(text):
+                    break                            # complete but wrong: retype
         return False, got or ""
     except Exception as ex:
         logger.debug("idb fill %s on %s: %s", field, udid[:8], ex)

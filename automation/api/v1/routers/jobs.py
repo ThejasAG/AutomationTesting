@@ -372,19 +372,9 @@ def run_cross_app_flow(body: FlowRunIn, current_user=Depends(get_current_user)):
             "message": "Flow started. Open the run's Scenarios tab / rich report to watch it."}
 
 
-@runs_router.post("/{run_id}/retry")
-def retry_run(run_id: str, current_user=Depends(get_current_user)):
-    """Re-run the flow a previous run executed, with the SAME settings.
-
-    Retrying is the common next action after a failure (a flaky step, a device that
-    was busy, a fix just deployed), and doing it by hand meant going back to the
-    Scenarios page and remembering which flow, environment and business device the
-    run had used. Those are recovered from the run row here so the button cannot
-    silently retry something else.
-
-    Returns the NEW run id; the original row is never modified, so the failure stays
-    on record instead of being overwritten by its retry.
-    """
+def _flow_run_settings(run_id: str):
+    """(flow, env, business_device) a finished cross-app flow run used, recovered
+    from its row -- so Retry and Resume cannot quietly run something else."""
     from automation.scenarios.cross_app_flows import (
         start_flow_run, list_flows, ENV_BUNDLES)
     from automation.scenarios.cross_app_orchestrator import DEFAULT_BUSINESS_PHONE_UDID
@@ -423,9 +413,63 @@ def retry_run(run_id: str, current_user=Depends(get_current_user)):
     if m and DEFAULT_BUSINESS_PHONE_UDID.startswith(m.group(1)):
         business_device = "phone"
 
+    return flow, env, business_device
+
+
+@runs_router.post("/{run_id}/retry")
+def retry_run(run_id: str, current_user=Depends(get_current_user)):
+    """Re-run the flow a previous run executed, with the SAME settings.
+
+    Retrying is the common next action after a failure (a flaky step, a device that
+    was busy, a fix just deployed), and doing it by hand meant going back to the
+    Scenarios page and remembering which flow, environment and business device the
+    run had used. Those are recovered from the run row here so the button cannot
+    silently retry something else.
+
+    Returns the NEW run id; the original row is never modified, so the failure stays
+    on record instead of being overwritten by its retry.
+    """
+    from automation.scenarios.cross_app_flows import start_flow_run
+    flow, env, business_device = _flow_run_settings(run_id)
+
     new_run_id = start_flow_run(flow["id"], env=env, business_device=business_device)
     return {"started": True, "run_id": new_run_id, "retried_from": run_id,
             "flow_id": flow["id"], "env": env, "business_device": business_device}
+
+
+@runs_router.post("/{run_id}/resume")
+def resume_run(run_id: str, current_user=Depends(get_current_user)):
+    """Re-run a failed flow FROM the segment that failed, not from the start.
+
+    The segments that passed are recorded in the new run as carried over (with
+    their original steps), and the booked slot they left behind is handed on, so
+    the waiter segments find the same booking. The original run is never modified.
+    """
+    from automation.scenarios.cross_app_flows import start_flow_run, resume_plan
+    from automation.database.models import ScenarioResult
+
+    with SessionLocal() as db:
+        run = db.query(TestRun).filter(TestRun.id == run_id).first()
+        if not run:
+            raise HTTPException(status_code=404, detail=f"No run {run_id}")
+        if (run.status or "") in ("running", "queued"):
+            raise HTTPException(status_code=409,
+                                detail="This run is still going — stop it before resuming.")
+        rows = db.query(ScenarioResult).filter(ScenarioResult.run_id == run_id).all()
+        for r in rows:                       # detach: read after the session closes
+            db.expunge(r)
+    flow, env, business_device = _flow_run_settings(run_id)
+    try:
+        plan = resume_plan(flow, rows)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    plan["from_run"] = run_id
+    new_run_id = start_flow_run(flow["id"], env=env, business_device=business_device,
+                                resume=plan)
+    seg = flow["segments"][plan["start_at"]]
+    return {"started": True, "run_id": new_run_id, "resumed_from": run_id,
+            "from_segment": seg["num"], "segment_name": seg["name"],
+            "booked_slot": plan["booked_slot"], "flow_id": flow["id"], "env": env}
 
 
 # ── Cross-app flow EDITING ───────────────────────────────────────────────────

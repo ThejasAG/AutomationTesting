@@ -61,10 +61,18 @@ def _measure(udid: str, elements: Optional[list] = None) -> Tuple[str, float, fl
     if not w or w <= h:
         return "same", w, h
     # Small, named, distinct elements make unambiguous probes.
+    # ON SCREEN only: a scrolled card reports content-space frames (measured:
+    # y=-294 on the iPad payment card), and probing those hit nothing, so the
+    # measurement fell back to a guess with good probes further down the list.
+    def _on_screen(e):
+        f = e.get("frame") or {}
+        return (0 < f.get("width", 0) < w / 2 and 0 <= f.get("x", -1)
+                and f.get("x", 0) + f.get("width", 0) <= w
+                and 0 <= f.get("y", -1) and f.get("y", 0) + f.get("height", 0) <= h)
     probes = [e for e in els if e.get("type") != "Application" and _name(e)
-              and 0 < (e.get("frame") or {}).get("width", 0) < w / 2]
+              and _on_screen(e)]
     names = [_name(e) for e in probes]
-    probes = [e for e in probes if names.count(_name(e)) == 1][:4]
+    probes = [e for e in probes if names.count(_name(e)) == 1][:6]
     for e in probes:
         pf = e["frame"]
         cx, cy = pf["x"] + pf["width"] / 2, pf["y"] + pf["height"] / 2

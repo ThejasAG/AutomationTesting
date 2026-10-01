@@ -60,19 +60,22 @@ def test_an_unknown_flow_is_a_clear_error_not_a_wrong_run():
     """A renamed or deleted flow must refuse, never fall back to some other flow."""
     _, flow = _resolve("[Staging] A flow that does not exist")
     assert flow is None
-    src = inspect.getsource(J.retry_run)
+    # The lookup is shared with Resume (_flow_run_settings); Retry calls it.
+    src = inspect.getsource(J.retry_run) + inspect.getsource(J._flow_run_settings)
     assert "Could not identify the flow" in src
 
 
 def test_a_non_flow_run_is_refused():
     """Retry currently covers cross-app flow runs; anything else says so."""
-    src = inspect.getsource(J.retry_run)
+    # The lookup is shared with Resume (_flow_run_settings); Retry calls it.
+    src = inspect.getsource(J.retry_run) + inspect.getsource(J._flow_run_settings)
     assert 'bot_type != "ios-crossapp-flow"' in src
 
 
 def test_the_original_run_is_not_modified():
     """The failure stays on record; the retry is a NEW run."""
-    src = inspect.getsource(J.retry_run)
+    # The lookup is shared with Resume (_flow_run_settings); Retry calls it.
+    src = inspect.getsource(J.retry_run) + inspect.getsource(J._flow_run_settings)
     assert "retried_from" in src
     for forbidden in ("run.status =", "db.commit()", "db.delete("):
         assert forbidden not in src, f"retry must not write to the original run ({forbidden})"
@@ -80,7 +83,8 @@ def test_the_original_run_is_not_modified():
 
 def test_the_business_device_choice_is_carried_over():
     """A run that used the phone for the B-app roles must retry on the phone."""
-    src = inspect.getsource(J.retry_run)
+    # The lookup is shared with Resume (_flow_run_settings); Retry calls it.
+    src = inspect.getsource(J.retry_run) + inspect.getsource(J._flow_run_settings)
     assert "business_device" in src
     assert "DEFAULT_BUSINESS_PHONE_UDID" in src
 

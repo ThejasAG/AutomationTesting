@@ -181,3 +181,57 @@ def test_an_already_selected_dot_is_not_toggled_off(kitchen, monkeypatch):
     ok, notes, b = kitchen()
     assert ok, notes
     assert b.taps == ["SpaghettiallaPuttanescaBtn", "orderReadyBtn", "orderCloseBtn"]
+
+
+# -- this run's ticket, not the first on the board ---------------------------------
+# Measured 2026-09-30: ticket 4837, stuck on the board after a failed run, was first
+# in the queue; three later runs worked on it instead of the order they had sent.
+
+def _two_cards(second_kind="orderReadyBtn"):
+    app = {"AXLabel": "Vya Business", "type": "Application",
+           "frame": {"x": 0, "y": 0, "width": 1210, "height": 834}}
+    return [app, _el("My Orders", 123, 26, 124, 52, "StaticText"),
+            _el("4837", 153, 164, 38, 18, "StaticText"), _el("PennePolloBtn", 155, 240, 170, 14),
+            _el("orderPrintBtn", 153, 285, 64, 48), _el("orderReadyBtn", 285, 285, 148, 48),
+            _el("4841", 503, 164, 39, 18, "StaticText"), _el("TagliatellealSalmoneBtn", 505, 240, 170, 14),
+            _el("orderPrintBtn", 503, 283, 64, 48), _el(second_kind, 636, 283, 148, 48)]
+
+
+def _runner(monkeypatch, els, ticket):
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: els)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner.devices = {"waiter": "IPAD", "kitchen": "IPAD"}
+    runner._booked_ticket = ticket
+    return runner
+
+
+def test_the_kitchen_works_on_this_runs_ticket(monkeypatch):
+    runner = _runner(monkeypatch, _two_cards(), "4841")
+    picked = []
+    monkeypatch.setattr(FlowRunner, "_kitchen_select_items",
+                        lambda self, r, udid, card, els, notes: picked.append(card["ticket"]) or [])
+    FlowRunner._kitchen_ready(runner, None, [])
+    assert picked == ["4841"], "4837 is first on the board but is another run's leftover"
+
+
+def test_a_ticket_that_never_arrived_is_not_swapped_for_another(monkeypatch):
+    runner = _runner(monkeypatch, _two_cards(), "4850")
+    monkeypatch.setattr(FlowRunner, "_kitchen_select_items",
+                        lambda *a: pytest.fail("must not touch another run's ticket"))
+    notes = []
+    assert not FlowRunner._kitchen_ready(runner, None, notes)
+    assert "ticket 4850 (this run's order) is not on the kitchen board" in notes[-1]
+    assert "4837" in notes[-1] and "4841" in notes[-1]
+
+
+def test_a_ticket_already_prepared_is_just_closed(monkeypatch):
+    # A resumed run: Ready went through last time, only Close Order is left.
+    runner = _runner(monkeypatch, _two_cards("orderCloseBtn"), "4841")
+    tapped = []
+    monkeypatch.setattr(caf._idbd, "tap_el",
+                        lambda udid, e, els=None, scroll=True:
+                        tapped.append((dv.name(e), dv.frame(e)[0])) or (True, "idb"))
+    notes = []
+    assert FlowRunner._kitchen_ready(runner, None, notes)
+    assert tapped == [("orderCloseBtn", 636)] and "already prepared" in notes[-1]

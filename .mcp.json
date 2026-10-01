@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "appium-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "appium-mcp@1.95.1"
+      ],
+      "env": {
+        "NO_UI": "true",
+        "SCREENSHOTS_DIR": "/Users/admin2/Desktop/AutomationTesting/logs/mcp-screenshots"
+      }
+    }
+  }
+}

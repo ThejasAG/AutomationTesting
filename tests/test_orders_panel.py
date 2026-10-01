@@ -55,7 +55,7 @@ def panel(monkeypatch):
 def test_the_reserved_booking_at_the_slot_is_opened(panel):
     ok, notes, taps = panel("18:05", ("reserved", "confirmationpending"))
     assert ok and taps == [291]
-    assert "4781 RESERVED" in notes[-1]
+    assert "4781 RESERVED" in notes[-2] and notes[-1] == "    · booking ticket 4781"
 
 
 def test_a_dropped_dash_still_reads_the_start_time(panel):
@@ -118,7 +118,7 @@ def test_todays_booking_is_opened_from_the_text_without_card_elements(monkeypatc
     assert runner._open_from_panel("12:50", ("reserved", "confirmationpending"),
                                    "@open_reservation", notes)
     assert points == [(880.0, 742.0)]                 # the 12:50 window of card 4794
-    assert "4794 RESERVED" in notes[-1]
+    assert "4794 RESERVED" in notes[-2] and notes[-1] == "    · booking ticket 4794"
 
 
 def test_serve_card_is_not_taken_for_reserved_today(monkeypatch):

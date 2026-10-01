@@ -215,3 +215,53 @@ def test_idb_unavailable_is_a_clean_miss(monkeypatch):
     assert dv.tap("U", ["x"]) == (False, "idb unavailable")
     assert dv.fill("U", "x", "y") == (False, "")
     assert dv.describe_all("U") == []
+
+
+# -- typing credentials efficiently (asked 2026-10-01: "too many attempts") --------
+
+def test_a_field_that_already_holds_the_text_is_not_retyped(screen):
+    f = el("emailValue", 10, 100, t="TextField", value="waiter@example.com")
+    s = screen([f])
+    info = {}
+    assert dv.fill("U", "emailValue", "waiter@example.com", info=info) == (True, "waiter@example.com")
+    assert info["skipped"] and not any(c[1] in ("tap", "text", "key-sequence") for c in s.calls)
+
+
+def test_a_field_slow_to_update_is_not_cleared_and_retyped(screen):
+    # The app shows the typed text a moment later: the first read-back sees the
+    # old (empty) value. That used to count as a miss and start attempt 2.
+    f = el("emailValue", 10, 100, t="TextField", value="")
+    s = screen([f])
+    real_value = dv._value
+    reads = {"n": 0}
+
+    def lagging(udid, field):
+        reads["n"] += 1
+        return "" if reads["n"] == 1 else real_value(udid, field)
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr(dv, "_value", lagging)
+    try:
+        info = {}
+        assert dv.fill("U", "emailValue", "waiter@example.com", info=info)[0]
+        assert info["attempts"] == 1
+        assert sum(1 for c in s.calls if c[1] == "text") == 1, "typed once"
+    finally:
+        mp.undo()
+
+
+def test_a_masked_field_is_always_typed(screen):
+    f = el("passwordValue", 10, 100, t="SecureTextField", value="••••••")
+    s = screen([f], text_filter=lambda t: "•" * len(t))
+    info = {}
+    assert dv.fill("U", "passwordValue", "secret", info=info)[0]
+    assert not info["skipped"] and sum(1 for c in s.calls if c[1] == "text") == 1
+
+
+def test_a_hung_swipe_does_not_crash_the_step(monkeypatch):
+    import subprocess
+    def hang(args, timeout=20.0):
+        raise subprocess.TimeoutExpired(args, timeout)
+    monkeypatch.setattr(dv, "_idb", hang)
+    monkeypatch.setattr(dv, "to_device", lambda udid, x, y, els=None: (int(x), int(y)))
+    dv.swipe("U", 10, 200, 10, 100, 1.8)          # must not raise

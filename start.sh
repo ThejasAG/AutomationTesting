@@ -157,7 +157,27 @@ say "Dashboard :5173"
 if curl -s --max-time 3 -o /dev/null http://localhost:5173 2>/dev/null; then
   ok "already running"
 else
-  ( cd automation/dashboard && nohup npm run dev > "$OLDPWD/logs/dashboard.log" 2>&1 & echo $! > "$OLDPWD/logs/dashboard.pid" )
+  # Serve the PRODUCTION build by default: one bundle and React's production mode,
+  # instead of the dev server's 1,400+ separate modules and development React —
+  # the page is much lighter on a Mac that is already short of memory. It is
+  # rebuilt (~12s) only when the dashboard source is newer than the last build.
+  # DASH_DEV=1 ./start.sh runs the dev server (hot reload) as before.
+  DASH_MODE=dev
+  if [ "${DASH_DEV:-0}" != "1" ]; then
+    DASH_MODE=build
+    if [ ! -f automation/dashboard/dist/index.html ] || \
+       [ -n "$(find automation/dashboard/src automation/dashboard/index.html automation/dashboard/package.json \
+                    automation/dashboard/vite.config.ts -newer automation/dashboard/dist/index.html 2>/dev/null | head -1)" ]; then
+      ( cd automation/dashboard && npm run build > "$OLDPWD/logs/dashboard_build.log" 2>&1 ) \
+        && ok "built the dashboard" \
+        || { warn "dashboard build failed (see logs/dashboard_build.log) — using the dev server"; DASH_MODE=dev; }
+    fi
+  fi
+  if [ "$DASH_MODE" = "build" ]; then
+    ( cd automation/dashboard && nohup npx vite preview --port 5173 --strictPort > "$OLDPWD/logs/dashboard.log" 2>&1 & echo $! > "$OLDPWD/logs/dashboard.pid" )
+  else
+    ( cd automation/dashboard && nohup npm run dev > "$OLDPWD/logs/dashboard.log" 2>&1 & echo $! > "$OLDPWD/logs/dashboard.pid" )
+  fi
   for _ in $(seq 1 40); do curl -s --max-time 2 -o /dev/null http://localhost:5173 2>/dev/null && break; sleep 1; done
   curl -s --max-time 3 -o /dev/null http://localhost:5173 2>/dev/null && ok "started" || warn "still starting (see logs/dashboard.log)"
 fi

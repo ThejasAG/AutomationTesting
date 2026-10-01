@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { getRun, getRCA, getEvidence, getRunScenarios, triggerAnalysis,
   getVisualRegression, updateVisualBaseline, getRiskPredictions, getRunSummary, getPerformance,
-  retryRun, stopRun } from '../api';
+  retryRun, resumeRun, stopRun } from '../api';
 import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult,
   VisualRegressionItem, RiskPrediction, PerformanceResponse } from '../api';
 import { format } from 'date-fns';
 import { parseServerDate } from '../time';
-import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown, SkipForward } from 'lucide-react';
+import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown, SkipForward, StepForward } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 
@@ -16,6 +16,8 @@ import ReactMarkdown from 'react-markdown';
 const ACTIVE_RUN_STATES = new Set([
   'queued', 'running', 'collecting_evidence', 'downloading', 'preparing', 'assigned',
 ]);
+/** A finished flow run that did not pass can be resumed from its failed segment. */
+const RESUMABLE = new Set(['failed', 'stopped']);
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { bg: string; fg: string; label: string }> = {
@@ -715,7 +717,25 @@ export default function RunDetails() {
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const navigate = useNavigate();
+
+  // Re-run from the segment that FAILED instead of from the start: the segments
+  // that passed are carried over into the new run, and the booking they made is
+  // handed on. Separate from Retry, which always starts from segment 1.
+  async function onResume() {
+    if (!id || resuming) return;
+    setResuming(true);
+    setRetryError(null);
+    try {
+      const res = await resumeRun(id);
+      navigate(`/run/${res.run_id}`);
+    } catch (e: any) {
+      setRetryError(e?.message || 'Could not resume the run.');
+    } finally {
+      setResuming(false);
+    }
+  }
 
   // Re-run this run's flow with the same environment and devices. The backend
   // recovers those from the run row, so the retry cannot quietly run something else.
@@ -832,6 +852,27 @@ export default function RunDetails() {
             Retry mid-run would put two runs on the same simulators, which is a
             guaranteed WDA collision, so the two can never be offered together. */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {RESUMABLE.has(run.status) && run.bot_type === 'ios-crossapp-flow' && (
+            <button
+              onClick={onResume}
+              disabled={resuming}
+              title="Run again from the segment that failed, keeping the segments that passed"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                padding: '9px 16px', fontSize: '0.88rem', fontWeight: 600,
+                fontFamily: 'inherit', borderRadius: 8, cursor: resuming ? 'default' : 'pointer',
+                border: '1px solid var(--accent-primary)',
+                background: 'transparent',
+                color: resuming ? 'var(--text-secondary)' : 'var(--accent-primary)',
+                opacity: resuming ? 0.7 : 1,
+              }}
+            >
+              {resuming
+                ? <><Loader2 size={15} className="spin" /> Starting…</>
+                : <><StepForward size={15} /> Resume from failure</>}
+            </button>
+          )}
           {ACTIVE_RUN_STATES.has(run.status) ? (
             <button
               onClick={onStop}
@@ -871,6 +912,7 @@ export default function RunDetails() {
                 : <><RefreshCw size={15} /> Retry scenario</>}
             </button>
           )}
+          </div>
           {retryError && (
             <span style={{ color: 'var(--danger)', fontSize: '0.78rem', maxWidth: 280, textAlign: 'right' }}>
               {retryError}

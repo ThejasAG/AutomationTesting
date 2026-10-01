@@ -259,6 +259,18 @@ export async function retryRun(
     return await handleResponse(res);
 }
 
+/** Re-run a failed flow FROM the segment that failed; passed segments carry over. */
+export async function resumeRun(
+    run_id: string,
+): Promise<{ started: boolean; run_id: string; resumed_from: string; from_segment: string;
+             segment_name: string; booked_slot: string; flow_id: string; env: string }> {
+    const res = await fetch(`${API_BASE}/runs/${run_id}/resume`, {
+        method: 'POST',
+        headers: getHeaders(),
+    });
+    return await handleResponse(res);
+}
+
 /** Run ALL cross-app flows sequentially against an environment. */
 export async function runAllCrossAppFlows(
     env: FlowEnv = 'prod',

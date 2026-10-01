@@ -144,3 +144,66 @@ def test_a_card_that_did_fold_is_reopened_for_confirm(pay):
     ok, _ = pay(s)
     assert ok and s.paid
     assert s.log[-2].startswith("R RoopaDaccordionCard") and s.log[-1] == "paymentConfirmBtn"
+
+
+# -- pay for all: the app settles and closes the booking itself -----------------------
+# Measured 2026-10-01 on 4954 (Roopa D paid for 3 guests, 90.56 EUR): after Confirm
+# the app showed the receipt ('TICKET CLIENT'), then My Bookings, and the booking
+# read COMPLETED -- no Close Table button ever came.
+
+def test_the_receipt_counts_as_settled():
+    assert FlowRunner._settled_screen([el("TICKET CLIENT", 839, 193)]) == "receipt"
+    assert FlowRunner._settled_screen([el("My Bookings", 200, 40)]) == "board"
+    assert FlowRunner._settled_screen([el("My Bookings", 200, 40),
+                                       el("paymentConfirmBtn", 969, 479)]) == ""
+
+
+def test_close_table_accepts_a_booking_the_app_closed_itself(monkeypatch):
+    monkeypatch.setattr(caf._idbd, "describe_all",
+                        lambda udid: [el("TICKET CLIENT", 839, 193), el("90.56 €", 1110, -53)])
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner._cur_udid = "IPAD"
+    monkeypatch.setattr(FlowRunner, "_pay_business",
+                        lambda self, m, notes: pytest.fail("must not pay a second time"))
+    notes = []
+    assert runner._close_table(notes, wait=2.0)
+    assert "closed the order itself (receipt shown)" in notes[-1]
+
+
+# -- the card folds after Input and the amount is lost: reopen, enter again ----------
+
+class FoldingScreen(PaymentScreen):
+    """The amount shows under E-Payment once applied; the first Input folds the
+    card and loses it (0 €), as described 2026-10-01."""
+
+    def __init__(self):
+        super().__init__(stays_open=False)
+        self.applied, self.lose_first = 0.0, True
+
+    def describe_all(self, udid):
+        els = super().describe_all(udid)
+        if self.open and not self.pad and not self.paid:
+            els.append(el(f"{self.applied:g} €", 850, 335, 60, 16, "StaticText"))
+        return els
+
+    def tap(self, udid, names, els=None, scroll=True):
+        typed = self.typed
+        out = super().tap(udid, names, els, scroll)
+        if names == ["userInputBtn"]:
+            if self.lose_first:
+                self.lose_first = False
+            else:
+                self.applied = float(typed)
+            self.typed = ""
+        return out
+
+
+def test_a_lost_amount_is_entered_again_after_reopening_the_card(pay):
+    s = FoldingScreen()
+    ok, notes = pay(s)
+    assert ok and s.paid
+    assert s.inputs == ["36.05", "36.05"], "entered once, lost, entered again"
+    assert any("the profile card folded — reopened it" in n for n in notes)
+    assert any("did not stay on the payment (0 €) — entering it again" in n for n in notes)
+    assert s.log[-1] == "paymentConfirmBtn"

@@ -438,7 +438,7 @@ class CrossAppOrchestrator:
 
             # Phase 1 — book the slot
             book = ["open app", "click Nylai kitchen2", "click Reserve a table",
-                    "click 1 hr", "click Today", "click bookAppoitment"]
+                    "click Not Sure", "click Today", "click bookAppoitment"]
             ok = all(self._step(r, s, "1", "Book slot", "consumer") for s in book)
             self.ev["order_placed"].set()
             self._persist_phase("1")
