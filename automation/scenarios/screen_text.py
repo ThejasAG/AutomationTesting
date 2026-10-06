@@ -97,17 +97,33 @@ def read_text(udid: str, region: Optional[Tuple[float, float, float, float]] = N
         fd, shot = tempfile.mkstemp(suffix=".png")
         os.close(fd)
         crop_path = shot.replace(".png", "-crop.png")
+        x0, y0, x1, y1 = region or (0, 0, w, h)
         try:
             subprocess.run(["xcrun", "simctl", "io", udid, "screenshot", shot],
                            capture_output=True, timeout=20)
-            img = Image.open(shot).convert("RGB")
-            img = idb_coords.upright(img, mode)
-            s = img.width / w
-            x0, y0, x1, y1 = region or (0, 0, w, h)
-            box = (int(x0 * s), int(y0 * s), int(x1 * s), int(y1 * s))
-            img.crop(box).save(crop_path)
-            out = subprocess.run([binary, crop_path] + (["accurate"] if accurate else []),
-                                 capture_output=True, text=True, timeout=30).stdout
+            raw = Image.open(shot).convert("RGB")
+
+            def ocr(turn: str):
+                img = idb_coords.upright(raw, turn)
+                sc = img.width / w
+                bx = (int(x0 * sc), int(y0 * sc), int(x1 * sc), int(y1 * sc))
+                img.crop(bx).save(crop_path)
+                res = subprocess.run([binary, crop_path] + (["accurate"] if accurate else []),
+                                     capture_output=True, text=True, timeout=30).stdout
+                return res, bx, sc
+
+            out, box, s = ocr(mode)
+            if not out.strip() and w > h:
+                # Nothing at all on a landscape screen usually means the picture was
+                # turned the wrong way (measured 2026-10-06: the split dialog read
+                # "nothing" right after the same box read the profile names). Try
+                # the other landscape direction once; keep it if it reads.
+                other = "cw" if mode == "ccw" else "ccw"
+                out2, box2, s2 = ocr(other)
+                if out2.strip():
+                    out, box, s = out2, box2, s2
+                    logger.warning("screen_text: %s read nothing turned %s; %s works",
+                                   udid[:8], mode, other)
         finally:
             for p in (shot, crop_path):
                 try:

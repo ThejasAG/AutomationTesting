@@ -58,7 +58,9 @@ class Fake:
 
     def tap_el(self, udid, e, els=None, scroll=True):
         x, y, w, h = caf._idbd.frame(e)
-        if x < 0 or x > W or len(caf._idbd.name(e).split()) > 2:   # a collapsed Overlay
+        # A collapsed Overlay is the one screen-sized element (measured: the VOID
+        # dialog read as one 1210x834 element); a card's 3-word label is not one.
+        if x < 0 or x > W or (w >= W and h >= H):
             return False, "not reachable"
         self.taps.append(caf._idbd.name(e))
         self.press(caf._idbd.name(e), e)
@@ -544,13 +546,15 @@ def test_close_table_waits_for_the_button_then_confirms_the_order_closed(runner)
 
 
 def test_close_table_pays_by_epay_again_when_confirm_did_not_register(runner, monkeypatch):
-    """MEASURED on 4954: Due 0.00 €, Confirm Payment still up, no Close Table."""
+    """MEASURED on 4954: Due 0.00 €, Confirm Payment still up, no Close Table.
+    The user's rule: do the E-Payment again (not Confirm alone), then close."""
     s = Settling(appears_after=10 ** 6)
     real = s.describe_all
 
     def describe_all(udid):
         els = real(udid)
         return els if s.appears_after < 10 ** 6 else els + [
+            el("Due 0.00 €", 850, 560, 120, 20),
             el("paymentConfirmBtn", 900, 600, 200, 40, "GenericElement")]
     s.describe_all = describe_all
     r = runner(s)
@@ -565,7 +569,72 @@ def test_close_table_pays_by_epay_again_when_confirm_did_not_register(runner, mo
     notes = []
     assert r._close_table(notes)
     assert paid == ["epay"] and s.taps == ["closeTableBtn"]
+    assert "paymentConfirmBtn" not in s.taps
     assert any("paying by E-Payment again" in n for n in notes)
+
+
+def test_close_table_reopens_a_folded_card_to_check_and_repays(runner, monkeypatch):
+    """Close Table missing and Confirm hidden inside a FOLDED card: open the card,
+    see the payment is not done, pay again, then close."""
+    s = Settling(appears_after=10 ** 6)
+    state = {"open": False}
+    real = s.describe_all
+
+    def describe_all(udid):
+        els = real(udid) + [el("R RoopaDaccordionCard ", 834, 146, 336, 49, "GenericElement")]
+        if state["open"] and s.appears_after == 10 ** 6:
+            els += [el("epaymentBtn", 850, 300, 60, 60, "Button"),
+                    el("Outstanding 90.56 €", 850, 560, 160, 20)]
+        return els
+    s.describe_all = describe_all
+    real_press = s.press
+
+    def press(name, e):
+        if "accordionCard" in name:
+            state["open"] = not state["open"]
+        real_press(name, e)
+    s.press = press
+    r = runner(s)
+    monkeypatch.setattr(caf._idbd, "describe_all", describe_all)
+    paid = []
+
+    def pay(method, notes):
+        paid.append(method)
+        s.appears_after = s.reads
+        return True
+    monkeypatch.setattr(r, "_pay_business", pay)
+    notes = []
+    assert r._close_table(notes)
+    assert paid == ["epay"] and s.taps[-1] == "closeTableBtn"
+    assert any("payment is not done" in n for n in notes)
+
+
+def test_close_table_does_not_pay_twice_when_nothing_is_left_to_pay(runner, monkeypatch):
+    """The payment went through but Close Table is slow: wait, never re-pay."""
+    s = Settling(appears_after=30)          # later than the first 15s window
+    r = runner(s)
+    monkeypatch.setattr(r, "_pay_business", lambda m, n: pytest.fail("paid twice"))
+    notes = []
+    assert r._close_table(notes)
+    assert s.taps == ["closeTableBtn"]
+    assert any("nothing is left to pay" in n for n in notes)
+
+
+def test_payment_buttons_alone_never_trigger_a_second_payment(runner, monkeypatch):
+    """On 4954 the card kept showing E-Payment/Cash/Voucher for seconds after a
+    payment that HAD registered. Buttons are not evidence of an unpaid bill."""
+    s = Settling(appears_after=30)
+    real = s.describe_all
+    s.describe_all = lambda udid: real(udid) + [
+        el("R RoopaDaccordionCard ", 834, 146, 336, 49, "GenericElement"),
+        el("epaymentBtn", 850, 300, 60, 60, "Button"),
+        el("cashPaymentBtn", 920, 300, 60, 60, "Button")]
+    r = runner(s)
+    monkeypatch.setattr(caf._idbd, "describe_all", s.describe_all)
+    monkeypatch.setattr(r, "_pay_business", lambda m, n: pytest.fail("paid twice"))
+    notes = []
+    assert r._close_table(notes)
+    assert s.taps[-1] == "closeTableBtn" and "paymentConfirmBtn" not in s.taps
 
 
 def test_close_table_fails_plainly_when_the_bill_is_not_paid(runner):
@@ -582,15 +651,16 @@ def test_notify_payment_confirms_with_yes(runner):
     assert s.taps == ["notifyPaymentBtn", "Yes"] and s.notified
 
 
-def test_pay_for_makes_the_profile_the_payer_first_then_selects_everyone(runner):
+def test_pay_for_falls_back_to_e_payment_when_pay_for_is_dead(runner):
+    """The user's order is Pay For first. On a build where Pay For is dead until the
+    profile is the payer (the Fake models that), the step falls back: E-Payment,
+    close the keypad, Pay For again -- then selects everyone and applies."""
     s = Order(served=True)
     s.notified = True
     r = runner(s)
     notes = []
     assert r._pay_for_all(notes)
-    # E-Payment first makes Roopa the payer -- Pay For is dead until then, and
-    # accessibility still calls it enabled -- then a single Pay For.
-    assert s.taps[:3] == ["epaymentBtn", "numberPadClose", "payForBtn"]
+    assert s.taps[:4] == ["payForBtn", "epaymentBtn", "numberPadClose", "payForBtn"]
     assert {"Guest1select", "Guest2select", "Guest3select"} <= set(s.taps)
     assert "RoopaDselect" not in s.taps          # the payer is preselected
     assert s.taps[-1] == "applyPayment" and s.payfor_done
@@ -603,7 +673,89 @@ def test_pay_for_needs_one_tap_when_the_profile_is_already_the_payer(runner):
     s.notified, s.payer = True, "RoopaD"
     notes = []
     assert runner(s)._pay_for_all(notes)
+    # The user's order: Pay For straight away -- no E-Payment in this step at all.
+    assert s.taps[0] == "payForBtn" and "epaymentBtn" not in s.taps
     assert s.taps.count("payForBtn") == 1 and s.taps[-1] == "applyPayment"
+
+
+def test_pay_for_retries_when_the_first_tap_did_not_land(runner, monkeypatch):
+    """Measured: '[FAIL] @pay_for_all — tapped Pay For ... did not open (58.2s)'
+    straight after the keypad closed. The first Pay For tap was refused as not
+    reachable (the panel was still moving) and nothing retried it."""
+    s = Order(served=True)
+    s.notified = True
+    r = runner(s)
+    real, refused = s.tap_el, {"n": 0}
+
+    def first_refused(udid, e, els=None, scroll=True):
+        if caf._idbd.name(e) == "payForBtn" and refused["n"] == 0:
+            refused["n"] += 1
+            return False, "not reachable"
+        return real(udid, e, els, scroll)
+    monkeypatch.setattr(s, "tap_el", first_refused)
+    monkeypatch.setattr(caf._idbd, "tap_el", first_refused)
+    notes = []
+    assert r._pay_for_all(notes)
+    assert s.taps.count("payForBtn") == 1 and s.payfor_done
+    assert any("opened on try 2" in n for n in notes)
+
+
+def test_pay_for_failure_says_whether_the_tap_landed(runner, monkeypatch):
+    s = Order(served=True)
+    s.notified = True
+    r = runner(s)
+    real = s.tap_el
+
+    def never(udid, e, els=None, scroll=True):
+        if caf._idbd.name(e) == "payForBtn":
+            return False, "not reachable"
+        return real(udid, e, els, scroll)
+    monkeypatch.setattr(s, "tap_el", never)
+    monkeypatch.setattr(caf._idbd, "tap_el", never)
+    notes = []
+    assert not r._pay_for_all(notes)
+    assert "3 tries; last: Pay For not tapped: not reachable" in notes[-1]
+
+
+def test_pay_for_reopens_a_card_the_keypad_folded(runner, monkeypatch):
+    """Closing the keypad can fold Roopa's card, taking Pay For with it: re-open the
+    card, then tap Pay For -- and never tap the card while Pay For shows (folds it)."""
+    s = Order(served=True)
+    s.notified = True
+    r = runner(s)
+    state = {"folded": False}
+    real_all, real_press = s.describe_all, s.press
+
+    def describe_all(udid):
+        els = real_all(udid)
+        return [e for e in els if not (state["folded"] and caf._idbd.name(e) == "payForBtn")]
+
+    def press(name, e):
+        if name == "numberPadClose":
+            state["folded"] = True
+        elif "accordionCard" in name:
+            state["folded"] = not state["folded"]
+        real_press(name, e)
+    monkeypatch.setattr(s, "describe_all", describe_all)
+    monkeypatch.setattr(caf._idbd, "describe_all", describe_all)
+    s.press = press
+    real_tap_el = s.tap_el
+
+    def tap_el(udid, e, els=None, scroll=True):
+        # The shared fake refuses 3-word labels as a collapsed Overlay; the card's
+        # label ('R RoopaDaccordionCard <glyph>') is a real, tappable card.
+        if "accordionCard" in caf._idbd.name(e):
+            s.taps.append(caf._idbd.name(e))
+            s.press(caf._idbd.name(e), e)
+            return True, "idb"
+        return real_tap_el(udid, e, els, scroll)
+    monkeypatch.setattr(caf._idbd, "tap_el", tap_el)
+    notes = []
+    ok = r._pay_for_all(notes)
+    assert ok, s.taps
+    i = s.taps.index("numberPadClose")
+    assert "accordionCard" in s.taps[i + 1] and s.taps[i + 2] == "payForBtn"
+    assert s.payfor_done
 
 
 # ── every @token a flow uses has a handler ──────────────────────────────────

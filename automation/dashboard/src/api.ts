@@ -1920,6 +1920,8 @@ export interface InspectorTree {
     elements: InspectorElement[];
     problems: InspectorProblem[];
     problem_count: number;
+    /** A dialog hides the screen from accessibility: only a couple of elements are visible. */
+    covered?: boolean;
 }
 
 export async function getInspectorTree(udid: string, safeMargin = 0): Promise<InspectorTree> {
@@ -1972,4 +1974,53 @@ export async function setRunnerRunning(on: boolean): Promise<RunnerState> {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.detail || `Could not ${on ? 'start' : 'stop'} the agent`);
     return body;
+}
+
+// ── MCP servers (Settings → MCP servers; used by the AI Chat) ────────────────
+
+export interface McpServer {
+    id: string;
+    name: string;
+    transport: 'stdio' | 'http';
+    command: string;
+    args: string[];
+    /** Values come back masked; posting a masked value keeps the stored one. */
+    env: Record<string, string>;
+    url: string;
+    headers: Record<string, string>;
+    enabled: boolean;
+    /** Acts on the simulators (Appium, Maestro): refused while a test run is going. */
+    drives_devices: boolean;
+    description: string;
+}
+export type McpServerInput = Omit<McpServer, 'id'>;
+export interface McpTestResult {
+    ok: boolean;
+    error?: string;
+    seconds?: number;
+    server?: { name?: string; version?: string };
+    tools: { name: string; description: string }[];
+}
+
+export async function getMcpServers(): Promise<McpServer[]> {
+    const res = await fetch(`${API_BASE}/mcp/servers`, { headers: getHeaders() });
+    return (await handleResponse(res)).servers;
+}
+export async function getMcpPresets(): Promise<McpServerInput[]> {
+    const res = await fetch(`${API_BASE}/mcp/presets`, { headers: getHeaders() });
+    return (await handleResponse(res)).presets;
+}
+export async function saveMcpServer(body: McpServerInput, id?: string): Promise<McpServer> {
+    const res = await fetch(`${API_BASE}/mcp/servers${id ? `/${id}` : ''}`, {
+        method: id ? 'PUT' : 'POST', headers: getHeaders(), body: JSON.stringify(body),
+    });
+    return (await handleResponse(res)).server;
+}
+export async function deleteMcpServer(id: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/mcp/servers/${id}`, { method: 'DELETE', headers: getHeaders() });
+    await handleResponse(res);
+}
+export async function testMcpServer(id: string): Promise<McpTestResult> {
+    const res = await fetch(`${API_BASE}/mcp/servers/${id}/test`, { method: 'POST', headers: getHeaders() });
+    return handleResponse(res);
 }

@@ -269,6 +269,22 @@ def _options(udid: str, bundle_id: str, wda_port: int) -> XCUITestOptions:
     return o
 
 
+# Applied after the session exists (they are driver SETTINGS, not caps). Only the
+# two that cannot change WHAT is found: smaller responses, and stop at the first
+# match for a single-element lookup. snapshotMaxDepth stays unset (see above) and
+# customSnapshotTimeout stays at the default -- a tighter one could truncate this
+# app's very deep tree. The single-scenario path (service._SPEED_SETTINGS) already
+# ran with these; the flows did not.
+FLOW_SPEED_SETTINGS = {"shouldUseCompactResponses": True, "useFirstMatch": True}
+
+
+def apply_flow_speed_settings(d) -> None:
+    try:
+        d.update_settings(FLOW_SPEED_SETTINGS)
+    except Exception as e:
+        logger.debug("flow speed settings not applied: %s", e)
+
+
 def _fill_field(d, name: str, text: str) -> bool:
     """Type into a React-Native TextInput by its accessibility name.
 

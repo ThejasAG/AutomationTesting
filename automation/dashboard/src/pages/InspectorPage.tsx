@@ -178,7 +178,12 @@ export default function InspectorPage() {
                         as broken, and a real finding looked the same as a clean one. */}
                     <h2 style={{ fontSize: '0.95rem', margin: '0 0 8px',
                                  display: 'flex', alignItems: 'center', gap: 7 }}>
-                        {tree && tree.problem_count > 0 ? (
+                        {tree?.covered ? (
+                            <>
+                                <AlertTriangle size={15} color="var(--warning)" />
+                                A dialog covers this screen
+                            </>
+                        ) : tree && tree.problem_count > 0 ? (
                             <>
                                 <AlertTriangle size={15} color="var(--danger)" />
                                 Cannot be tapped as drawn
@@ -193,7 +198,14 @@ export default function InspectorPage() {
                             </>
                         )}
                     </h2>
-                    {tree && tree.problem_count === 0 && (
+                    {tree?.covered && (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.5 }}>
+                            Accessibility sees only {tree.element_count} elements: the open dialog hides
+                            its own buttons and everything behind it. Its controls cannot be inspected or
+                            tapped by id here — the flows find them by reading the screen text instead.
+                        </div>
+                    )}
+                    {tree && !tree.covered && tree.problem_count === 0 && (
                         <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                             Nothing is covered or out of reach on this screen.
                         </div>

@@ -1,6 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
 import type { ReactElement } from 'react';
-import { Boxes, LayoutDashboard, Settings, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Workflow, Clapperboard, Crosshair} from 'lucide-react';
+import { Boxes, LayoutDashboard, Settings, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Workflow, Clapperboard, Crosshair, Bot} from 'lucide-react';
 import DashboardHome from './pages/DashboardHome';
 import ScenariosPage from './pages/ScenariosPage';
 import InspectorPage from './pages/InspectorPage';
@@ -16,6 +16,7 @@ import ChatPage from './pages/ChatPage';
 import WorkflowPage from './pages/WorkflowPage';
 import BuildUpdateBell from './components/BuildUpdateBell';
 import JobQueuePage from './pages/JobQueuePage';
+import AgentPage from './pages/AgentPage';
 import { getAuthToken, getGoldenRun } from './api';
 
 const ProtectedRoute = ({ children }: { children: ReactElement }) => {
@@ -85,6 +86,10 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => {
           <ListChecks size={20} />
           Job Queue
         </NavLink>
+        <NavLink to="/agent" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <Bot size={20} />
+          AI Agent
+        </NavLink>
         <NavLink to="/scenarios" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <ListChecks size={20} />
           Scenarios
@@ -131,6 +136,7 @@ function App() {
         <Route path="/scripts" element={<ProtectedRoute><ProtectedLayout><ScriptEditorPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/scenarios" element={<ProtectedRoute><ProtectedLayout><ScenariosPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/queue" element={<ProtectedRoute><ProtectedLayout><JobQueuePage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/agent" element={<ProtectedRoute><ProtectedLayout><AgentPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/reports" element={<ProtectedRoute><ProtectedLayout><ReportsPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/chat" element={<ProtectedRoute><ProtectedLayout><ChatPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/run/:id" element={<ProtectedRoute><ProtectedLayout><RunDetails /></ProtectedLayout></ProtectedRoute>} />

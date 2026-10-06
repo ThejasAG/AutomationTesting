@@ -56,11 +56,12 @@ from automation.scenarios.cross_app_orchestrator import (
     APPIUM_URL, CONSUMER_BUNDLE, BUSINESS_BUNDLE, ENV_BUNDLES,
     DEFAULT_CONSUMER_UDID, DEFAULT_BUSINESS_UDID, DEFAULT_BUSINESS_PHONE_UDID,
     _options, _fill_field, ensure_business_metro, ensure_app_metro,
-    _business_metro_target,
+    _business_metro_target, apply_flow_speed_settings,
 )
 from automation.scenarios import cross_app_config as cfgmod
 from automation.scenarios import ui_health as _uih
 from automation.scenarios import idb_driver as _idbd
+from automation.scenarios import idb_fast as _idb_fast
 
 logger = logging.getLogger("cross_app_flows")
 
@@ -109,7 +110,7 @@ _C_BOOK_PREFIX = [
     "@consumer_home",                 # app resumes on its last screen → back out to Home
     "click NylaiKitchen2",            # restaurant card is listed directly on Home
     "select Any",                     # dining area — NylaiKitchen2 shows slots under 'Any'
-    "select Not Sure",                # duration: Not Sure (asked for every scenario)
+    "@duration:not_sure",             # duration slider → Not Sure (asked for every scenario)
     "@first_time_slot",               # tap the first available time chip (e.g. 17:15)
     "@book_appointment",
 ]
@@ -223,7 +224,7 @@ _C_BOOK_WITH_GUESTS = [
     "click NylaiKitchen2",
     "@invite_guests:3",               # adult + → Guest ×3 → Invite (Persons 1 → 4)
     "select Any",
-    "select Not Sure",
+    "@duration:not_sure",             # slide the duration bar to Not Sure
     "@first_time_slot",
     "@book_appointment",
     "@order_later",                   # no pre-order: just reserve the table
@@ -547,6 +548,7 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@send_to_kitchen", "help": "Tap SEND and confirm the order went to the kitchen"},
         {"step": "@order_later", "help": "After booking: order later (nothing to do from the Wallet)"},
         {"step": "@pre_order", "help": "After booking: open the menu to pre-order"},
+        {"step": "@duration:not_sure", "help": "Slide the duration bar to Not Sure (or @duration:1/2/3)"},
         {"step": "@invite_guests:3", "help": "Reservation form: Persons + → add N guests → Invite"},
         {"step": "@void_item", "help": "Swipe an order row → VOID → Entry Error → Apply"},
         {"step": "@add_item_for_all", "help": "ADD a dish → ASSIGN / SPLIT → every profile → Assign"},
@@ -838,6 +840,7 @@ class FlowRunner:
         self._cur_udid = udid
         if udid not in self._sessions:
             d = webdriver.Remote(APPIUM_URL, options=_options(udid, bundle, wda))
+            apply_flow_speed_settings(d)
             d.activate_app(bundle)
             self._wait_app_ready(d, bundle, udid=udid)   # poll instead of a blind sleep(10)
             # Debug builds stack LogBox warnings over the UI; clear them once here
@@ -865,15 +868,19 @@ class FlowRunner:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                if udid and d.query_app_state(bundle) == 4:
-                    els = _idbd.describe_all(udid)
-                    if any(e.get("type") in ("StaticText", "Button")
-                           and (e.get("AXLabel") or "").strip() for e in els):
-                        time.sleep(0.4)
-                        return
-                    if els:                     # idb works; the UI is just not up yet
-                        time.sleep(0.5)
-                        continue
+                if udid:
+                    # idb only. An empty read here means a busy device, not "no idb":
+                    # falling through to the Appium whole-tree predicate below cost
+                    # 5-45s a poll on this app, for a wait that ends at `timeout`
+                    # regardless. Just look again.
+                    if d.query_app_state(bundle) == 4:
+                        els = _idbd.describe_all(udid)
+                        if any(e.get("type") in ("StaticText", "Button")
+                               and (e.get("AXLabel") or "").strip() for e in els):
+                            time.sleep(0.4)
+                            return
+                    time.sleep(0.5)
+                    continue
                 if d.query_app_state(bundle) == 4:  # 4 = running in foreground
                     # A rendered control means the JS bundle loaded and UI is up.
                     if d.find_elements(AppiumBy.IOS_PREDICATE,
@@ -903,7 +910,7 @@ class FlowRunner:
         udid = getattr(self, "_cur_udid", "") or ""
         if udid:
             try:
-                raw = subprocess.run([_IDB, "ui", "describe-all", "--udid", udid],
+                raw = _idb_fast.subprocess_run([_IDB, "ui", "describe-all", "--udid", udid],
                                      capture_output=True, text=True, timeout=20).stdout
                 for e in _json.loads(raw):
                     for k in ("AXIdentifier", "AXLabel", "AXValue"):
@@ -1468,6 +1475,33 @@ class FlowRunner:
                 and 40 <= (e.get("h") or 0) <= 60
                 and (e.get("w") or 0) >= 0.9 * screen_w]
 
+    def _wait_form_closed(self, form_open, window: float = 30.0) -> bool:
+        """Wait for the New Appointment form to close after Save. True once closed.
+
+        Polling with form_open() re-read the WHOLE iPad screen each time: 2.6-5.7s a
+        read with the form up, plus a 1s sleep, 16 times -- @save_appointment took
+        127s on a save that had already gone through. Instead, hit-test the single
+        point Save sits at (describe-point, 0.04-0.2s): while that point still
+        answers 'saveBtn' the form is open. The moment it does not, ONE full read
+        confirms -- a toast passing over the button must not count as closed.
+        Falls back to the full read every round if the button cannot be located."""
+        udid = getattr(self, "_cur_udid", "") or self.devices.get("business") or ""
+        els = self._idb_els(udid)
+        btn = next((e for e in els if (e["label"] or "").strip() == "saveBtn"), None)
+        deadline = time.time() + window
+        while time.time() < deadline:
+            time.sleep(0.5)
+            if btn is not None and udid:
+                try:
+                    px, py = _idbd.to_device(udid, btn["cx"], btn["y"] + 9)
+                    if _idbd.name(_idbd.describe_point(udid, px, py)) == "saveBtn":
+                        continue                      # still exactly where it was: open
+                except Exception:
+                    pass
+            if not form_open():
+                return True
+        return False
+
     def _save_appointment(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """Tap Save on the New Appointment form and CONFIRM the form closed.
 
@@ -1502,12 +1536,10 @@ class FlowRunner:
             if not tapped:
                 notes.append(f"[FAIL] @save_appointment — no saveBtn on screen (attempt {attempt})")
                 return False
-            for _ in range(16):                      # ~16-30s for the form to close
-                time.sleep(1)
-                if not form_open():
-                    notes.append(f"[ok] @save_appointment — saved; the form closed"
-                                 f"{'' if attempt == 1 else f' (attempt {attempt}/3)'}")
-                    return True
+            if self._wait_form_closed(form_open):
+                notes.append(f"[ok] @save_appointment — saved; the form closed"
+                             f"{'' if attempt == 1 else f' (attempt {attempt}/3)'}")
+                return True
             if attempt < 3:
                 notes.append(f"    · @save_appointment — tapped Save but the form is still "
                              f"open (attempt {attempt}/3) — clearing overlays and retrying")
@@ -1827,8 +1859,12 @@ class FlowRunner:
         import subprocess as _sp
         udid = udid or getattr(self, "_cur_udid", "") or self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
         try:
-            raw = _sp.run([_IDB, "ui", "describe-all", "--udid", udid],
-                          capture_output=True, text=True, timeout=15).stdout
+            # 30s, not 15: on the busy iPad a read measured 14.6s, the next one ran
+            # past 15s, came back empty, and @save_appointment fell through to
+            # Appium -- 29s to find saveBtn + 79s to click it (2026-10-06). A slow
+            # idb read is still far cheaper than any Appium fallback on this tree.
+            raw = _idb_fast.subprocess_run([_IDB, "ui", "describe-all", "--udid", udid],
+                          capture_output=True, text=True, timeout=30).stdout
             arr = _json.loads(raw) if raw.strip().startswith("[") else []
         except Exception:
             return []
@@ -2318,7 +2354,7 @@ class FlowRunner:
         udid = udid or getattr(self, "_cur_udid", "") or self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
         x, y = self._rotate_for_device(x, y, udid)
         try:
-            _sp.run([_IDB, "ui", "tap", "--udid", udid, str(int(x)), str(int(y))], timeout=10)
+            _idb_fast.subprocess_run([_IDB, "ui", "tap", "--udid", udid, str(int(x)), str(int(y))], timeout=10)
             return True
         except Exception:
             return False
@@ -3696,7 +3732,7 @@ class FlowRunner:
         def _read_slots():
             """idb-read the tree and collect any HH:MM time chips (label, centre)."""
             try:
-                raw = _sp.run([_IDB, "ui", "describe-all", "--udid", udid],
+                raw = _idb_fast.subprocess_run([_IDB, "ui", "describe-all", "--udid", udid],
                               capture_output=True, text=True, timeout=15).stdout
                 els = _json.loads(raw) if raw.strip().startswith("[") else []
             except Exception:
@@ -3871,8 +3907,7 @@ class FlowRunner:
             # instead of avoided. ~2-5s against ~40-56s.
             _ok_slot, _how = _idbd.tap(udid, [f"{safe}Btn", safe])
             if _ok_slot:
-                tapped = True
-                time.sleep(0.6)
+                tapped = True                    # no fixed pause: the next step waits for its target
                 notes.append(f"[ok] @first_time_slot — selected slot '{lbl}' ({_how}, {tag})")
             if not tapped:
                 _ex = _fut.ThreadPoolExecutor(max_workers=1)
@@ -3940,13 +3975,35 @@ class FlowRunner:
                      "at this hour, not an automation fault.")
         return False
 
+    def _wait_on_home(self, timeout: float) -> bool:
+        """_on_home(), polled until *timeout* -- instead of a fixed sleep then one look.
+        Returns as soon as Home is up; at least one look is always taken."""
+        deadline = time.time() + timeout
+        while True:
+            time.sleep(0.3)
+            if self._on_home():
+                return True
+            if time.time() >= deadline:
+                return False
+
+    def _wait_gone(self, labels, timeout: float) -> bool:
+        """Poll until none of *labels* is on screen (e.g. a dialog just dismissed)."""
+        want = set(labels)
+        deadline = time.time() + timeout
+        while True:
+            time.sleep(0.3)
+            if not any((e.get("label") or "").strip() in want for e in self._idb_els()):
+                return True
+            if time.time() >= deadline:
+                return False
+
     def _on_home(self) -> bool:
         """Are we on the Home tab? Checked via idb (sees the full tree; the Appium
         snapshot is depth-capped and misses these)."""
         import subprocess
         udid = getattr(self, "_cur_udid", "") or self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
         try:
-            raw = subprocess.run([_IDB, "ui", "describe-all", "--udid", udid],
+            raw = _idb_fast.subprocess_run([_IDB, "ui", "describe-all", "--udid", udid],
                                  capture_output=True, text=True, timeout=20).stdout
             # "NylaiKitchen2" was in this list and is NOT Home-specific: the Wallet
             # renders the same restaurant as "NylaiKitchen2Card", which contains it
@@ -4123,7 +4180,7 @@ class FlowRunner:
             if leftover and not self._on_home():
                 notes.append("[ok] @consumer_home — dismissed leftover booking dialog")
                 self._idb_tap(leftover["cx"], leftover["cy"])
-                time.sleep(1.5)
+                self._wait_gone(("orderLater", "pickUpOrderConfirm"), 2.5)
             try:
                 # idb FIRST. The bottom tab is a Button labelled "Home"; a stale
                 # hidden "homeTab" node also matches by id, and clicking that
@@ -4134,8 +4191,11 @@ class FlowRunner:
                 if tab:
                     self._idb_tap(tab["cx"], tab["cy"])
                     tapped = True
-                    time.sleep(1.5)
-                    if self._on_home():
+                    # Poll instead of a fixed 1.5s: done the moment Home is up, and a
+                    # Home that takes 2-3s no longer falls through to the Appium
+                    # whole-tree lookups below (10-40s each on this app) -- the
+                    # 46s @consumer_home seen in live runs.
+                    if self._wait_on_home(3.0):
                         notes.append("[ok] @consumer_home — Home reached")
                         return True
                 els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "homeTab")
@@ -4157,8 +4217,7 @@ class FlowRunner:
                         self._idb_tap(tab["cx"], tab["cy"]); tapped = True
             except Exception:
                 pass
-            time.sleep(2.0)
-            if self._on_home():
+            if self._wait_on_home(2.0):
                 notes.append("[ok] @consumer_home — Home reached")
                 return True
             # A sub-screen (open booking) may block the tab — back out, then retry.
@@ -5012,7 +5071,7 @@ class FlowRunner:
                            "SERVE")
 
     def _open_from_panel(self, slot: str, statuses: tuple, what: str,
-                         notes: List[str], pages: int = 2) -> bool:
+                         notes: List[str], pages: int = 8) -> bool:
         """Open the booking straight from the right-hand My Orders panel.
 
         The panel lists today's bookings with ticket, status and time window --
@@ -5026,7 +5085,14 @@ class FlowRunner:
         Measured 2026-09-29: 4794 RESERVED 12:50 was plainly in the panel and the
         step still scrolled the calendar for 106s -- it gave up here without a
         word, needing an accessibility card element for the match. Matching is
-        now text-only, and every fallback says why."""
+        now text-only, and every fallback says why.
+
+        SEARCHED CAREFULLY, before the calendar is touched: page DOWN to the end of
+        the list (it has ended when a page shows the same tickets as the last), then,
+        if the booking was not there, page back UP to the top -- the panel may have
+        been left scrolled part-way by an earlier step, so starting where it is and
+        only going down missed everything above. It used to give up after 2 pages
+        and fall back to scrolling the calendar."""
         from automation.scenarios import screen_text, idb_coords
         want = re.match(r"^(\d{1,2}):(\d{2})", slot or "")
         if not want:
@@ -5039,7 +5105,8 @@ class FlowRunner:
             notes.append(f"    · My Orders panel: {why} — trying the calendar")
             return False
 
-        for page in range(pages):
+        seen, direction, turned = None, "down", False
+        for page in range(pages * 2):
             els = _idbd.describe_all(udid)
             if not els:
                 return skip("could not read the screen (idb)")
@@ -5099,10 +5166,31 @@ class FlowRunner:
                     self._remember_ticket(ticket, notes)
                     self._remember_status(status)
                 return ok and self._reservation_opened(notes, what, slot, "My Orders panel")
-            if page + 1 < pages:                   # a later booking sits further down
-                col = x0 + (w_app - x0) / 2
+            # Not on this page. Has the list stopped moving? Then this end is done:
+            # turn round once and walk back up to the top.
+            sig = tuple(t[0].strip() for t in tickets)
+            if sig == seen:
+                if turned:
+                    break                          # searched both ends of the list
+                direction, turned = "up", True
+                notes.append(f"    · My Orders panel: {want_hhmm} not found down to the "
+                             f"end of the list — checking above, back to the top")
+            seen = sig
+            col = x0 + (w_app - x0) / 2
+            if direction == "down":                # finger up: later bookings come into view
                 _idbd.swipe(udid, col, h_app * 0.85, col, h_app * 0.45, 1.8)
-                time.sleep(0.5)
+            else:                                  # finger down: earlier bookings
+                _idbd.swipe(udid, col, h_app * 0.45, col, h_app * 0.85, 1.8)
+            # The panel scrolls with momentum: read it only once its cards stop
+            # moving (same frames twice), or the text is read mid-glide.
+            last = None
+            for _ in range(5):
+                time.sleep(0.4)
+                cards = tuple(frame(e) for e in _idbd.describe_all(udid)
+                              if frame(e)[0] >= x0 - 5 and frame(e)[2] > 200)
+                if cards == last:
+                    break
+                last = cards
         return skip(f"no {'/'.join(statuses)} booking at {want_hhmm}")
 
     # BookingCard.onPress: a booking opens only from 30 min before its start; earlier
@@ -6004,6 +6092,65 @@ class FlowRunner:
                      + (" (booking-confirmed modal dismissed via orderLater)" if post_modal else ""))
         return True
 
+    # ── Consumer: the duration slider ──────────────────────────────────────
+    # Reservation.js (Oct 2026): Duration is a 4-stop bar -- 1 hr, 2 hr, 3 hr, Not
+    # Sure. The knob (a MultiSlider marker) has no id; each label under a stop is a
+    # TouchableOpacity `duration1`..`duration4` whose onPress calls the same
+    # durationIndexChange as releasing the knob. The knob sits 32pt above its
+    # label's top (labels top:32, knob 30pt tall at top:0 of the 52pt bar).
+    _DURATION_STOP = {"1": 1, "2": 2, "3": 3, "not_sure": 4, "notsure": 4, "4": 4}
+
+    def _set_duration(self, which: str, notes: List[str]) -> bool:
+        """Slide the duration knob to a stop; confirm the time slots appear."""
+        udid = self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
+        name, frame = _idbd.name, _idbd.frame
+        tag = f"@duration:{which}"
+        stop = self._DURATION_STOP.get(_norm(which).replace("hr", "").replace("hrs", ""))
+        if stop is None:
+            notes.append(f"[FAIL] {tag} — unknown duration (use 1, 2, 3 or not_sure)")
+            return False
+        els, labels = self._wait_els(udid, lambda es: [
+            e for e in es if re.fullmatch(r"duration[1-4]", name(e))], 10.0)
+        by = {name(e): e for e in labels}
+        if "duration1" not in by or f"duration{stop}" not in by:
+            notes.append(f"[FAIL] {tag} — the duration bar is not on screen (is the "
+                         f"reservation form open and a dining area chosen?)")
+            return False
+
+        def prompt_gone(es) -> bool:
+            # 'Select a duration to see available time slots' goes; slot chips come.
+            return not any("select a duration" in name(e).lower() for e in es) and \
+                any(re.fullmatch(r"\d{1,2}:\d{2}", name(e)) for e in es)
+
+        # Drag from wherever the knob is now (the stop whose label is selected is
+        # not readable, so start from 1 hr -- the default -- and sweep right; the
+        # knob only moves if the drag starts on it, so also try from each stop).
+        tx = _idbd.centre(by[f"duration{stop}"])[0]
+        how = ""
+        for start in ("duration1", "duration2", "duration3", "duration4"):
+            if start not in by or start == f"duration{stop}":
+                continue
+            sx, _ = _idbd.centre(by[start])
+            ky = frame(by[start])[1] - 17          # the knob's centre line
+            _idbd.swipe(udid, sx, ky, tx, ky, 0.8)
+            els, ok = self._wait_els(udid, prompt_gone, 4.0)
+            if ok:
+                how = f"slid the bar from {start[-1]} to stop {stop}"
+                break
+        if not how:
+            # The labels select the same way the slide does (durationIndexChange).
+            ok, tap_how = _idbd.tap(udid, [f"duration{stop}"])
+            els, ok2 = self._wait_els(udid, prompt_gone, 6.0) if ok else (els, False)
+            if not ok2:
+                toast = self._toast(els)
+                notes.append(f"[FAIL] {tag} — slid the bar and tapped its label but no time "
+                             f"slots appeared" + (f" ({toast!r})" if toast else ""))
+                return False
+            how = f"the slide did not take; tapped the stop's label ({tap_how})"
+        label = {1: "1 hr", 2: "2 hr", 3: "3 hr", 4: "Not Sure"}[stop]
+        notes.append(f"[ok] {tag} — duration set to {label} ({how}); time slots shown")
+        return True
+
     # ── Consumer: invite guests on the reservation form ────────────────────
     # A guest chip on the My Contacts sheet: `${invite.userName}cancel`, 'Guest 1cancel'
     # (Components/Contacts/ContactListView.js:934).
@@ -6785,14 +6932,37 @@ class FlowRunner:
             return True
         if btn is True:
             btn = None
-        if btn is None and self._has(els, "paymentConfirmBtn"):
-            # MEASURED on booking 4954: the amount was entered (Due 0.00 €) but the
-            # Confirm tap did not register, so Close Table never came. As the user
-            # asked: pay by E-Payment again, then close.
-            notes.append(f"    · {tag}: Close Table did not appear and Confirm Payment is "
-                         f"still up — paying by E-Payment again")
-            if self._pay_business("epay", notes):
-                els, btn = self._wait_els(udid, find, wait)
+        # Close Table missing: CHECK THE PAYMENT before giving up (the user's rule).
+        # MEASURED on booking 4954: the amount was entered (Due 0.00 €) but the
+        # Confirm tap did not register, so Close Table never came. And Confirm only
+        # used to be looked for on screen -- inside a FOLDED card it is not, so the
+        # payment was never retried. Now: open the payer's card if it folded, and if
+        # it still offers a payment (a method or Confirm Payment), pay by E-Payment
+        # again and wait for Close Table again. Twice at most. If the card offers
+        # nothing to pay, the payment did go through: just wait longer for Close
+        # Table rather than paying twice.
+        for attempt in (1, 2):
+            if btn is not None or settled:
+                break
+            action, why = self._payment_pending(udid, els)
+            if action == "pay":
+                notes.append(f"    · {tag}: Close Table is not visible and the payment is "
+                             f"not done ({why}) — paying by E-Payment again"
+                             + (f" (attempt {attempt}/2)" if attempt > 1 else ""))
+                self._pay_business("epay", notes)
+            else:
+                notes.append(f"    · {tag}: Close Table is not visible yet, but nothing is "
+                             f"left to pay — waiting for it")
+            els, btn = self._wait_els(
+                udid, lambda es: find(es) or (True if self._settled_screen(es) else None),
+                wait)
+            settled = self._settled_screen(els)
+            if btn is True:
+                btn = None
+        if settled:
+            notes.append(f"[ok] {tag} — the bill is fully paid and the app closed the "
+                         f"order itself ({'receipt shown' if settled == 'receipt' else 'back on My Bookings'})")
+            return True
         if btn is None:
             toast = self._toast(els)
             notes.append(f"[FAIL] {tag} — Close Table did not appear within {wait:.0f}s "
@@ -6809,10 +6979,72 @@ class FlowRunner:
         notes.append(f"[ok] {tag} — tapped Close Table; the order closed")
         return True
 
+    def _card_amount(self, els: List[dict], word: str) -> Optional[float]:
+        """The amount on the payer card's '<word>' line ('Due', 'Outstanding'):
+        either one text ('Due 0.00 €') or a label with its money on the same row."""
+        name, frame = _idbd.name, _idbd.frame
+        one = re.compile(rf"^\s*{word}\b[^0-9]*(\d+(?:[.,]\d{{1,2}})?)\s*€", re.I)
+        for e in els:
+            m = one.match(name(e) or "")
+            if m:
+                return float(m.group(1).replace(",", "."))
+        for t in (e for e in els if (name(e) or "").strip().lower().rstrip(":") == word.lower()):
+            ty = frame(t)[1] + frame(t)[3] / 2
+            for e in els:
+                m = self._MONEY_RE.match(name(e) or "")
+                if m and abs(frame(e)[1] + frame(e)[3] / 2 - ty) < 12 and frame(e)[0] > frame(t)[0]:
+                    return float(m.group(1).replace(",", "."))
+        return None
+
+    def _payment_pending(self, udid: str, els: List[dict]) -> Tuple[str, str]:
+        """(what to do, why): ('confirm' | 'pay' | '', reason).
+
+        STRICT, because re-paying a bill that did go through charges it twice
+        (measured: 91.00 against a 90.56 bill). The method buttons are NOT evidence:
+        on 4954 the card still showed E-Payment/Cash/Voucher for seconds after a
+        payment that had registered. So:
+          * Confirm Payment still up -> the payment did not complete: 'pay' (the
+            user's rule: do the E-Payment again, not Confirm alone);
+          * Outstanding (else Due) above zero -> genuinely unpaid: 'pay';
+          * anything else, unreadable included -> '' (wait, never pay on a guess).
+        The card may have FOLDED, hiding all of it, so it is opened -- only when
+        none of it shows, since tapping an open card folds it."""
+        def decide(es) -> Tuple[str, str]:
+            names = {_idbd.name(e) for e in es}
+            due = self._card_amount(es, "Due")
+            out = self._card_amount(es, "Outstanding")
+            if "paymentConfirmBtn" in names:
+                # The user's rule (2026-10-06): when Close Table is not visible, do
+                # the E-Payment again -- not just Confirm. Pressing Confirm alone left
+                # the run looping on "pressing Confirm Payment again" with no Close Table.
+                return "pay", "Confirm Payment is still up"
+            owed = out if out is not None else due
+            if owed is not None and owed >= 0.005:
+                return "pay", f"{owed:.2f} € still outstanding"
+            return "", ""
+
+        def visible(es) -> bool:
+            names = {_idbd.name(e) for e in es}
+            return ("paymentConfirmBtn" in names or self._card_amount(es, "Due") is not None
+                    or self._card_amount(es, "Outstanding") is not None)
+
+        if visible(els):
+            return decide(els)
+        cards = [e for e in els if "accordionCard" in _idbd.name(e)]
+        want = getattr(self, "_payer_card", "")
+        card = next((e for e in cards if want and want in _idbd.name(e).split()),
+                    cards[0] if cards else None)
+        if card is None:
+            return "", ""
+        _idbd.tap_el(udid, card, els)
+        es, _ = self._wait_els(udid, lambda x: visible(x) or None, 4.0)
+        return decide(es)
+
     _CARD_ID_RE = re.compile(r"(\S+accordionCard)\b")
 
     def _pay_for_all(self, notes: List[str]) -> bool:
         """Open the first profile's card -> Pay For -> select every profile -> Apply.
+        Payment itself (E-Payment -> total -> Confirm) is the next step, @pay:epay.
 
         Pay For is live only for the CURRENT payer -- disabled={... person._id ==
         currPayingUserId ? false : true} (Screens/Event/PaymentDetails.js:2572) -- and
@@ -6852,27 +7084,53 @@ class FlowRunner:
             if pad is not None:
                 _idbd.tap_el(udid, pad, es, scroll=False)
                 self._wait_els(udid, lambda x: find(x, "numberPadClose") is None, 5.0)
-            notes.append(f"    · {tag}: Pay For is disabled until {payer} is the paying "
-                         f"profile — tapped E-Payment, closed the keypad")
+            notes.append(f"    · {tag}: Pay For did not open the dialog — tapped "
+                         f"{payer}'s E-Payment to make them the payer, closed the keypad")
             return True
 
-        # Make this profile the payer FIRST. Accessibility reports payForBtn as
-        # enabled even while it is disabled, so trying it first only cost a dead tap
-        # and a 6s wait for a dialog that could not open (measured 45-110s for the
-        # step); pressing E-Payment is what the app needs anyway.
-        made = make_payer()
-        for attempt in (1, 2):
-            els, pf = self._wait_els(udid, lambda es: find(es, "payForBtn"), 5.0)
-            if pf is not None:
-                _idbd.tap_el(udid, pf, els)
+        def show_pay_for(es):
+            """(els, payForBtn), re-opening the card if it folded. Only taps the card
+            when Pay For is NOT shown -- tapping it while Pay For shows folds it."""
+            es, btn = self._wait_els(udid, lambda x: find(x, "payForBtn"), 3.0)
+            if btn is None:
+                c2 = card(es)
+                if c2 is not None:
+                    _idbd.tap_el(udid, c2, es)
+                    es, btn = self._wait_els(udid, lambda x: find(x, "payForBtn"), 5.0)
+            return es, btn
+
+        # The user's order: open the card -> Pay For -> select every profile -> Apply.
+        # E-Payment belongs to the NEXT step (@pay:epay), after the Pay For.
+        #
+        # Pressing E-Payment FIRST (to make the profile the payer) broke this step:
+        # closing its keypad folds the card and Pay For disappears ("3 tries; last:
+        # no Pay For button on screen", 93s). It stays only as a FALLBACK for a build
+        # where Pay For is dead until the profile is the payer (measured on 10-01).
+        #   1. tap Pay For straight away
+        #   2. not opened: E-Payment, close the keypad, re-open the card, Pay For
+        #   3. still not: re-read the settled panel and tap Pay For once more
+        last_how = "no Pay For button on screen"
+        ap = None
+        for attempt in (1, 2, 3):
+            if attempt == 2:
+                make_payer()
+            if attempt > 1 or pf is None:
+                els, pf = show_pay_for(els)
+            if pf is None:
+                last_how = f"{payer}'s card did not show Pay For"
+            else:
+                tapped, how = _idbd.tap_el(udid, pf, els)
+                last_how = how if tapped else f"Pay For not tapped: {how}"
             els, ap = self._wait_els(udid, lambda es: find(es, "applyPayment"), 6.0)
             if ap is not None:
+                if attempt > 1:
+                    notes.append(f"    · {tag}: the Pay For dialog opened on try {attempt}")
                 break
-            if made or not make_payer():
-                notes.append(f"[FAIL] {tag} — tapped Pay For on {payer}'s card but the "
-                             f"'For whom do you like to pay' dialog did not open")
-                return False
-            made = True
+        if ap is None:
+            notes.append(f"[FAIL] {tag} — tapped Pay For on {payer}'s card but the "
+                         f"'For whom do you like to pay' dialog did not open "
+                         f"(3 tries; last: {last_how})")
+            return False
         els, picked = self._select_profiles(udid, els, "all", tag, notes)
         if picked is None:
             return False
@@ -6960,6 +7218,8 @@ class FlowRunner:
             return self._tap_text_contains(r, "logout")
         if step == "@accept_appointment":
             return self._accept_appointment(r, notes)
+        if step.startswith("@duration:"):
+            return self._set_duration(step.split(":", 1)[1].strip(), notes)
         if step == "@invite_guests" or step.startswith("@invite_guests:"):
             arg = step.partition(":")[2].strip()
             if arg and not arg.isdigit():
@@ -7008,6 +7268,14 @@ class FlowRunner:
     # an ALIAS rather than rewriting the flow blocks because flows edited in the
     # dashboard are stored in the DB with this plain-English wording.
     _PLAIN_STEP_TOKENS = {
+        # The duration chips became a slider (consumer Reservation.js, 2026-10):
+        # 'Not Sure' is now the last stop of the bar, not a button with that text.
+        "select Not Sure": "@duration:not_sure",
+        "select 1 hr": "@duration:1",
+        "select 2 hrs": "@duration:2",
+        "select 2 hr": "@duration:2",
+        "select 3 hrs": "@duration:3",
+        "select 3 hr": "@duration:3",
         "accept the appointment": "@accept_appointment",
         # Select All is 'selectAll' on the iPad and 'selectAllItemsBtn' on a phone,
         # and on either it is REPLACED by 'Unselect' once anything is selected --
@@ -7165,10 +7433,12 @@ class FlowRunner:
             # ~2s a tap against ~12-17s for Appium's find + click on this tree.
             # Not for a checkbox: a dispatched tap is not a toggled box, and only
             # the Appium path below confirms the state (see ScenarioRunner._tap_step).
+            # wait=3: if the previous step's screen is still rendering, tap the
+            # moment this target appears -- instead of every step sleeping a fixed
+            # 0.6s after its own tap whether the next screen needed it or not.
             _ok_fast, _how = (False, "checkbox") if r._looks_like_checkbox(ident) \
-                else _idbd.tap(udid, self._id_candidates(ident))
+                else _idbd.tap(udid, self._id_candidates(ident), wait=3.0)
             if _ok_fast:
-                time.sleep(0.6)
                 return True, f"tapped {ident} ({_how})", False
             if ident in self._SETTLE_IDS:
                 settled = self._already_settled()
@@ -7420,6 +7690,7 @@ class FlowRunner:
                 # shutdown(wait=True), which BLOCKS on the hung worker thread and defeats the
                 # timeout entirely (a step hung 28 min despite result(timeout=…) firing).
                 # Manage it manually and shutdown(wait=False) so a hung step is abandoned.
+                r._healthy_at = None     # only THIS step's own crash check may be reused
                 _watch = self._start_step_watchdog(step, seg)
                 _n_before, _t_step = len(notes), time.time()
                 _ex = _fut.ThreadPoolExecutor(max_workers=1)
@@ -7474,7 +7745,12 @@ class FlowRunner:
                     break
                 # Persist progress after every step so Live Steps updates in real time.
                 self._persist(seg, "running", notes, time.time() - started)
-                crash = r.app_crash()   # read ONCE — a second call can race a Metro
+                # A step that went through ScenarioRunner.run_one has JUST checked
+                # (its own app_crash turns an ok step into a failure); reading the
+                # whole screen again ~1s later found nothing new and cost a read per
+                # step. Only skip when that check is fresh and was healthy.
+                _fresh = (time.time() - (getattr(r, "_healthy_at", None) or 0)) < 1.5
+                crash = None if _fresh else r.app_crash()   # read ONCE — a second call can race a Metro
                 if crash:               # fast-refresh clearing the red box → "crashed: None"
                     status = "FAIL"
                     notes.append(f"[FAIL] app crashed: {crash}")
@@ -7690,7 +7966,16 @@ class FlowRunner:
                 # past the window (30s), and sampling at t=0 put a full idb screen
                 # read in parallel with every step's own first read -- on a step
                 # that now takes 2-5s in total.
-                while not w["stop"].wait(6.0):
+                #
+                # And start late: notes are only written for steps that reach the
+                # window, and the verdict needs >=2 samples, so the first read is
+                # taken 12s before the window (3 samples by 30s). Sampling from 6s
+                # spent a whole-screen read every 6s on steps that finish in 10-20s
+                # and never report anything, competing with the step's own reads.
+                first = max(6.0, self._watchdog_window() - 12.0)
+                if w["stop"].wait(first):
+                    return
+                while True:
                     try:
                         labels = [e["label"] for e in self._idb_els() if e.get("label")]
                         w["samples"] += 1
@@ -7705,6 +7990,8 @@ class FlowRunner:
                             w["spinner_all"] = False
                     except Exception:
                         w["errors"] += 1
+                    if w["stop"].wait(6.0):
+                        return
 
             t = _th.Thread(target=_loop, name="ui-watchdog", daemon=True)
             w["thread"] = t
@@ -7861,7 +8148,16 @@ class FlowRunner:
         # 1. Boot each distinct sim this flow uses (consumer + waiter + kitchen).
         udids = {u for u in (self.devices.get("consumer"), self.devices.get("waiter"),
                              self.devices.get("kitchen"), DEFAULT_CONSUMER_UDID) if u}
-        for udid in udids:
+        # Ask once what is already up. Every run used to `simctl boot` every sim
+        # (each refused with "already booted", but simctl is slow under load) and
+        # relaunch Simulator.app -- 10-18s of setup on runs where nothing was down.
+        try:
+            _booted = subprocess.run(["xcrun", "simctl", "list", "devices", "booted"],
+                                     capture_output=True, text=True, timeout=30).stdout
+        except Exception:
+            _booted = ""
+        _down = [u for u in udids if u not in _booted]
+        for udid in _down:
             try:
                 subprocess.run(["xcrun", "simctl", "boot", udid], capture_output=True,
                                text=True, timeout=60)
@@ -7869,11 +8165,12 @@ class FlowRunner:
                 logger.warning("preflight boot %s: %s", udid, e)
         # A crashed launchd_sim ("Unable to boot … launchd_sim may have crashed") is
         # cleared by launching Simulator.app, which reinitialises the subsystem.
-        try:
-            subprocess.run(["open", "-a", "Simulator"], capture_output=True, timeout=15)
-        except Exception:
-            pass
-        for udid in udids:
+        if _down:
+            try:
+                subprocess.run(["open", "-a", "Simulator"], capture_output=True, timeout=15)
+            except Exception:
+                pass
+        for udid in _down:
             for _ in range(20):
                 out = subprocess.run(["xcrun", "simctl", "list", "devices", "booted"],
                                      capture_output=True, text=True).stdout
@@ -8016,6 +8313,7 @@ class FlowRunner:
                     self._biz_metro_ready = ensure_business_metro(udid, self.business_bundle)
                 if udid not in self._sessions:
                     d = webdriver.Remote(APPIUM_URL, options=_options(udid, bundle, wda))
+                    apply_flow_speed_settings(d)
                     d.activate_app(bundle)
                     self._wait_app_ready(d, bundle, udid=udid)
                     self._sessions[udid] = d

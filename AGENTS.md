@@ -54,6 +54,15 @@ So "cross-app" = **three roles**: **consumer** (iPhone), **waiter** + **kitchen*
 - **`automation/intelligence/`** — `pr_planner.py` (picks test paths for a PR, grouped by
   role via `_role_of`), `scenario_runner.py` (`ScenarioRunner` — resolves plain-language
   steps against the LIVE tree, self-heals), `impact_selection.py`, `learned_locators.py`.
+- **`automation/agentic/`** — the autonomous test agent (dashboard **AI Agent** page, API
+  `/api/v1/agent/*`). Nightly batch over the flows → rule sorter (`classifier.py`, free) →
+  retry/resume → Claude triage (`triage.py`, `claude-opus-5-5`, per-batch $ budget) → test fix
+  applied as a `CrossAppFlowEdit` and kept ONLY if a re-run passes (else rolled back) → app
+  patches proposed / draft PR via a separate git worktree (app checkouts are never modified) →
+  email/Slack report. **Analyze application**: `inventory.py` maps every navigator screen of both
+  apps → its own testIDs → whether any flow/handler drives them (free, ~4s); `generator.py` has
+  Claude rate features covered/partial/missing and write flows for gaps (run only after approval).
+  Needs `ANTHROPIC_API_KEY`; state in `agent_batches/items/actions`; tests `tests/test_agentic.py`.
 - **`automation/integrations/`** — `github.py` (list PRs), `jira.py` (`get_issue(key)` reads
   ticket descriptions; configured via `.env` JIRA_URL/EMAIL/TOKEN).
 - **`automation/knowledge/`** — grounded facts: `locator_map.md` (REAL element ids per screen,

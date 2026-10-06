@@ -718,6 +718,7 @@ export default function RunDetails() {
   const [retryError, setRetryError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [resuming, setResuming] = useState(false);
+  const [idCopied, setIdCopied] = useState(false);
   const navigate = useNavigate();
 
   // Re-run from the segment that FAILED instead of from the start: the segments
@@ -842,7 +843,17 @@ export default function RunDetails() {
             <h1 className="page-title" style={{ margin: 0 }}>{run.test_name}</h1>
           </div>
           <p className="page-subtitle">
-            Suite: {run.test_suite} • Run ID: {run.id.substring(0,8)}... • 
+            Suite: {run.test_suite} • Run ID:{' '}
+            {/* The full id was only in the URL; show it on hover and copy on click. */}
+            <button
+              onClick={() => { navigator.clipboard?.writeText(run.id).then(() => {
+                setIdCopied(true); setTimeout(() => setIdCopied(false), 1500); }).catch(() => {}); }}
+              title={`${run.id} — click to copy`}
+              style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                       font: 'inherit', color: 'inherit', textDecoration: 'underline dotted' }}
+            >
+              {idCopied ? 'copied ✓' : `${run.id.substring(0, 8)}…`}
+            </button> • 
             Time: {format(parseServerDate(run.created_at), "MMM d, yyyy h:mm a")} • 
             Device: {run.device_name}
           </p>

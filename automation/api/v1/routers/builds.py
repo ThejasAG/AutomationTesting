@@ -36,6 +36,43 @@ router = APIRouter(prefix="/builds", tags=["builds"])
 _devices = DeviceDiscoveryService()
 _builder = AppBuilder()
 
+# The bell polls /updates every 60s from every open dashboard tab. It used to run
+# `simctl get_app_container` for EVERY project x EVERY simulator on the Mac, booted
+# or not -- measured: 3 projects x ~20 sims, twice a minute, each simctl ~1s of
+# CPU. That load ran all day, test or no test, and slowed every simulator (an iPad
+# screen read went from ~1s to 31-62s during a run). Now: booted sims only (the ones
+# a run can use), and each answer is reused for a few minutes. A deploy clears it.
+_INSTALLED_TTL = 300.0
+_installed_cache: Dict[tuple, tuple] = {}     # (device_id, bundle_id) -> (t, version dict)
+_sims_cache: Dict[str, Any] = {"t": 0.0, "devs": []}
+
+
+def _sims_for_poll() -> list:
+    if time.time() - _sims_cache["t"] > 60:
+        _sims_cache["devs"] = _devices.discover_local_simulators(booted_only=True)
+        _sims_cache["t"] = time.time()
+    return _sims_cache["devs"]
+
+
+def _installed_cached(device_id: str, bundle_id: str) -> Dict[str, Optional[str]]:
+    hit = _installed_cache.get((device_id, bundle_id))
+    if hit and time.time() - hit[0] < _INSTALLED_TTL:
+        return hit[1]
+    v = _builder.installed_version(device_id, bundle_id)
+    _installed_cache[(device_id, bundle_id)] = (time.time(), v)
+    return v
+
+
+def forget_installed_versions() -> None:
+    """After anything installs an app, the next poll must read the device again."""
+    _installed_cache.clear()
+    _sims_cache["t"] = 0.0
+    try:   # the run preflight remembers "already installed" too
+        from automation.projects import deployment as _dep
+        _dep.forget_verified()
+    except Exception:
+        pass
+
 
 def _env_config_for_project(project_id: str, project_name: str = ""):
     """Environment build config for a project, or None when it has no entry.
@@ -102,8 +139,8 @@ def check_updates(db: Session = Depends(get_db)) -> Dict[str, Any]:
         try:
             bid = _bundle_id_for_project(p.id)
             if bid:
-                for dev in _devices.discover_local_simulators(booted_only=False):
-                    v = _builder.installed_version(dev.id, bid)
+                for dev in _sims_for_poll():
+                    v = _installed_cached(dev.id, bid)
                     if v.get("version"):
                         installed.append({"device": dev.name, "device_id": dev.id,
                                           "version": v.get("version"), "build": v.get("build")})
@@ -294,6 +331,7 @@ class _Deploy:
                             continue
                     prev = _builder.installed_version(d.id, built.bundle_id or "")
                     ok, msg = _builder.install(d.id, built.artifact_path, platform)
+                    forget_installed_versions()
                     # Read it back FROM THE DEVICE after installing — the only honest
                     # confirmation that the artifact actually landed.
                     now = (_builder.installed_version(d.id, built.bundle_id or "")

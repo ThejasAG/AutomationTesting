@@ -663,3 +663,98 @@ class VisualRegressionResult(Base):
     diff_path = Column(String(500))
     passed = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class McpServer(Base):
+    """An MCP server connected to the platform (Settings → MCP servers).
+
+    The AI Chat can call its tools. `transport` is "stdio" (a local command:
+    command + args + env) or "http" (Streamable HTTP: url + headers).
+    `drives_devices` marks servers that act on the simulators (Appium, Maestro):
+    their tools are refused while a test run holds a simulator."""
+    __tablename__ = "mcp_servers"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(64), nullable=False, unique=True)
+    transport = Column(String(10), nullable=False, default="stdio")
+    command = Column(String(500), nullable=True)
+    args = Column(JSON, nullable=True)           # list of strings
+    env = Column(JSON, nullable=True)            # {"KEY": "value"}; values never sent back
+    url = Column(String(500), nullable=True)
+    headers = Column(JSON, nullable=True)        # {"Authorization": "..."}; values masked
+    enabled = Column(Boolean, default=True)
+    drives_devices = Column(Boolean, default=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ── Autonomous test agent (automation/agentic/) ──────────────────────────────
+#
+# A *batch* is one unattended pass over the cross-app flows (the nightly run, or
+# "Run now"). Each flow is an *item*. Everything the agent does about an item --
+# a retry, a Claude diagnosis, a test fix it applied and later verified or rolled
+# back, an app patch it proposed -- is an *action*, so the dashboard and the
+# morning report can show exactly what was decided and why.
+
+class AgentSetting(Base):
+    """Agent configuration edited from the AI Agent page. One row, id='default'.
+    Secrets (API key, SMTP password) stay in .env and are never stored here."""
+    __tablename__ = "agent_settings"
+
+    id = Column(String(36), primary_key=True)
+    data = Column(JSON, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentBatch(Base):
+    __tablename__ = "agent_batches"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    trigger = Column(String(20), default="manual")       # scheduled | manual
+    env = Column(String(20), default="staging")
+    status = Column(String(20), default="running")       # running | completed | stopped | interrupted
+    started_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    totals = Column(JSON, nullable=True)                 # {"passed": n, "fixed": n, ...}
+    spend_usd = Column(Float, default=0.0)
+    report_sent = Column(Boolean, default=False)
+    notes = Column(Text, nullable=True)
+
+
+class AgentItem(Base):
+    __tablename__ = "agent_items"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    batch_id = Column(String(36), ForeignKey("agent_batches.id"), nullable=False)
+    position = Column(Integer, default=0)
+    flow_id = Column(String(100))
+    flow_name = Column(String(255))
+    # pending | running | passed | passed_on_retry | fixed | failed | app_bug | infra | skipped | stopped
+    status = Column(String(20), default="pending")
+    run_id = Column(String(36), nullable=True)           # first attempt
+    final_run_id = Column(String(36), nullable=True)     # last attempt (retry / resume / verify)
+    attempts = Column(Integer, default=0)
+    category = Column(String(20), nullable=True)         # INFRA | FLAKY | LOCATOR | TEST_ISSUE | APP_BUG | UNKNOWN
+    root_cause = Column(Text, nullable=True)
+    verdict = Column(JSON, nullable=True)                # Claude's structured diagnosis
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class AgentAction(Base):
+    __tablename__ = "agent_actions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    batch_id = Column(String(36), ForeignKey("agent_batches.id"), nullable=True)
+    item_id = Column(String(36), ForeignKey("agent_items.id"), nullable=True)
+    run_id = Column(String(36), nullable=True)
+    # retry | resume | triage | test_fix | rollback | app_fix | scenario_proposal | report
+    kind = Column(String(30), nullable=False)
+    # proposed | applied | verified | rolled_back | approved | rejected | done | failed
+    status = Column(String(20), default="done")
+    title = Column(String(500))
+    detail = Column(JSON, nullable=True)
+    cost_usd = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

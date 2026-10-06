@@ -265,3 +265,31 @@ def test_a_hung_swipe_does_not_crash_the_step(monkeypatch):
     monkeypatch.setattr(dv, "_idb", hang)
     monkeypatch.setattr(dv, "to_device", lambda udid, x, y, els=None: (int(x), int(y)))
     dv.swipe("U", 10, 200, 10, 100, 1.8)          # must not raise
+
+
+# -- no fixed waits between steps (asked 2026-10-06) --------------------------------
+
+def test_tap_waits_only_until_its_target_appears(screen, monkeypatch):
+    # The previous step's screen is still rendering: the button is missing from
+    # the first read and present on the second. tap(wait=) taps it then.
+    btn = el("saveBtn", 100, 600)
+    s = screen([])
+    reads = {"n": 0}
+    real = dv.describe_all
+
+    def appearing(udid):
+        reads["n"] += 1
+        if reads["n"] == 2:
+            s.els.append(btn)
+        return real(udid)
+    monkeypatch.setattr(dv, "describe_all", appearing)
+    assert dv.tap("U", ["saveBtn"], wait=3.0) == (True, "idb")
+    assert reads["n"] == 2 and taps(s)
+
+
+def test_tap_without_wait_does_not_poll(screen, monkeypatch):
+    s = screen([])
+    reads = {"n": 0}
+    real = dv.describe_all
+    monkeypatch.setattr(dv, "describe_all", lambda u: reads.__setitem__("n", reads["n"] + 1) or real(u))
+    assert dv.tap("U", ["saveBtn"]) == (False, "not on screen") and reads["n"] == 1

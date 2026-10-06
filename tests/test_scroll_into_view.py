@@ -50,3 +50,35 @@ def test_an_already_visible_element_is_not_swiped_at_all():
     d = FakeDriver(y_start=400)
     assert _runner(d)._scroll_into_view("NylaiKitchen2") == (200, 400)
     assert d.swipes == []
+
+
+def test_settle_confirms_with_a_point_probe_not_a_second_screen_read(monkeypatch):
+    """A whole-screen read is 3-5s on the iPad; the 'stopped moving' re-check is a
+    describe-point at the target (0.05s) that returns the same frame."""
+    from automation.scenarios import idb_driver as dv
+    chip = {"AXLabel": "12:05Btn", "frame": {"x": 850, "y": 463, "width": 111, "height": 32}}
+    reads = []
+    monkeypatch.setattr(dv.time, "sleep", lambda s: None)
+    monkeypatch.setattr(dv, "describe_all", lambda u: reads.append(u) or [chip])
+    monkeypatch.setattr(dv, "to_device", lambda u, x, y: (int(x), int(y)))
+    monkeypatch.setattr(dv, "describe_point", lambda u, x, y: dict(chip))
+    got = dv._settle("U", "12:05Btn", [])
+    assert dv.frame(got) == dv.frame(chip)
+    assert len(reads) == 1
+
+
+def test_settle_falls_back_to_a_full_read_when_the_point_misses(monkeypatch):
+    from automation.scenarios import idb_driver as dv
+    frames = iter([463, 400, 400])
+    reads = []
+
+    def read(u):
+        reads.append(u)
+        return [{"AXLabel": "12:05Btn",
+                 "frame": {"x": 850, "y": next(frames), "width": 111, "height": 32}}]
+    monkeypatch.setattr(dv.time, "sleep", lambda s: None)
+    monkeypatch.setattr(dv, "describe_all", read)
+    monkeypatch.setattr(dv, "to_device", lambda u, x, y: (int(x), int(y)))
+    monkeypatch.setattr(dv, "describe_point", lambda u, x, y: {})   # still moving
+    got = dv._settle("U", "12:05Btn", [])
+    assert dv.frame(got)[1] == 400 and len(reads) == 3

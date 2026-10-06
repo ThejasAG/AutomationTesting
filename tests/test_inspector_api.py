@@ -57,3 +57,16 @@ def test_upright_puts_each_app_point_where_a_tap_lands():
         assert up.size == (w, h)
         red = [(i, j) for i in range(w) for j in range(h) if up.getpixel((i, j)) == (255, 0, 0)]
         assert len(red) == 1 and abs(red[0][0] - x) <= 1 and abs(red[0][1] - y) <= 1, (mode, red)
+
+
+def test_a_dialog_covering_the_screen_is_reported():
+    """Measured 2026-10-06: with the split dialog open idb saw 2 elements, and the
+    Inspector said "Every element can be tapped" over a screen it could not read."""
+    from automation.api.v1.routers.inspector import _covered_by_dialog
+    app = {"type": "Application", "frame": {"x": 0, "y": 0, "w": 1210, "h": 834}}
+    dialog = {"type": "GenericElement", "frame": {"x": 318, "y": 300, "w": 386, "h": 245}}
+    assert _covered_by_dialog([app, dialog], 1210, 834)
+    small = {"type": "Button", "frame": {"x": 20, "y": 20, "w": 40, "h": 40}}
+    assert not _covered_by_dialog([app, small], 1210, 834)
+    assert not _covered_by_dialog([app] + [small] * 10 + [dialog], 1210, 834)
+    assert "tree?.covered" in PAGE and "A dialog covers this screen" in PAGE

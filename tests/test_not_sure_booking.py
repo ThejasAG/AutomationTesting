@@ -22,7 +22,8 @@ WALLET = [el("walletUpcomingSearchInput", 60), el("NylaiKitchen2Card", 120),
 
 
 def test_every_booking_picks_not_sure():
-    assert "select Not Sure" in caf._C_BOOK_PREFIX and "select 1 hr" not in caf._C_BOOK_PREFIX
+    # Duration is a slider now; Not Sure is its last stop (tests/test_duration_slider.py).
+    assert "@duration:not_sure" in caf._C_BOOK_PREFIX and "select 1 hr" not in caf._C_BOOK_PREFIX
 
 
 @pytest.fixture

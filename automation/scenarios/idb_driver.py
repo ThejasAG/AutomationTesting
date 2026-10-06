@@ -37,6 +37,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from automation.scenarios.idb_coords import to_device
 from automation.scenarios.idb_path import idb_binary
+from automation.scenarios import idb_fast as _idb_fast
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ KEY_RETURN, KEY_BACKSPACE, KEY_DELETE_FORWARD, KEY_SHIFT = "40", "42", "76", "22
 
 
 def _idb(args: Sequence[str], timeout: float = 20.0) -> str:
-    return subprocess.run([idb_binary(), *args], capture_output=True, text=True,
+    return _idb_fast.subprocess_run([idb_binary(), *args], capture_output=True, text=True,
                           timeout=timeout).stdout
 
 
@@ -213,10 +214,23 @@ def _settle(udid: str, target: str, els: List[dict], tries: int = 6) -> Optional
     scroll view only stops it -- the item is never pressed. Measured: a
     restaurant card scrolled into view, verified under the point and tapped
     mid-glide, and the restaurant never opened. So the frame must read the same
-    twice in a row before anything is tapped."""
+    twice in a row before anything is tapped.
+
+    Each "has it moved?" check after the first is a describe-point at the target's
+    last centre (0.05-0.08s), not a whole-screen read (3-5s on the iPad). Measured
+    2026-10-06: describe-point returns the same frame describe-all reports, on the
+    landscape iPad (27/27) and the phone (15/15). Anything else -- the point no
+    longer hits the target, or its frame moved -- falls back to the full read."""
     last = None
     for _ in range(tries):
         time.sleep(0.35)
+        if last is not None:
+            try:
+                hit = describe_point(udid, *to_device(udid, *centre(last)))
+                if name(hit) == target and frame(hit) == frame(last):
+                    return last
+            except Exception:
+                pass
         els[:] = describe_all(udid)
         again = [x for x in _find(els, [target]) if frame(x)[2] > 0]
         if len(again) != 1:
@@ -256,10 +270,20 @@ def locate(udid: str, names: Sequence[str], els: Optional[List[dict]] = None,
 
 
 def tap(udid: str, names: Sequence[str], els: Optional[List[dict]] = None,
-        scroll: bool = True) -> Tuple[bool, str]:
-    """Tap the element named in *names*, only once it is verified under the point."""
+        scroll: bool = True, wait: float = 0.0) -> Tuple[bool, str]:
+    """Tap the element named in *names*, only once it is verified under the point.
+
+    *wait*: if it is not on screen YET, re-read until it is, up to this many
+    seconds, and tap the moment it appears. This replaces the fixed sleep every
+    step used to take after its tap "for the next screen to render" -- a step now
+    waits only when its own target is not there, and not at all when it is
+    (asked 2026-10-06: "if the step was completed, go to the next step, don't wait")."""
     try:
         e, how = locate(udid, names, els, scroll)
+        deadline = time.time() + wait
+        while e is None and how == "not on screen" and els is None and time.time() < deadline:
+            time.sleep(0.4)
+            e, how = locate(udid, names, None, scroll)
         if e is None:
             return False, how
         px, py = to_device(udid, *centre(e))

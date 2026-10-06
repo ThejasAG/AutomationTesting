@@ -51,7 +51,7 @@ def test_01_a_fresh_upgrade_creates_every_model_table(built):
     live = set(built.get_table_names()) - {"alembic_version"}
     assert live == _model_tables(), (
         f"missing={sorted(_model_tables() - live)} extra={sorted(live - _model_tables())}")
-    assert len(live) == 24
+    assert len(live) == 29          # 24 + mcp_servers + 4 agent tables (2026-10-06)
 
 
 def test_02_every_column_exists_with_matching_nullability(built):
@@ -125,7 +125,7 @@ def test_07_the_old_revision_alone_is_not_the_schema(tmp_path):
     assert res.returncode == 0, res.stderr[-2000:]
     live = set(inspect(create_engine(f"sqlite:///{db}")).get_table_names()) - {"alembic_version"}
     assert len(live) == 4, f"the old revision should still be 4 tables, got {sorted(live)}"
-    assert len(_model_tables()) == 24
+    assert len(_model_tables()) == 29   # 24 + mcp_servers + 4 agent tables (2026-10-06)
     assert live < _model_tables(), "the old revision must be a strict subset of the models"
 
 

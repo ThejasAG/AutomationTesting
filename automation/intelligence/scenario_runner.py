@@ -38,6 +38,7 @@ from automation.intelligence.element_catalog import (
     AutoIdCatalog, METHOD_CONTAINER, METHOD_EXACT_ID, METHOD_HIERARCHY,
     METHOD_PARTIAL_ID, METHOD_TEXT,
 )
+from automation.scenarios import idb_fast as _idb_fast
 
 # Containers worth scanning when a keyword matches nothing that carries an id.
 # `products-list` is the FlatList: its ROWS have no testID and no
@@ -436,13 +437,20 @@ class ScenarioRunner:
         udid = self._device_udid()
         if udid:
             from automation.scenarios import idb_driver as _dv
-            els = _dv.describe_all(udid)
+            # The previous step's crash check read this same screen moments ago and
+            # nothing has acted since. Reuse it when it is fresh: one whole-screen
+            # read per step saved (0.3s on the phone, 3-14s on the busy iPad). A
+            # spinner in it still means polling, exactly as before.
+            t_prev, prev = getattr(self, "_post_els", None) or (0.0, None)
+            self._post_els = None
+            els = prev if prev and time.time() - t_prev < 1.5 else _dv.describe_all(udid)
             if els:
                 while _dv.busy(els):
                     if time.time() >= deadline:
                         return False
                     time.sleep(0.4)
                     els = _dv.describe_all(udid) or els
+                self._idle_els = els       # run_one hands this to dismiss_logbox
                 return True
         while time.time() < deadline:
             try:
@@ -1274,7 +1282,7 @@ class ScenarioRunner:
         try:
             import subprocess
             from automation.scenarios.idb_path import idb_binary
-            raw = subprocess.run([idb_binary(), "ui", "describe-all", "--udid", udid],
+            raw = _idb_fast.subprocess_run([idb_binary(), "ui", "describe-all", "--udid", udid],
                                  capture_output=True, text=True, timeout=45).stdout
             return json.loads(raw) if raw.strip().startswith("[") else []
         except Exception:
@@ -1341,7 +1349,7 @@ class ScenarioRunner:
             from automation.scenarios.idb_coords import to_device
             udid = self._device_udid()
             dx, dy = to_device(udid, pt[0], pt[1])
-            subprocess.run([idb_binary(), "ui", "tap", "--udid", udid,
+            _idb_fast.subprocess_run([idb_binary(), "ui", "tap", "--udid", udid,
                             str(dx), str(dy)], timeout=15)
         except Exception:
             return False
@@ -1434,7 +1442,7 @@ class ScenarioRunner:
             from automation.scenarios.idb_coords import to_device
             udid = self._device_udid()
             dx, dy = to_device(udid, pt[0], pt[1], arr)
-            subprocess.run([idb_binary(), "ui", "tap", "--udid", udid,
+            _idb_fast.subprocess_run([idb_binary(), "ui", "tap", "--udid", udid,
                             str(dx), str(dy)], timeout=15)
             self._invalidate_source()   # the screen just changed under the cache
             return True
@@ -1713,7 +1721,7 @@ class ScenarioRunner:
 
     # ── crash + popup awareness ──────────────────────────────────────────────
 
-    def dismiss_logbox(self) -> bool:
+    def dismiss_logbox(self, els: Optional[List[dict]] = None) -> bool:
         """Close a React-Native LogBox overlay if one is showing.
 
         A yellow "Console Warning" (e.g. moment.js's non-ISO date deprecation,
@@ -1736,7 +1744,7 @@ class ScenarioRunner:
         udid = self._device_udid()
         if udid:
             from automation.scenarios import idb_driver as _dv
-            els = _dv.describe_all(udid)
+            els = els or _dv.describe_all(udid)
             if els:
                 btns = _dv.logbox_buttons(els)
                 if not btns:
@@ -1990,12 +1998,28 @@ class ScenarioRunner:
             from automation.scenarios import idb_driver as _dv
             els = _dv.describe_all(udid)
             if els:
+                # The next step's wait_for_idle may reuse this read (see there).
+                self._post_els = (time.time(), els)
                 txt = _dv.crash_text(els)
                 if txt:
                     return txt
+                # The screen we just read already answers "is the process alive?":
+                # when the app dies natively, the top-level Application becomes the
+                # home screen. So if it is still OUR app (its label learned the first
+                # time Appium confirmed it foreground), skip the Appium call. That
+                # "3ms" queryAppState measured 6-52s per step on the busy iPad
+                # (2026-10-06): WDA snapshots the whole app while serving it, which
+                # also slowed every idb read running alongside.
+                app_el = next((e for e in els if e.get("type") == "Application"), None)
+                label = ((app_el or {}).get("AXLabel") or "").strip()
+                if label and label == getattr(self, "_app_label", None):
+                    return None
                 try:
-                    if self.d.query_app_state(self.bid) == 1:
+                    state = self.d.query_app_state(self.bid)
+                    if state == 1:
                         return "app terminated (native crash — process no longer running)"
+                    if state == 4 and label:
+                        self._app_label = label
                 except Exception:
                     pass
                 return None
@@ -2263,7 +2287,7 @@ class ScenarioRunner:
             try:
                 import subprocess
                 from automation.scenarios.idb_path import idb_binary
-                raw = subprocess.run([idb_binary(), "ui", "describe-all", "--udid", udid],
+                raw = _idb_fast.subprocess_run([idb_binary(), "ui", "describe-all", "--udid", udid],
                                      capture_output=True, text=True, timeout=30).stdout
                 arr = json.loads(raw) if raw.strip().startswith("[") else []
                 labels = [(e.get("AXLabel") or "").strip() for e in arr]
@@ -2319,7 +2343,10 @@ class ScenarioRunner:
         self.wait_for_idle()
         # A yellow LogBox warning (e.g. moment.js date deprecation on time/date
         # selection) overlays the screen and would eat this tap — clear it first.
-        self.dismiss_logbox()
+        # Reuse the screen wait_for_idle just read: nothing acted in between, and a
+        # second whole-screen read here cost ~0.3-1s on every step.
+        self.dismiss_logbox(els=getattr(self, "_idle_els", None))
+        self._idle_els = None
 
         try:
             res = self._do_step(step)
@@ -2358,6 +2385,9 @@ class ScenarioRunner:
         # Did this step kill the app? Once the red box is up every later step is
         # measuring the error screen, so a crash is never a pass.
         crash = self.app_crash()
+        # Let the flow runner skip its own post-step crash check when this one is
+        # fresh -- it was reading the same screen again a moment later.
+        self._healthy_at = None if crash else time.time()
         if crash and res.ok:
             res = StepResult(
                 step=step, ok=False,

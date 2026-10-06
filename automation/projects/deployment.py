@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -31,6 +32,28 @@ from automation.projects.builder import app_builder
 from automation.projects.repository import repository_manager
 
 logger = logging.getLogger("deployment")
+
+# "Already installed, right build, permissions granted" -- remembered per device and
+# bundle for a few minutes. Re-verifying it took ~6 simctl calls (~19s on a busy
+# machine) at the start of EVERY run although nothing had changed. The one cheap
+# probe (is it installed at all?) still runs every time; anything that installs
+# calls forget_verified(), and a changed artifact on disk invalidates the entry.
+VERIFIED_TTL = 600.0
+_VERIFIED: Dict[tuple, tuple] = {}     # (device, bundle) -> (t, result, artifact stamp)
+
+
+def forget_verified() -> None:
+    _VERIFIED.clear()
+
+
+def _artifact_stamp(bundle_id: str):
+    """(path, mtime) of the artifact a re-verify would compare against, or None."""
+    try:
+        project = project_for_bundle(bundle_id)
+        art = find_artifact(project, bundle_id) if project else None
+        return (art, os.path.getmtime(art)) if art else None
+    except Exception:
+        return ("?", None)
 
 
 class DeploymentBlocked(RuntimeError):
@@ -279,7 +302,16 @@ def ensure_app_on_device(req: AppRequirement, *, allow_build: bool = True,
     # helpers swallow the timeout into a False, which is indistinguishable from a
     # genuinely missing app -- and a busy machine (measured >120s here under a
     # concurrent build) then failed runs that should simply have proceeded.
-    _probe_installed(req.device_id, req.bundle_id)
+    present = _probe_installed(req.device_id, req.bundle_id)
+
+    key = (req.device_id, req.bundle_id)
+    hit = _VERIFIED.get(key)
+    if present and hit and time.time() - hit[0] < VERIFIED_TTL \
+            and hit[2] == _artifact_stamp(req.bundle_id):
+        cached = hit[1]
+        say(f"{req.role}: {req.bundle_id} already installed {cached.version} "
+            f"({cached.build}) — verified {int(time.time() - hit[0])}s ago, leaving it alone")
+        return DeploymentResult(**{**cached.__dict__})
 
     before = app_builder.installed_version(req.device_id, req.bundle_id)
     res.previous_version = before.get("version")
@@ -311,6 +343,8 @@ def ensure_app_on_device(req: AppRequirement, *, allow_build: bool = True,
             _grant_device_permissions(req, say)
             say(f"{req.role}: {req.bundle_id} already installed "
                 f"{before.get('version')} ({before.get('build')}) — leaving it alone")
+            _VERIFIED[key] = (time.time(), DeploymentResult(**{**res.__dict__}),
+                              _artifact_stamp(req.bundle_id))
             return res
         say(f"{req.role}: stale — installed {before.get('version')} "
             f"({before.get('build')}), required {want.get('version')} "
@@ -344,6 +378,7 @@ def ensure_app_on_device(req: AppRequirement, *, allow_build: bool = True,
     say(f"{req.role}: installing {os.path.basename(artifact)} "
         f"{want.get('version')} ({want.get('build')}) → {req.device_id[:8]}…")
     ok, msg = app_builder.install(req.device_id, artifact, req.platform)
+    forget_verified()
     if not ok:
         raise _blocked(req, f"Install failed: {str(msg)[:400]}",
                        "Check the simulator is booted and the artifact is complete.")

@@ -210,6 +210,14 @@ def _ollama_stream(system: str, prompt: str) -> Generator[str, None, None]:
         )
 
 
+def _mcp_enabled() -> bool:
+    try:
+        from automation.mcp.registry import registry
+        return bool(registry.servers(enabled_only=True))
+    except Exception:
+        return False
+
+
 def _generic_provider_stream(system: str, prompt: str) -> Generator[str, None, None]:
     """For non-Ollama providers: call generate() synchronously and yield at once."""
     try:
@@ -219,8 +227,91 @@ def _generic_provider_stream(system: str, prompt: str) -> Generator[str, None, N
         yield "I'm temporarily unable to process your request. Please try again."
 
 
+# ── MCP tools (Settings → MCP servers) ──────────────────────────────────────
+
+_MAX_TOOL_ROUNDS = 6
+
+_TOOLS_NOTE = """
+
+You can call tools from MCP servers connected to this platform (each tool's \
+description starts with its server in [brackets]). Use them only when the user \
+asks you to look at or act on a device, app or service; answer from what they \
+return, and say plainly when a tool fails or is refused. Never invent results."""
+
+
+def _openai_compatible() -> bool:
+    return _PROVIDER_TYPE in ("groq", "openai")
+
+
+def _clean_schema(schema):
+    """Model APIs reject some JSON-Schema keys that MCP servers include."""
+    if isinstance(schema, dict):
+        return {k: _clean_schema(v) for k, v in schema.items() if k not in ("$schema", "$id")}
+    if isinstance(schema, list):
+        return [_clean_schema(v) for v in schema]
+    return schema
+
+
+def _tool_chat(system: str, prompt: str) -> Generator[str, None, None]:
+    """The chat with the connected MCP servers' tools (OpenAI-compatible API:
+    Groq or OpenAI). Each tool call is shown as a line in the reply, then the
+    model answers from the results. Without tools it is the plain chat."""
+    from automation.mcp.registry import registry
+    try:
+        functions, route = registry.chat_tools()
+    except Exception as exc:
+        logger.warning("MCP tools unavailable: %s", exc)
+        functions, route = [], {}
+    if not functions:
+        yield from _generic_provider_stream(system, prompt)
+        return
+    for f in functions:
+        f["function"]["parameters"] = _clean_schema(f["function"]["parameters"])
+    base = (os.getenv("LLM_API_BASE") or ("https://api.groq.com/openai/v1"
+            if _PROVIDER_TYPE == "groq" else "https://api.openai.com/v1")).rstrip("/")
+    headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}",
+               "Content-Type": "application/json"}
+    messages = [{"role": "system", "content": system + _TOOLS_NOTE},
+                {"role": "user", "content": prompt}]
+    for _ in range(_MAX_TOOL_ROUNDS):
+        try:
+            resp = _requests.post(f"{base}/chat/completions", headers=headers, timeout=120, json={
+                "model": _OLLAMA_MODEL, "messages": messages, "tools": functions,
+                "tool_choice": "auto", "temperature": 0.2, "max_tokens": 2048})
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+        except Exception as exc:
+            logger.error("tool chat failed: %s", exc)
+            yield "\n\n⚠️ The model could not complete the tool call; answering without tools.\n\n"
+            yield from _generic_provider_stream(system, prompt)
+            return
+        calls = msg.get("tool_calls") or []
+        if not calls:
+            yield msg.get("content") or ""
+            return
+        messages.append({"role": "assistant", "content": msg.get("content") or "",
+                         "tool_calls": calls})
+        for call in calls:
+            fname = (call.get("function") or {}).get("name", "")
+            try:
+                args = json.loads((call.get("function") or {}).get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            cfg, tool = route.get(fname, (None, ""))
+            label = f"{cfg['name']} · {tool}" if cfg else fname
+            yield f"\n> 🔧 `{label}`"
+            out = registry.call(cfg, tool, args) if cfg else f"ERROR: unknown tool {fname}"
+            yield (" ✗\n" if out.startswith(("ERROR", "REFUSED")) else " ✓\n")
+            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": out})
+        yield "\n"
+    yield f"\n(stopped after {_MAX_TOOL_ROUNDS} rounds of tool calls)"
+
+
 def _get_token_stream(system: str, prompt: str) -> Generator[str, None, None]:
     """Route streaming to the appropriate provider."""
+    if _openai_compatible() and _mcp_enabled():
+        yield from _tool_chat(system, prompt)
+        return
     if _PROVIDER_TYPE == "ollama":
         yield from _ollama_stream(system, prompt)
     else:

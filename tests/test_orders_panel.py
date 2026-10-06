@@ -7,6 +7,8 @@ screen. Measured on the iPad (fast recognition):
     4781  RESERVED     '18:05- 19:05 | Yl'
     4782  IN PROGRESS  '18:15 19:15'
 """
+import types
+
 import pytest
 
 from automation.scenarios import cross_app_flows as caf
@@ -133,3 +135,96 @@ def test_serve_card_is_not_taken_for_reserved_today(monkeypatch):
     notes = []
     assert not runner._open_from_panel("12:25", ("reserved",), "@open_reservation", notes)
     assert "4792 reads SERVE" in notes[0]
+
+
+# -- an empty read on a landscape screen retries the other rotation ------------------
+# Measured 2026-10-06: the split dialog read "nothing" right after the same box had
+# read the profile names; @split_item then failed with "'Apply' is not on the dialog".
+
+def test_an_empty_read_tries_the_other_landscape_rotation(monkeypatch, tmp_path):
+    from PIL import Image
+    from automation.scenarios import idb_coords, idb_driver
+    monkeypatch.setattr(screen_text, "ocr_binary", lambda: "/fake/ocr")
+    monkeypatch.setattr(idb_driver, "describe_all", lambda udid: [APP])
+    monkeypatch.setattr(idb_coords, "mode", lambda udid, els=None: "cw")
+    turns, calls = [], {"n": 0}
+    real_upright = idb_coords.upright
+    monkeypatch.setattr(idb_coords, "upright",
+                        lambda img, m: turns.append(m) or real_upright(img, m))
+
+    def run(args, **kw):
+        if args[0] == "xcrun":                       # the screenshot: a portrait framebuffer
+            Image.new("RGB", (834, 1210), "white").save(args[-1])
+            return types.SimpleNamespace(stdout="")
+        calls["n"] += 1                              # the OCR binary
+        text = "" if calls["n"] == 1 else "0.1\t0.1\t0.2\t0.05\tApply\n"
+        return types.SimpleNamespace(stdout=text)
+    monkeypatch.setattr(screen_text.subprocess, "run", run)
+    found = screen_text.read_text("IPAD", (300, 200, 900, 600))
+    assert turns == ["cw", "ccw"] and [t[0] for t in found] == ["Apply"]
+
+
+def test_a_read_that_works_is_not_repeated(monkeypatch):
+    from PIL import Image
+    from automation.scenarios import idb_coords, idb_driver
+    monkeypatch.setattr(screen_text, "ocr_binary", lambda: "/fake/ocr")
+    monkeypatch.setattr(idb_driver, "describe_all", lambda udid: [APP])
+    monkeypatch.setattr(idb_coords, "mode", lambda udid, els=None: "ccw")
+    calls = {"n": 0}
+
+    def run(args, **kw):
+        if args[0] == "xcrun":
+            Image.new("RGB", (834, 1210), "white").save(args[-1])
+            return types.SimpleNamespace(stdout="")
+        calls["n"] += 1
+        return types.SimpleNamespace(stdout="0.1\t0.1\t0.2\t0.05\tApply\n")
+    monkeypatch.setattr(screen_text.subprocess, "run", run)
+    assert screen_text.read_text("IPAD")[0][0] == "Apply" and calls["n"] == 1
+
+
+def _scrolling_panel(monkeypatch, pages, start):
+    """A panel whose visible text depends on how far it is scrolled. `pages` is a
+    list of TEXT pages top->bottom; it starts at index `start`. A swipe moves one
+    page (clamped at both ends, like the real list)."""
+    pos = {"i": start}
+    taps = []
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: PANEL)
+    monkeypatch.setattr(screen_text, "read_text",
+                        lambda udid, region=None, els=None: pages[pos["i"]])
+
+    def swipe(udid, x1, y1, x2, y2, dur=0.25):
+        step = 1 if y2 < y1 else -1                    # finger up = later bookings
+        pos["i"] = max(0, min(len(pages) - 1, pos["i"] + step))
+    monkeypatch.setattr(caf._idbd, "swipe", swipe)
+    monkeypatch.setattr(caf._idbd, "tap_el",
+                        lambda udid, e, els=None, scroll=True: taps.append(pos["i"]) or (True, "idb"))
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner.devices = {"waiter": "IPAD"}
+    monkeypatch.setattr(runner, "_reservation_opened", lambda n, w, s, where: True, raising=False)
+    return runner, taps, pos
+
+
+def _page(ticket, start):
+    return [(ticket, 830, 205, 40, 14), ("RESERVED", 1070, 208, 90, 10),
+            (f"{start} 19:55", 820, 240, 100, 14)]
+
+
+def test_a_booking_above_where_the_panel_was_left_is_found(monkeypatch):
+    """The panel was left scrolled to the bottom by an earlier step; the booking is
+    on the FIRST page. Searching only downwards missed it."""
+    pages = [_page("4790", "12:50"), _page("4791", "13:10"), _page("4792", "13:30")]
+    runner, taps, pos = _scrolling_panel(monkeypatch, pages, start=2)
+    notes = []
+    assert runner._open_from_panel("12:50", ("reserved",), "@open_reservation", notes)
+    assert taps == [0]
+    assert any("checking above" in n for n in notes)
+
+
+def test_a_missing_booking_searches_both_ends_then_says_why(monkeypatch):
+    pages = [_page("4790", "12:50"), _page("4791", "13:10")]
+    runner, taps, _ = _scrolling_panel(monkeypatch, pages, start=0)
+    notes = []
+    assert not runner._open_from_panel("16:00", ("reserved",), "@open_reservation", notes)
+    assert taps == []
+    assert "trying the calendar" in notes[-1]

@@ -195,6 +195,15 @@ v1_router.include_router(builds_router, dependencies=[Depends(get_current_user)]
 from automation.api.v1.routers.inspector import router as inspector_router
 v1_router.include_router(inspector_router)
 
+# MCP servers the AI Chat can use (Settings → MCP servers). Auth per route:
+# listing for any user, add/change/remove/test for admins.
+from automation.api.v1.routers.mcp import router as mcp_router
+v1_router.include_router(mcp_router)
+
+# AI Agent: the autonomous test agent (nightly batch, Claude triage, fixes, report).
+from automation.api.v1.routers.agentic import router as agentic_router
+v1_router.include_router(agentic_router)
+
 # Mount external routers
 app.include_router(appium_router)
 
@@ -475,8 +484,19 @@ async def startup_event():
     # Keep RN Metro packagers alive so the app never shows "No bundle URL present".
     from automation.projects.builder import start_metro_watchdog
     start_metro_watchdog()
+    # AI Agent: continue a batch a restart interrupted, then run the nightly clock.
+    try:
+        from automation.agentic import scheduler as agent_scheduler
+        agent_scheduler.start()
+    except Exception as e:
+        _log.warning("agent scheduler not started: %s", e)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     ops_monitor.stop()
+    try:                                     # MCP servers are our child processes
+        from automation.mcp.registry import registry as _mcp_registry
+        _mcp_registry.stop_all()
+    except Exception:
+        pass

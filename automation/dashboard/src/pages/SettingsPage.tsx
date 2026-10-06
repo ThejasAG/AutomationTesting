@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Settings, User, Shield, ScrollText, LogOut, Loader2 } from 'lucide-react';
 import { getMe, getAuditLogs, setAuthToken, API_BASE } from '../api';
 import { parseServerDate } from '../time';
+import McpServersCard from '../components/McpServersCard';
 
 interface Me { id: string; username: string; role: string; }
 interface AuditLog {
@@ -39,7 +40,7 @@ export default function SettingsPage() {
           <div>
             <h1 className="page-title" style={{ margin: 0 }}>Settings</h1>
             <p className="page-subtitle" style={{ marginBottom: 0 }}>
-              Account, access and the platform audit trail.
+              Account, access, MCP servers and the platform audit trail.
             </p>
           </div>
         </div>
@@ -81,6 +82,8 @@ export default function SettingsPage() {
       </div>
 
       {/* Audit log */}
+      <McpServersCard isAdmin={me?.role === 'admin'} />
+
       <div className="card">
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '18px' }}>
           <ScrollText size={18} color="var(--accent-primary)" />

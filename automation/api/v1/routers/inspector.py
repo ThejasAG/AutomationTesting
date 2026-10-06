@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from automation.api.v1.routers.auth import get_current_user
 from automation.inspector.overlap import label_of, rect_of, report
+from automation.scenarios import idb_fast as _idb_fast
 
 router = APIRouter(prefix="/inspector", tags=["Inspector"])
 
@@ -52,7 +53,7 @@ def _idb_path() -> str:
 def _tree(udid: str) -> List[Dict[str, Any]]:
     idb = _idb_path()
     try:
-        raw = subprocess.run([idb, "ui", "describe-all", "--udid", udid],
+        raw = _idb_fast.subprocess_run([idb, "ui", "describe-all", "--udid", udid],
                              capture_output=True, text=True, timeout=25).stdout
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Could not read the UI tree: {e}")
@@ -150,7 +151,26 @@ def inspect(udid: str,
         "elements": elements,
         "problems": problems,
         "problem_count": len(problems),
+        # A dialog (RN Modal) hides everything behind AND inside it from
+        # accessibility: idb then sees the app and one big block, and "every
+        # element can be tapped" is true only of those two. Say so instead.
+        "covered": _covered_by_dialog(elements, w, h),
     }
+
+
+def _covered_by_dialog(elements: List[Dict[str, Any]], w: float, h: float) -> bool:
+    """Very few elements, one of them a large block over the middle of the screen."""
+    if not w or not h or len(elements) > 4:
+        return False
+    for e in elements:
+        if (e.get("type") or "") == "Application":
+            continue
+        f = e["frame"]
+        big = f["w"] * f["h"] >= 0.08 * w * h     # a ~390x250 dialog is ~9%
+        cx, cy = f["x"] + f["w"] / 2, f["y"] + f["h"] / 2
+        if big and abs(cx - w / 2) < w * 0.2 and abs(cy - h / 2) < h * 0.25:
+            return True
+    return False
 
 
 class TapBody(BaseModel):
@@ -177,7 +197,7 @@ def tap(udid: str, body: TapBody) -> Dict[str, Any]:
     from automation.scenarios.idb_coords import to_device
     x, y = to_device(udid, body.x, body.y)
     try:
-        done = subprocess.run([idb, "ui", "tap", "--udid", udid, str(int(x)), str(int(y))],
+        done = _idb_fast.subprocess_run([idb, "ui", "tap", "--udid", udid, str(int(x)), str(int(y))],
                               capture_output=True, text=True, timeout=10)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Tap failed: {e}")

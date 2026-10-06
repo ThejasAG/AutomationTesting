@@ -44,6 +44,9 @@ PyYAML>=6.0
 requests>=2.34
 httpx>=0.28
 
+# ── Claude (autonomous test agent: automation/agentic/) ─────────────────────
+anthropic>=1.11
+
 # ── Reporting ───────────────────────────────────────────────────────────────
 Jinja2>=3.1
 Markdown>=3.5                 # reports/generator.py imports it inside generate_html()

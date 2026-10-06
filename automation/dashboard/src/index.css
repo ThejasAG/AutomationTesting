@@ -58,6 +58,15 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .sidebar {
+  /* Pinned: stays put while the page scrolls; its own nav scrolls if taller
+     than the window. align-self stops the flex row stretching it past 100vh,
+     which would defeat sticky. */
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-self: flex-start;
+  flex-shrink: 0;
+  overflow-y: auto;
   width: 280px;
   background: rgba(18, 19, 28, 0.6);
   backdrop-filter: blur(20px);
@@ -122,6 +131,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .main-content {
   flex: 1;
+  min-width: 0;
   padding: 48px;
   overflow-y: auto;
 }
