@@ -1,0 +1,17 @@
+P| role waiter
+P| open#1 -> True
+P|        · booked slot '14:30' → target 14:00 row
+P|        · note: 2 identical 'RoopaDReservedCard' cards in the 14:00 row — opened the first
+P|    [ok] @open_reservation — opened 'RoopaDReservedCard' (auto-scrolled) at slot '14:30'
+P| sheet_after_open#1 True
+P| assign -> True
+P|        · @assign_table — selected 'T0AssignAnyBtn' (verified: commit button went from disabled to enabled)
+P|    [ok] @assign_table — assigned 'T0' and the sheet closed
+P| screen_after_assign ['STG-VyaBusiness', 'Log 8 of 31', 'Console Error', 'no valid “aps-environment”', 'Source', '2 |', 'var', 'isNativeReflectConstruct', '=', 'require(']
+P| home_reachable False
+P| open#2 -> True
+P|        · booked slot '14:30' → target 14:00 row
+P|        · note: 2 identical 'RoopaDReservedCard' cards in the 14:00 row — opened the first
+P|    [ok] @open_reservation — opened 'RoopaDReservedCard' (auto-scrolled) at slot '14:30'
+P| sheet_after_open#2 (True == table NOT assigned) True
+P| screen ['STG-VyaBusiness', 'closeModal', 'Please assign a Table', 'T0AssignAnyBtn', 'T1AssignAnyBtn', 'T2AssignAnyBtn', 'T3AssignAnyBtn', 'T4AssignAnyBtn', 'T5AssignAnyBtn', 'T6AssignAnyBtn', 'T7AssignAnyBtn', 'T8AssignAnyBtn']

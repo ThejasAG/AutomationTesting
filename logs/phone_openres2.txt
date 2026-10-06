@@ -1,0 +1,8 @@
+ROLE waiter
+OPEN_RESERVATION -> False
+NOTE|     · booked slot '12:00' → target 12:00 row
+NOTE|     · note: 2 identical 'RoopaDReservedCard' cards in the 12:00 row — opened the first
+NOTE|     · @open_reservation — clicked 'RoopaDReservedCard' but the reservation did not open; retrying once
+NOTE| [FAIL] @open_reservation — clicked 'RoopaDReservedCard' twice and the reservation never opened (no selectAllItemsBtn/addItemsBtn/assignToBtn and no table sheet). Still on: ['STG-VyaBusiness', 'My Bookings', 'allBtn', 'ta
+AFTER n=67
+AFTERLABELS ['STG-VyaBusiness', 'My Bookings', 'allBtn', 'tableBtn', 'pickupBtn', 'August 2026', 'SUN 16', 'MON 17', 'TUE 18', 'WED 19', 'THU 20', 'FRI 21', 'SAT 22', 'SUN 23', 'MON 24', 'TUE 25', 'WED 26', 'THU 27', 'FRI 28', 'SAT 29']

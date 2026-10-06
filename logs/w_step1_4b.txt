@@ -1,0 +1,12 @@
+R| STEP1 role_before waiter
+R| STEP1 logout trail: attempt 1: role=waiter | menuBtn found=0 | menuTab found=0 | Menu found=1 | Menu clicked -> logOutBtn displayed=True | logOutBtn found=1 | logOutBtn clicked | reached sign-in
+R| STEP1 role_after_logout login
+R| STEP1 login -> True
+R|        · ticked the Terms & Conditions checkbox (tap at x+16, verified (240, 242, 245)->(199, 189, 207))
+R| STEP2 role_now waiter
+R| STEP3 choose -> RoopaDReservedCard | note: 2 identical 'RoopaDReservedCard' cards and no booked hour — opened the first
+R| STEP4 open -> True
+R|        · note: 2 identical 'RoopaDReservedCard' cards and no booked hour — opened the first
+R|    [ok] @open_reservation — opened 'RoopaDReservedCard' (auto-scrolled) at slot '?'
+R| STEP4 sheet_up True
+R| STEP4 screen ['STG-VyaBusiness', 'closeModal', 'Please assign a Table', 'T0AssignAnyBtn', 'T1AssignAnyBtn', 'T2AssignAnyBtn', 'T3AssignAnyBtn', 'T4AssignAnyBtn', 'T5AssignAnyBtn', 'T6AssignAnyBtn', 'T7AssignAnyBtn', 'T8AssignAnyBtn']

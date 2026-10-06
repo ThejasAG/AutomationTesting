@@ -1,0 +1,14 @@
+P| role unknown
+P| open#1 -> False
+P|    [warn] booking board still empty — no cards rendered
+P|        · booked slot '14:30' → target 14:00 row
+P|        · card not found — relaunching business app once and retrying
+P|    [FAIL] @open_reservation — no reserved/confirmationpending card for diner 'Roopa' on FRI 21 near 14:00 (already assigned, or backend not synced)
+P|        ↳ [RESERVATION] 'Roopa' has 7 card(s) but none in reserved/confirmationpending: RoopaDExpiredCard (status=expired), RoopaDExpiredCard (status=expi
+P|        ↳ 11 card element(s) seen; rejected-for-width: none; labels: ['RaajeshAnandavelExpiredCard', 'RoopaDExpiredCard']
+P| sheet_after_open#1 False
+P| ASSIGN -> True
+P|        · @assign_table — no table modal (already assigned / pickup)
+P|    [ok] @assign_table — no table modal (already assigned / pickup); continuing
+P| screen_after ['STG-VyaBusiness', 'My Bookings', 'allBtn', 'tableBtn', 'pickupBtn', 'August 2026', 'SUN 16', 'MON 17', 'TUE 18', 'WED 19', 'THU 20', 'FRI 21']
+P| sendItemsBtn: False  selectAllItemsBtn: False

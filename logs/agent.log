@@ -1,0 +1,27 @@
+INFO:Agent:Registering agent Admins-MacBook-Pro.local...
+INFO:Agent:Registered successfully. Agent ID: 64b47f04-0f8a-4ea8-9d63-ce2ccdfe2c96
+INFO:Agent:Polling for jobs...
+INFO:Agent:Accepted Job: f464da53-b69e-4d59-880f-a548d7470e7e
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Repository already cloned.
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Checking out branch 'NEWVYA-1190-13'...
+INFO:automation.projects.repository:Added ['.venv/', '__pycache__/'] to .gitignore in /Users/roops/Desktop/AutomationTestining/AutomationTesting/repos/bd34a47c-c099-4d36-ac61-810edfff31ca
+INFO:automation.projects.repository:Checked out branch NEWVYA-1190-13 for bd34a47c-c099-4d36-ac61-810edfff31ca
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Pulling latest changes...
+INFO:automation.projects.repository:Added ['.venv/', '__pycache__/'] to .gitignore in /Users/roops/Desktop/AutomationTestining/AutomationTesting/repos/bd34a47c-c099-4d36-ac61-810edfff31ca
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Pull complete.
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Detected project type: React Native (markers: package.json)
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Detected project type: react_native
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Running validation...
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Installing dependencies...
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Simulator DA24A392 is booted.
+INFO:automation.projects.preparation:[bd34a47c-c099-4d36-ac61-810edfff31ca] Building the ios app (this can take several minutes)...
+INFO:automation.projects.builder:RN compatibility: installing @react-native-community/datetimepicker@6.7.5 via corepack yarn
+INFO:automation.projects.builder:RN compatibility: installing react-native-simple-toast@1.1.1 via corepack yarn
+INFO:automation.projects.builder:RN compatibility: installing react-native-gesture-handler@2.9.0 via corepack yarn
+INFO:automation.projects.builder:RN compatibility: installing react-native-qrcode-svg@6.1.2 via corepack yarn
+INFO:automation.projects.builder:Running pod install in /Users/roops/Desktop/AutomationTestining/AutomationTesting/repos/bd34a47c-c099-4d36-ac61-810edfff31ca/ios
+INFO:automation.projects.builder:RN compatibility fixes applied: ['@react-native-community/datetimepicker@6.7.5', 'react-native-simple-toast@1.1.1', 'react-native-gesture-handler@2.9.0', 'react-native-qrcode-svg@6.1.2']
+INFO:automation.projects.builder:Reset Metro (pid 18765) for /Users/roops/Desktop/AutomationTestining/AutomationTesting/repos/bd34a47c-c099-4d36-ac61-810edfff31ca after a dependency fix
+INFO:automation.projects.builder:Running pod install in /Users/roops/Desktop/AutomationTestining/AutomationTesting/repos/bd34a47c-c099-4d36-ac61-810edfff31ca/ios
+INFO:automation.projects.builder:Rebuilding: checkout changed since last build (built 5ca4e3cb → now 59fac975)
+INFO:automation.projects.builder:Building iOS: xcodebuild -workspace /Users/roops/Desktop/AutomationTestining/AutomationTesting/repos/bd34a47c-c099-4d36-ac61-810edfff31ca/ios/vyaconsumer.xcworkspace -scheme vyaconsumer -configuration Debug -sdk iphonesimulator -derivedDataPath /Users/roops/Desktop/AutomationTestining/AutomationTesting/repos/bd34a47c-c099-4d36-ac61-810edfff31ca/build/ios -destination id=DA24A392-FF1B-4283-A5CE-CDDE0D000D21 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO OTHER_CPLUSPLUSFLAGS=$(inherited) -D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION build

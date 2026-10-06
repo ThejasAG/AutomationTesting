@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "Which iOS simulator runtimes this automation platform supports.",
+    "",
+    "This is a RANGE, not a pin. Any iOS runtime from min_ios to max_ios works;",
+    "nobody needs to download a specific version to run the platform. Whatever",
+    "runtime shipped with your Xcode is almost certainly fine.",
+    "",
+    "Read by scripts/doctor.sh, which warns if a machine has no runtime in range.",
+    "Nothing enforces a version at RUN time on purpose: the platform resolves and",
+    "boots whichever simulator the machine actually has (see _resolve_ios_device",
+    "in automation/projects/builder.py), and test capabilities intentionally omit",
+    "platformVersion so Appium does not demand an exact match.",
+    "",
+    "To support a newer iOS later, raise max_ios here and re-run doctor.sh."
+  ],
+
+  "min_ios": "16.0",
+  "max_ios": "26.99",
+
+  "notes": {
+    "why_16": "Floor of what the XCUITest driver and these scenarios are known to work on.",
+    "why_26": "Current newest public iOS. Raise when a newer one ships and is verified.",
+    "device_family": "Any iPhone or iPad simulator. iPhone is preferred automatically when several are available.",
+    "not_a_dependency": "iOS runtimes are multi-GB Apple downloads and cannot be installed by pip or npm. requirements.txt has no reach here; this file only declares what is acceptable."
+  }
+}

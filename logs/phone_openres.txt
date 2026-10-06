@@ -1,0 +1,9 @@
+ROLE waiter
+CHOOSE -> None | diag: multiple cards for 'Roopa' equally near 12:00: RoopaDReservedCard, RoopaDReservedCard
+OPEN_RESERVATION -> False
+NOTE|     · booked slot '12:00' → target 12:00 row
+NOTE|     · card not found — relaunching business app once and retrying
+NOTE| [FAIL] @open_reservation — no reserved/confirmationpending card for diner 'Roopa' on FRI 21 near 12:00 (already assigned, or backend not synced)
+NOTE|     ↳ [RESERVATION] multiple cards for 'Roopa' equally near 12:00: RoopaDReservedCard, RoopaDReservedCard
+NOTE|     ↳ 7 card element(s) seen; rejected-for-width: none; labels: ['RaajeshAnandavelExpiredCard', 'RaajeshAnandavelReservedCard', 'RoopaDExpiredCard', 'RoopaDReservedCard']
+AFTER n=67 ['STG-VyaBusiness', 'My Bookings', 'allBtn', 'tableBtn', 'pickupBtn', 'August 2026', 'SUN 16', 'MON 17', 'TUE 18', 'WED 19', 'THU 20', 'FRI 21', 'SAT 22', 'SUN 23', 'MON 24', 'TUE 25']

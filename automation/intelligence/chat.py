@@ -24,7 +24,7 @@ from typing import Dict, Any, Generator, Optional
 
 import requests as _requests  # sync requests for streaming; avoids async complexity
 
-from automation.ai.provider import llm_provider
+from automation.ai.provider import LLMProvider, create_provider
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,38 @@ _MAX_CONTEXT_CHARS = 2000
 # Ollama base URL (can be overridden via environment).
 _OLLAMA_BASE = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 _OLLAMA_MODEL = os.getenv("LLM_MODEL_NAME", "llama3.2")
+
+# Chat runs on local Ollama unless the environment says otherwise — matching
+# automation.ai.service.default_rca_config(). The module-level provider in
+# automation.ai.provider defaults to the RCA-shaped mock, which is useless for
+# chat, so the assistant builds its own provider here.
+_PROVIDER_TYPE = os.getenv("LLM_PROVIDER_TYPE", "ollama").lower()
+
+_provider_cache: Optional[LLMProvider] = None
+
+
+def _chat_provider() -> LLMProvider:
+    """The chat LLM provider, built once and reused."""
+    global _provider_cache
+    if _provider_cache is None:
+        _provider_cache = create_provider({
+            "provider": _PROVIDER_TYPE,
+            "type": _PROVIDER_TYPE,
+            "model": _OLLAMA_MODEL,
+            "model_name": _OLLAMA_MODEL,
+            "base_url": _OLLAMA_BASE,
+            "api_key": os.getenv("OPENAI_API_KEY", "dummy"),
+        })
+    return _provider_cache
+
+
+def _generate_text(system: str, prompt: str) -> str:
+    """Single-shot completion as plain text.
+
+    ``LLMProvider.generate()`` takes the system and user prompts separately and
+    returns an ``LLMResponse`` — not a string.
+    """
+    return _chat_provider().generate(system_prompt=system, user_prompt=prompt).content
 
 SYSTEM_PROMPT = """You are an AI Test Intelligence Assistant for a Mobile Test \
 Automation Platform. You help QA engineers understand test failures, flaky tests, \
@@ -167,30 +199,120 @@ def _ollama_stream(system: str, prompt: str) -> Generator[str, None, None]:
             except json.JSONDecodeError:
                 continue
     except Exception as exc:
-        logger.warning("Ollama streaming failed, falling back to sync: %s", exc)
-        # Fallback: call the non-streaming provider
-        try:
-            result = llm_provider.generate(f"{system}\n\n{prompt}")
-            yield result
-        except Exception as fallback_exc:
-            logger.error("LLM fallback also failed: %s", fallback_exc)
-            yield "I'm temporarily unable to process your request. Please try again."
+        logger.warning("Ollama streaming failed at %s: %s", _OLLAMA_BASE, exc)
+        # Retrying the same unreachable server through the sync provider would
+        # only land on its mock fallback, which answers chat with RCA-shaped
+        # JSON. Say what is actually wrong instead.
+        yield (
+            f"⚠️ I can't reach the Ollama server at `{_OLLAMA_BASE}`. "
+            f"Start it with `ollama serve` and make sure the `{_OLLAMA_MODEL}` "
+            f"model is pulled (`ollama pull {_OLLAMA_MODEL}`)."
+        )
+
+
+def _mcp_enabled() -> bool:
+    try:
+        from automation.mcp.registry import registry
+        return bool(registry.servers(enabled_only=True))
+    except Exception:
+        return False
 
 
 def _generic_provider_stream(system: str, prompt: str) -> Generator[str, None, None]:
     """For non-Ollama providers: call generate() synchronously and yield at once."""
     try:
-        result = llm_provider.generate(f"{system}\n\n{prompt}")
-        yield result
+        yield _generate_text(system, prompt)
     except Exception as exc:
         logger.error("LLM generate failed: %s", exc)
         yield "I'm temporarily unable to process your request. Please try again."
 
 
+# ── MCP tools (Settings → MCP servers) ──────────────────────────────────────
+
+_MAX_TOOL_ROUNDS = 6
+
+_TOOLS_NOTE = """
+
+You can call tools from MCP servers connected to this platform (each tool's \
+description starts with its server in [brackets]). Use them only when the user \
+asks you to look at or act on a device, app or service; answer from what they \
+return, and say plainly when a tool fails or is refused. Never invent results."""
+
+
+def _openai_compatible() -> bool:
+    return _PROVIDER_TYPE in ("groq", "openai")
+
+
+def _clean_schema(schema):
+    """Model APIs reject some JSON-Schema keys that MCP servers include."""
+    if isinstance(schema, dict):
+        return {k: _clean_schema(v) for k, v in schema.items() if k not in ("$schema", "$id")}
+    if isinstance(schema, list):
+        return [_clean_schema(v) for v in schema]
+    return schema
+
+
+def _tool_chat(system: str, prompt: str) -> Generator[str, None, None]:
+    """The chat with the connected MCP servers' tools (OpenAI-compatible API:
+    Groq or OpenAI). Each tool call is shown as a line in the reply, then the
+    model answers from the results. Without tools it is the plain chat."""
+    from automation.mcp.registry import registry
+    try:
+        functions, route = registry.chat_tools()
+    except Exception as exc:
+        logger.warning("MCP tools unavailable: %s", exc)
+        functions, route = [], {}
+    if not functions:
+        yield from _generic_provider_stream(system, prompt)
+        return
+    for f in functions:
+        f["function"]["parameters"] = _clean_schema(f["function"]["parameters"])
+    base = (os.getenv("LLM_API_BASE") or ("https://api.groq.com/openai/v1"
+            if _PROVIDER_TYPE == "groq" else "https://api.openai.com/v1")).rstrip("/")
+    headers = {"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY', '')}",
+               "Content-Type": "application/json"}
+    messages = [{"role": "system", "content": system + _TOOLS_NOTE},
+                {"role": "user", "content": prompt}]
+    for _ in range(_MAX_TOOL_ROUNDS):
+        try:
+            resp = _requests.post(f"{base}/chat/completions", headers=headers, timeout=120, json={
+                "model": _OLLAMA_MODEL, "messages": messages, "tools": functions,
+                "tool_choice": "auto", "temperature": 0.2, "max_tokens": 2048})
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+        except Exception as exc:
+            logger.error("tool chat failed: %s", exc)
+            yield "\n\n⚠️ The model could not complete the tool call; answering without tools.\n\n"
+            yield from _generic_provider_stream(system, prompt)
+            return
+        calls = msg.get("tool_calls") or []
+        if not calls:
+            yield msg.get("content") or ""
+            return
+        messages.append({"role": "assistant", "content": msg.get("content") or "",
+                         "tool_calls": calls})
+        for call in calls:
+            fname = (call.get("function") or {}).get("name", "")
+            try:
+                args = json.loads((call.get("function") or {}).get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            cfg, tool = route.get(fname, (None, ""))
+            label = f"{cfg['name']} · {tool}" if cfg else fname
+            yield f"\n> 🔧 `{label}`"
+            out = registry.call(cfg, tool, args) if cfg else f"ERROR: unknown tool {fname}"
+            yield (" ✗\n" if out.startswith(("ERROR", "REFUSED")) else " ✓\n")
+            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": out})
+        yield "\n"
+    yield f"\n(stopped after {_MAX_TOOL_ROUNDS} rounds of tool calls)"
+
+
 def _get_token_stream(system: str, prompt: str) -> Generator[str, None, None]:
     """Route streaming to the appropriate provider."""
-    provider_type = os.getenv("LLM_PROVIDER_TYPE", "mock").lower()
-    if provider_type == "ollama":
+    if _openai_compatible() and _mcp_enabled():
+        yield from _tool_chat(system, prompt)
+        return
+    if _PROVIDER_TYPE == "ollama":
         yield from _ollama_stream(system, prompt)
     else:
         yield from _generic_provider_stream(system, prompt)
@@ -260,7 +382,7 @@ class AIChatAssistant:
         prompt = f"{full_context}\n\nUser: {query}" if full_context else f"User: {query}"
 
         try:
-            return llm_provider.generate(f"{self.system_prompt}\n\n{prompt}")
+            return _generate_text(self.system_prompt, prompt)
         except Exception as exc:
             logger.error("ChatAssistant.ask failed: %s", exc)
             return "I'm currently unable to process your request due to a backend error."
@@ -344,7 +466,7 @@ class AIChatAssistant:
 
         try:
             # For structured output we call synchronously and parse the JSON.
-            raw = llm_provider.generate(f"{ANALYSIS_SYSTEM_PROMPT}\n\n{prompt}")
+            raw = _generate_text(ANALYSIS_SYSTEM_PROMPT, prompt)
 
             # Strip markdown fences if the model added them
             clean = raw.strip()

@@ -1,0 +1,18 @@
+RUN_ID b1f07902-25f0-471b-ba1b-d8db6b2f8a49
+[102s] [ok] logged in as waiter
+[102s] ▶ click addNewEvent
+[114s] ▶ type roopa in firstName
+[168s]     ↳ on screen: ['homeBtn', 'allBtn', 'tableBtn', 'pickupBtn', 'modifyTable', 'orderFilterBtn', 'historyBtn', 'RoopaDcardOrder', 'RoopaDcardInProgress', 'RoopaDcardServe', 'menuBtn', 'addNewEvent']
+[168s] ▶ type D in lastName
+[228s]     ↳ on screen: ['homeBtn', 'allBtn', 'tableBtn', 'pickupBtn', 'modifyTable', 'orderFilterBtn', 'historyBtn', 'RoopaDcardOrder', 'RoopaDcardInProgress', 'RoopaDcardServe', 'menuBtn', 'addNewEvent']
+[228s] [ok] @hide_keyboard — keyboard down
+[228s] ▶ click anyBtn
+[342s] ▶ @first_time_slot
+[360s] ▶ type 9686496589 in mobileInputBtn
+[450s]     ↳ on screen: ['homeBtn', 'allBtn', 'tableBtn', 'pickupBtn', 'closeEventModal', 'historyBtn', 'anyBtn', 'indoorBtn', 'outdoorBtn', 'leftDateBtn', 'rightDateBtn', 'mobileNumberBtn', '+91Btn', 'mobileInputBtn', 'RoopaDcardExpired', 'RoopaDcardCompleted', 'RoopaDcardOrder', 'RoopaDcardInProgress', 'RoopaDcardReserved', 'RoopaDcardServe', 'menuBtn', 'Tab']
+[450s] ▶ @hide_keyboard
+[468s] ▶ scroll down
+[504s]     ↳ on screen: ['homeBtn', 'allBtn', 'tableBtn', 'pickupBtn', 'closeEventModal', 'historyBtn', 'anyBtn', 'indoorBtn', 'outdoorBtn', 'leftDateBtn', 'rightDateBtn', '18:16Btn', '18:20Btn', '18:24Btn', '18:28Btn', '18:32Btn', '18:36Btn', '18:40Btn', '18:44Btn', '18:48Btn', '18:52Btn', '18:56Btn', '19:00Btn', '19:04Btn', '19:08Btn', '19:12Btn', '19:16Btn', '19:20Btn']
+[510s] ▶ click saveBtn
+[636s]     ↳ on screen: ['homeBtn', 'allBtn', 'tableBtn', 'pickupBtn', 'modifyTable', 'orderFilterBtn', 'historyBtn', 'RoopaDcardExpired', 'RoopaDcardCompleted', 'RoopaDcardOrder', 'RoopaDcardInProgress', 'RoopaDcardReserved', 'RoopaDcardServe', 'RoopaDcardConfirmationPending', 'menuBtn', 'addNewEvent']
+DONE status=failed after 636s

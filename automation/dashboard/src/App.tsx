@@ -1,22 +1,23 @@
-import { BrowserRouter as Router, Routes, Route, NavLink, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
 import type { ReactElement } from 'react';
-import { Boxes, LayoutDashboard, Settings, PlayCircle, GitMerge, BarChart3, BrainCircuit, Activity, Shield, Server, Wand2, Code2, MessageSquare } from 'lucide-react';
+import { Boxes, LayoutDashboard, Settings, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Workflow, Clapperboard, Crosshair, Bot} from 'lucide-react';
 import DashboardHome from './pages/DashboardHome';
+import ScenariosPage from './pages/ScenariosPage';
+import InspectorPage from './pages/InspectorPage';
+import ReportsPage from './pages/ReportsPage';
+import ProjectsPage from './pages/ProjectsPage';
+import GraphPage from './pages/GraphPage';
 import RunDetails from './pages/RunDetails';
 import SettingsPage from './pages/SettingsPage';
-import AutomationPage from './pages/AutomationPage';
-import CIPage from './pages/CIPage';
-import AnalyticsPage from './pages/AnalyticsPage';
-import InsightsPage from './pages/InsightsPage';
-import CommandCenter from './pages/CommandCenter';
-import OperationsDashboard from './pages/OperationsDashboard';
-import DeviceOpsCenter from './pages/DeviceOpsCenter';
-import AdminCenter from './pages/AdminCenter';
+import PullRequestsPage from './pages/PullRequestsPage';
 import { LoginPage } from './pages/LoginPage';
-import ScriptGeneratorPage from './pages/ScriptGeneratorPage';
 import ScriptEditorPage from './pages/ScriptEditorPage';
 import ChatPage from './pages/ChatPage';
-import { getAuthToken } from './api';
+import WorkflowPage from './pages/WorkflowPage';
+import BuildUpdateBell from './components/BuildUpdateBell';
+import JobQueuePage from './pages/JobQueuePage';
+import AgentPage from './pages/AgentPage';
+import { getAuthToken, getGoldenRun } from './api';
 
 const ProtectedRoute = ({ children }: { children: ReactElement }) => {
   const token = getAuthToken();
@@ -26,7 +27,18 @@ const ProtectedRoute = ({ children }: { children: ReactElement }) => {
   return children;
 };
 
-const ProtectedLayout = ({ children }: { children: ReactElement }) => (
+const ProtectedLayout = ({ children }: { children: ReactElement }) => {
+  const navigate = useNavigate();
+  // Demo mode: jump straight to the pinned known-green run (Live Steps + report) if a
+  // live run blips during a demo. Falls back to the latest passed run server-side.
+  const openDemo = async () => {
+    try {
+      const g = await getGoldenRun();
+      if (g.run_id) navigate(`/run/${g.run_id}`);
+      else alert('No green run recorded yet — run flow_book_demo once to create one.');
+    } catch { alert('Could not load the demo run.'); }
+  };
+  return (
   <div className="app-container">
     <aside className="sidebar">
       <div className="sidebar-logo">
@@ -34,58 +46,70 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => (
         <span>Automation Platform</span>
       </div>
       <nav className="nav-links">
+        <button
+          onClick={openDemo}
+          className="nav-link"
+          title="Show the last known-green run (Live Steps + report) — your fallback if a live run blips"
+          style={{ background: 'rgba(52,211,153,0.14)', color: 'var(--success, #34d399)',
+                   border: '1px solid rgba(52,211,153,0.3)', cursor: 'pointer',
+                   width: '100%', textAlign: 'left', font: 'inherit' }}
+        >
+          <Clapperboard size={20} />
+          Demo run
+        </button>
+        <BuildUpdateBell />
         <NavLink to="/" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <LayoutDashboard size={20} />
           Dashboard
         </NavLink>
-        <NavLink to="/automation" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <PlayCircle size={20} />
-          Automation
+        <NavLink to="/projects" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <FolderGit2 size={20} />
+          Projects
         </NavLink>
-        <NavLink to="/ops" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <Activity size={20} />
-          Ops Center
+        <NavLink to="/workflow" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <Workflow size={20} />
+          Workflow
         </NavLink>
-        <NavLink to="/fleet" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <Server size={20} />
-          Device Fleet
+        <NavLink to="/graph" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <GitBranch size={20} />
+          Dependency Graph
         </NavLink>
-        <NavLink to="/ci-cd" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <GitMerge size={20} />
-          CI/CD
+        <NavLink to="/pull-requests" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <GitPullRequest size={20} />
+          Pull Requests
         </NavLink>
-        <NavLink to="/insights" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <BrainCircuit size={20} />
-          AI Insights
-        </NavLink>
-        <NavLink to="/script-generator" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <Wand2 size={20} />
-          Script Generator
-        </NavLink>
-        <NavLink to="/script-editor" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+        <NavLink to="/scripts" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <Code2 size={20} />
-          Script Editor
+          Scripts
+        </NavLink>
+        <NavLink to="/queue" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <ListChecks size={20} />
+          Job Queue
+        </NavLink>
+        <NavLink to="/agent" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <Bot size={20} />
+          AI Agent
+        </NavLink>
+        <NavLink to="/scenarios" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <ListChecks size={20} />
+          Scenarios
+        </NavLink>
+        <NavLink to="/inspector" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <Crosshair size={20} />
+          Inspector
+        </NavLink>
+        <NavLink to="/reports" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
+          <FileText size={20} />
+          Reports
         </NavLink>
         <NavLink to="/chat" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <MessageSquare size={20} />
           AI Chat
         </NavLink>
-        <NavLink to="/command-center" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <BrainCircuit size={20} />
-          Command Center
-        </NavLink>
-        <NavLink to="/analytics" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
-          <BarChart3 size={20} />
-          Analytics
-        </NavLink>
+        <div className="flex-1"></div>
         <NavLink to="/settings" className={({isActive}) => isActive ? "nav-link active" : "nav-link"}>
           <Settings size={20} />
           Settings
-        </NavLink>
-        <div className="flex-1"></div>
-        <NavLink to="/admin" className={({isActive}) => isActive ? "nav-link active text-red-400" : "nav-link text-slate-500 hover:text-red-400"}>
-          <Shield size={20} />
-          Admin
         </NavLink>
       </nav>
     </aside>
@@ -93,7 +117,8 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => (
       {children}
     </main>
   </div>
-);
+  );
+};
 
 function App() {
   return (
@@ -103,19 +128,30 @@ function App() {
         
         {/* Protected Routes */}
         <Route path="/" element={<ProtectedRoute><ProtectedLayout><DashboardHome /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/automation" element={<ProtectedRoute><ProtectedLayout><AutomationPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/ops" element={<ProtectedRoute><ProtectedLayout><OperationsDashboard /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/fleet" element={<ProtectedRoute><ProtectedLayout><DeviceOpsCenter /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/admin" element={<ProtectedRoute><ProtectedLayout><AdminCenter /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/ci-cd" element={<ProtectedRoute><ProtectedLayout><CIPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/insights" element={<ProtectedRoute><ProtectedLayout><InsightsPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/command-center" element={<ProtectedRoute><ProtectedLayout><CommandCenter /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/analytics" element={<ProtectedRoute><ProtectedLayout><AnalyticsPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/inspector" element={<ProtectedRoute><ProtectedLayout><InspectorPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/projects" element={<ProtectedRoute><ProtectedLayout><ProjectsPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/graph" element={<ProtectedRoute><ProtectedLayout><GraphPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/workflow" element={<ProtectedRoute><ProtectedLayout><WorkflowPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/pull-requests" element={<ProtectedRoute><ProtectedLayout><PullRequestsPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/scripts" element={<ProtectedRoute><ProtectedLayout><ScriptEditorPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/scenarios" element={<ProtectedRoute><ProtectedLayout><ScenariosPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/queue" element={<ProtectedRoute><ProtectedLayout><JobQueuePage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/agent" element={<ProtectedRoute><ProtectedLayout><AgentPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/reports" element={<ProtectedRoute><ProtectedLayout><ReportsPage /></ProtectedLayout></ProtectedRoute>} />
+        <Route path="/chat" element={<ProtectedRoute><ProtectedLayout><ChatPage /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/run/:id" element={<ProtectedRoute><ProtectedLayout><RunDetails /></ProtectedLayout></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><ProtectedLayout><SettingsPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/script-generator" element={<ProtectedRoute><ProtectedLayout><ScriptGeneratorPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/script-editor" element={<ProtectedRoute><ProtectedLayout><ScriptEditorPage /></ProtectedLayout></ProtectedRoute>} />
-        <Route path="/chat" element={<ProtectedRoute><ProtectedLayout><ChatPage /></ProtectedLayout></ProtectedRoute>} />
+
+        {/* Removed sections — redirect stale bookmarks instead of 404. */}
+        <Route path="/script-editor" element={<Navigate to="/scripts" replace />} />
+        <Route path="/script-generator" element={<Navigate to="/scripts" replace />} />
+        <Route path="/ops" element={<Navigate to="/" replace />} />
+        <Route path="/fleet" element={<Navigate to="/" replace />} />
+        <Route path="/ci-cd" element={<Navigate to="/pull-requests" replace />} />
+        <Route path="/insights" element={<Navigate to="/" replace />} />
+        <Route path="/command-center" element={<Navigate to="/" replace />} />
+        <Route path="/analytics" element={<Navigate to="/" replace />} />
+        <Route path="/admin" element={<Navigate to="/settings" replace />} />
       </Routes>
     </Router>
   );

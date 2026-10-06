@@ -4,7 +4,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
 import json
+import logging
 import httpx
+
+logger = logging.getLogger("ai.provider")
 
 
 @dataclass
@@ -69,7 +72,7 @@ class AzureOpenAIProvider(LLMProvider):
         self._api_version = api_version
         self._deployment_name = deployment_name
         self._max_retries = max_retries
-        self._client = httpx.AsyncClient(
+        self._client = httpx.Client(
             timeout=120.0,
             headers={
                 "api-key": api_key,
@@ -125,12 +128,19 @@ class AzureOpenAIProvider(LLMProvider):
 
 
 class OpenAIProvider(LLMProvider):
-    """OpenAI API provider"""
+    """OpenAI-compatible API provider.
 
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
+    Works with OpenAI *and* any OpenAI-compatible endpoint (Groq, vLLM, etc.)
+    by passing a custom ``base_url`` — e.g. Groq's free, fast API at
+    ``https://api.groq.com/openai/v1``.
+    """
+
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini",
+                 base_url: str = "https://api.openai.com/v1"):
         self._api_key = api_key
         self._model = model
-        self._client = httpx.AsyncClient(
+        self._base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self._client = httpx.Client(
             timeout=120.0,
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -140,7 +150,7 @@ class OpenAIProvider(LLMProvider):
 
     @property
     def name(self) -> str:
-        return "openai"
+        return "groq" if "groq" in self._base_url else "openai"
 
     def generate(
         self,
@@ -164,9 +174,16 @@ class OpenAIProvider(LLMProvider):
 
         if json_schema:
             payload["response_format"] = {"type": "json_object"}
+            # Groq's json_object mode 400s unless the word "json" appears in the messages
+            # ("'messages' must contain the word 'json'..."). Guarantee it without disturbing
+            # the caller's intent — append a short directive to the system message if needed.
+            if "json" not in (system_prompt + user_prompt).lower():
+                messages[0]["content"] = (
+                    (system_prompt + "\n\n") if system_prompt else ""
+                ) + "Respond ONLY with a single valid JSON object."
 
         response = self._client.post(
-            "https://api.openai.com/v1/chat/completions",
+            f"{self._base_url}/chat/completions",
             json=payload,
         )
         response.raise_for_status()
@@ -184,12 +201,18 @@ class OpenAIProvider(LLMProvider):
 
 
 class OllamaProvider(LLMProvider):
-    """Ollama local model provider"""
+    """Ollama local model provider (POST /api/generate).
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3"):
+    Uses a synchronous ``httpx.Client``. If the Ollama server is unreachable or
+    errors, ``generate()`` logs a WARNING and transparently falls back to the
+    ``MockLLMProvider`` response so RCA never hard-fails on the dashboard.
+    """
+
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2"):
         self._base_url = base_url.rstrip("/")
         self._model = model
-        self._client = httpx.AsyncClient(timeout=120.0)
+        self._client = httpx.Client(timeout=120.0)
+        self._mock = MockLLMProvider()
 
     @property
     def name(self) -> str:
@@ -214,16 +237,24 @@ class OllamaProvider(LLMProvider):
             },
         }
 
-        response = self._client.post(f"{self._base_url}/api/generate", json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-        return LLMResponse(
-            content=data["response"],
-            model=self._model,
-            usage={"total_tokens": data.get("eval_count", 0)},
-            provider=self.name,
-        )
+        try:
+            response = self._client.post(f"{self._base_url}/api/generate", json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return LLMResponse(
+                content=data["response"],
+                model=self._model,
+                usage={"total_tokens": data.get("eval_count", 0)},
+                provider=self.name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ollama unavailable at %s (model=%s): %s — falling back to MockLLMProvider",
+                self._base_url, self._model, exc,
+            )
+            return self._mock.generate(
+                system_prompt, user_prompt, json_schema, max_tokens, temperature
+            )
 
     def close(self):
         self._client.close()
@@ -297,8 +328,17 @@ def create_provider(config: dict[str, Any]) -> LLMProvider:
         )
     elif provider_type == "openai":
         return OpenAIProvider(
-            api_key=config["api_key"],
+            api_key=config.get("api_key") or os.getenv("OPENAI_API_KEY", ""),
             model=model or "gpt-4o-mini",
+            base_url=config.get("api_base") or os.getenv("LLM_API_BASE") or "https://api.openai.com/v1",
+        )
+    elif provider_type == "groq":
+        # Groq: free, fast, OpenAI-compatible. Uses the same OpenAIProvider.
+        # api_key/api_base fall back to env so any caller's minimal config works.
+        return OpenAIProvider(
+            api_key=config.get("api_key") or os.getenv("OPENAI_API_KEY", ""),
+            model=model or "llama-3.1-8b-instant",
+            base_url=config.get("api_base") or os.getenv("LLM_API_BASE") or "https://api.groq.com/openai/v1",
         )
     elif provider_type == "ollama":
         return OllamaProvider(
@@ -320,6 +360,8 @@ default_config = {
     "api_key": os.getenv("OPENAI_API_KEY", "dummy"),
     "model_name": os.getenv("LLM_MODEL_NAME", "gpt-4-turbo"),
     "model": os.getenv("LLM_MODEL_NAME", "gpt-4-turbo"),
+    # OpenAI-compatible endpoint override (e.g. Groq's free API).
+    "api_base": os.getenv("LLM_API_BASE", ""),
     "api_version": os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
 }
 llm_provider = create_provider(default_config)

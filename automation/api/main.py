@@ -1,5 +1,16 @@
 """FastAPI REST API for querying test runs and RCA reports"""
 
+# Load .env BEFORE any other automation.* import. Several modules (e.g.
+# ai/provider.py) read os.getenv at import time, so loading later would leave them
+# holding the defaults and the .env values would be silently ignored.
+#
+# automation.config is the ONE loader — do not call load_dotenv() here. It is also
+# what database/config.py uses, so the API and every standalone process resolve the
+# same DATABASE_URL.
+from automation.config import load_env
+
+load_env()
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -26,11 +37,24 @@ from automation.api.v1.routers.automation import router as automation_router
 from automation.api.v1.routers.analytics import router as analytics_router
 from automation.api.v1.routers.auth import router as auth_router
 from automation.api.v1.routers.projects import router as projects_router
+from automation.api.v1.routers.groups import router as groups_router
+from automation.api.v1.routers.dependency import router as dependency_router
+from automation.api.v1.routers.pull_requests import router as pull_requests_router
+from automation.api.v1.routers.scenario import router as scenario_router
+from automation.api.v1.routers.scenarios import router as scenarios_router
+from automation.api.v1.routers.recorder import router as recorder_router
+from automation.api.v1.routers.reports import router as reports_router
+from automation.api.v1.routers.pr_poller_api import router as pr_poller_router
+from automation.api.v1.routers.ci import router as ci_router
 from automation.appium_service.router import router as appium_router
 from automation.api.v1.routers.intelligence import router as intelligence_router
+from automation.api.v1.routers.tickets import router as tickets_router
+from automation.api.v1.routers.workflow import router as workflow_router
 from automation.api.v1.routers.agents import router as agents_router
-from automation.api.v1.routers.jobs import router as jobs_router
+from automation.api.v1.routers.jobs import router as jobs_router, runs_router
 from automation.api.v1.routers.ops import router as ops_router
+from automation.api.v1.routers.builds import router as builds_router
+from automation.api.v1.routers import webhooks
 from automation.utils.security import install_secret_filter
 from automation.streaming.ws_manager import stream_manager
 from fastapi import APIRouter
@@ -43,9 +67,18 @@ app = FastAPI(
 )
 
 # Setup CORS for dashboard
+# Origins allowed to call the API. The hardcoded localhost-only list blocked every
+# request from a COWORKER's browser (their origin is http://<this-mac-ip>:5173), so
+# the dashboard looked broken on the LAN. Private-LAN origins are allowed by regex;
+# set CORS_ORIGINS (comma-separated) to pin an exact list when hosting publicly.
+_cors_env = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=_cors_env or ["http://localhost:5173", "http://localhost:3000"],
+    # 10.x, 192.168.x, 172.16-31.x on any port — LAN only, never the public internet.
+    allow_origin_regex=None if _cors_env else
+    r"http://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|"
+    r"172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,14 +118,20 @@ async def stream_run(websocket: WebSocket, run_id: str):
     """
     token = websocket.query_params.get("token", "")
 
+    # Debug/test streams (run_id prefixed "test-"/"debug-") bypass JWT so the
+    # standalone stream-test page and the /debug/stream-test endpoint can be
+    # viewed without a dashboard login. Real run streams still require a token.
+    is_debug_stream = run_id.startswith(("test-", "debug-"))
+
     # Validate JWT before accepting the WebSocket handshake.
-    try:
-        if not token:
-            raise JWTError("missing token")
-        jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
-        await websocket.close(code=4001)
-        return
+    if not is_debug_stream:
+        try:
+            if not token:
+                raise JWTError("missing token")
+            jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        except JWTError:
+            await websocket.close(code=4001)
+            return
 
     await websocket.accept()
 
@@ -132,13 +171,44 @@ v1_router.include_router(auth_router)
 v1_router.include_router(automation_router, dependencies=[Depends(get_current_user)])
 v1_router.include_router(analytics_router, dependencies=[Depends(get_current_user)])
 v1_router.include_router(projects_router, dependencies=[Depends(get_current_user)])
+v1_router.include_router(groups_router, dependencies=[Depends(get_current_user)])
+v1_router.include_router(dependency_router, dependencies=[Depends(get_current_user)])
+v1_router.include_router(pull_requests_router)
+v1_router.include_router(scenario_router)
+v1_router.include_router(scenarios_router)
+v1_router.include_router(recorder_router)
+v1_router.include_router(reports_router)
+v1_router.include_router(pr_poller_router)
+v1_router.include_router(ci_router)
 v1_router.include_router(intelligence_router)
+v1_router.include_router(tickets_router)
+v1_router.include_router(workflow_router)
 v1_router.include_router(agents_router)
 v1_router.include_router(jobs_router)
+# Mounted WITHOUT a blanket JWT dep: /runs/{id}/scenario-result is called by the
+# Android bot (X-Bot-Secret), while the other two routes enforce JWT per-route.
+v1_router.include_router(runs_router)
 v1_router.include_router(ops_router)
+v1_router.include_router(builds_router, dependencies=[Depends(get_current_user)])
+
+# Live UI inspector. Auth is per-route (get_current_user on the endpoint).
+from automation.api.v1.routers.inspector import router as inspector_router
+v1_router.include_router(inspector_router)
+
+# MCP servers the AI Chat can use (Settings → MCP servers). Auth per route:
+# listing for any user, add/change/remove/test for admins.
+from automation.api.v1.routers.mcp import router as mcp_router
+v1_router.include_router(mcp_router)
+
+# AI Agent: the autonomous test agent (nightly batch, Claude triage, fixes, report).
+from automation.api.v1.routers.agentic import router as agentic_router
+v1_router.include_router(agentic_router)
 
 # Mount external routers
 app.include_router(appium_router)
+
+# GitHub webhooks — mounted directly (NO JWT dependency; GitHub calls these).
+app.include_router(webhooks.router, prefix="/api/v1")
 
 
 # ── Agent Frame Upload ──────────────────────────────────────────────────────
@@ -168,6 +238,46 @@ async def upload_stream_frame(run_id: str, request: Request):
     return {"status": "ok"}
 
 
+# ── Debug: Standalone Stream Test ───────────────────────────────────────────
+@v1_router.post("/debug/stream-test/{run_id}")
+async def debug_stream_test(run_id: str):
+    """Stream the booted iOS simulator for 30 seconds without running a test job.
+
+    Captures the iPhone 16 Pro simulator screen via ``xcrun simctl`` and pushes
+    frames into the stream manager. View live at
+    ``ws://localhost:8000/ws/stream/{run_id}`` (use a "test-"/"debug-" prefixed
+    run_id to skip the JWT check).
+    """
+    import threading
+    from automation.streaming.screen_capture import IOSScreenCapture
+
+    def _run_capture() -> None:
+        stop_event = threading.Event()
+        capture = IOSScreenCapture(
+            device_id="booted",
+            stop_event=stop_event,
+            on_frame=lambda png: stream_manager.push_frame(run_id, png),
+            fps=4.0,
+        )
+        cap_thread = threading.Thread(
+            target=capture.start, daemon=True, name=f"debug-stream-{run_id[:8]}"
+        )
+        cap_thread.start()
+        # Stream for 30 seconds, then finalise the stream.
+        stop_event.wait(timeout=30)
+        stop_event.set()
+        cap_thread.join(timeout=6)
+        stream_manager.mark_ended(run_id)
+
+    threading.Thread(target=_run_capture, daemon=True).start()
+
+    return {
+        "status": "streaming",
+        "run_id": run_id,
+        "websocket": f"ws://localhost:8000/ws/stream/{run_id}",
+    }
+
+
 # ── Standard v1 Endpoints ───────────────────────────────────────────────────
 @v1_router.get("/runs", dependencies=[Depends(get_current_user)])
 def list_runs(
@@ -192,20 +302,14 @@ def get_run(run_id: str, db: Session = Depends(get_db)):
 
 @v1_router.get("/runs/{run_id}/rca", dependencies=[Depends(get_current_user)])
 def get_rca(run_id: str, db: Session = Depends(get_db)):
-    """Get RCA report for a run"""
-    rca = database.get_rca_report(db, run_id)
-    if not rca:
-        raise HTTPException(status_code=404, detail="RCA report not found")
-    return {"rca": rca}
+    """Get RCA report for a run. Absent RCA is normal (a passing run has none)."""
+    return {"rca": database.get_rca_report(db, run_id)}
 
 
 @v1_router.get("/runs/{run_id}/evidence", dependencies=[Depends(get_current_user)])
 def get_evidence(run_id: str, db: Session = Depends(get_db)):
-    """Get Evidence bundle for a run"""
-    evidence = database.get_evidence(db, run_id)
-    if not evidence:
-        raise HTTPException(status_code=404, detail="Evidence not found")
-    return {"evidence": evidence}
+    """Get Evidence bundle for a run. Absent evidence is normal (nothing collected yet)."""
+    return {"evidence": database.get_evidence(db, run_id)}
 
 
 @v1_router.get("/trends", dependencies=[Depends(get_current_user)])
@@ -214,10 +318,82 @@ def get_trends(days: int = 30, db: Session = Depends(get_db)):
     return database.get_trends(db, days)
 
 
-@v1_router.post("/runs/{run_id}/analyze")
-def trigger_analysis(run_id: str, background_tasks: BackgroundTasks):
-    """Trigger RCA analysis for a failed run"""
-    return {"status": "analysis_queued"}
+@v1_router.post("/runs/{run_id}/analyze", dependencies=[Depends(get_current_user)])
+def trigger_analysis(run_id: str, db: Session = Depends(get_db)):
+    """Generate an RCA report for a failed run (was a no-op stub).
+
+    Builds evidence from the run's error and its failed scenarios, runs the
+    RCAService (local Ollama), persists it, and returns it — so the dashboard's
+    'Trigger Analysis' button actually produces a report.
+    """
+    from automation.database.models import TestRun, ScenarioResult
+    from automation.ai.service import RCAService
+
+    run = db.query(TestRun).filter(TestRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    existing = database.get_rca_report(db, run_id)
+    if existing:
+        return {"status": "exists", "rca": existing}
+
+    # Assemble evidence: the run's own error plus every failed scenario's reason.
+    scenarios = db.query(ScenarioResult).filter(ScenarioResult.run_id == run_id).all()
+    failed = [s for s in scenarios if s.status == "FAIL"]
+    evidence = {
+        "test_name": run.test_name,
+        "suite": run.test_suite,
+        "platform": run.platform,
+        "error_message": run.error_message or "",
+        "failed_scenarios": [
+            {
+                "scenario": f"{s.scenario_num} {s.scenario_name}",
+                "consumer": s.consumer_status,
+                "business": s.business_status,
+                "reason": s.error or "; ".join(s.reasons or []),
+            }
+            for s in failed
+        ],
+        "total_scenarios": len(scenarios),
+        "failed_count": len(failed),
+    }
+
+    try:
+        rca = RCAService().analyze(evidence)
+    except Exception as e:
+        logging.getLogger("api").exception("RCA generation failed")
+        raise HTTPException(status_code=502, detail=f"RCA generation failed: {e}")
+
+    from automation.ai.service import default_rca_config
+    from datetime import datetime as _dt
+    _cfg = default_rca_config()
+
+    def _text(v):
+        # Models sometimes return a list of bullet strings for a text field; the
+        # column is TEXT, so join them. Leaves plain strings/None untouched.
+        if isinstance(v, (list, tuple)):
+            return "\n".join(str(x) for x in v)
+        return v if v is None else str(v)
+
+    rca_data = {
+        "run_id": run_id,
+        "root_cause": _text(rca.root_cause),
+        "failure_category": _text(rca.failure_category),
+        "affected_modules": rca.affected_modules if isinstance(rca.affected_modules, list) else [],
+        "confidence": rca.confidence,
+        "possible_reason": _text(rca.possible_reason),
+        "impact": _text(rca.impact),
+        "suggested_fix": _text(rca.suggested_fix),
+        "priority": _text(rca.priority),
+        "severity": _text(rca.severity),
+        "responsible_module": _text(rca.responsible_module),
+        "summary": _text(rca.summary),
+        "llm_provider": _cfg.get("provider", "ollama"),
+        "llm_model": _cfg.get("model", "llama3.2"),
+        "generated_at": _dt.utcnow(),
+    }
+    database.insert_rca_report(db, rca_data)
+    return {"status": "generated", "rca": database.get_rca_report(db, run_id)}
 
 
 @v1_router.get("/health")
@@ -230,13 +406,97 @@ def health_check():
 app.include_router(v1_router)
 
 
+def _reap_orphaned_runs():
+    """Mark in-flight iOS runs as failed on startup. A backend restart (or a
+    killed run) leaves their processes dead but the row stuck at 'running', which
+    is what made a pile of ghost 'RUNNING' rows appear on the dashboard."""
+    _log = logging.getLogger("api")
+    try:
+        from datetime import datetime
+        from automation.database.config import SessionLocal
+        from automation.database.models import ScenarioResult, TestRun
+        with SessionLocal() as db:
+            stuck = db.query(TestRun).filter(
+                TestRun.status == "running",
+                TestRun.bot_type.in_(["ios-crossapp-flow", "ios-crossapp", "ios-pr-qa"]),
+            ).all()
+            for r in stuck:
+                r.status = "failed"
+                r.job_state = "cancelled"
+                if not r.completed_at:
+                    r.completed_at = datetime.utcnow()
+                # The SEGMENT rows are stranded too. A segment is written as
+                # 'running' before each step and only overwritten when that step
+                # returns, so a backend that died mid-step leaves the row spinning
+                # forever -- a finished run whose segment still shows a RUNNING
+                # badge, which reads as "the run never stopped". Reaping the parent
+                # without these leaves the contradiction on screen.
+                for row in db.query(ScenarioResult).filter(
+                    ScenarioResult.run_id == r.id,
+                    ScenarioResult.status.in_(["running", "queued"]),
+                ).all():
+                    if row.status == "queued":
+                        # Written up front for Live Steps; it never started.
+                        row.status = "SKIPPED"
+                        for side in ("consumer_status", "business_status"):
+                            if getattr(row, side) == "queued":
+                                setattr(row, side, "SKIPPED")
+                        row.reasons = ["[skipped] not run — the backend restarted "
+                                       "before this segment started."]
+                        continue
+                    row.status = "FAIL"
+                    # Drop the '▶' in-flight marker — the dashboard spins on it, so
+                    # leaving it keeps a step animating under a terminal badge.
+                    kept = [n for n in (row.reasons or []) if not n.lstrip().startswith("▶")]
+                    kept.append("[fail] the backend restarted while this step was still running")
+                    row.reasons = kept
+                    if row.consumer_status == "running":
+                        row.consumer_status = "FAIL"
+                    if row.business_status == "running":
+                        row.business_status = "FAIL"
+            if stuck:
+                db.commit()
+                _log.info("Reaped %d orphaned running run(s) on startup", len(stuck))
+    except Exception as e:
+        _log.warning("orphaned-run reap failed: %s", e)
+
+
 @app.on_event("startup")
 async def startup_event():
     install_secret_filter()  # Redact tokens/keys from all logs
     initialize_database()
+    # Devices survive a restart now: repopulate the in-memory registry from the
+    # `devices` table before anything reads it. Stored status is not trusted on its
+    # own — freshness is still decided from last_seen, so a device whose agent went
+    # away while the backend was down comes back DISCONNECTED, not ONLINE.
+    try:
+        from automation.device_manager.service import device_service, ensure_backend_machine
+        # This machine's execution_agents row, so backend-discovered simulators are
+        # stored under the same machine_id a co-located agent uses.
+        ensure_backend_machine()
+        device_service.hydrate_from_db()
+    except Exception as e:
+        _log.warning("device hydration skipped: %s", e)
+    _reap_orphaned_runs()    # any run still 'running' after a restart is dead
     ops_monitor.start()
+    from automation.ci_cd import pr_poller
+    pr_poller.start()  # auto-queue runs for new PR commits (PR_POLL_ENABLED)
+    # Keep RN Metro packagers alive so the app never shows "No bundle URL present".
+    from automation.projects.builder import start_metro_watchdog
+    start_metro_watchdog()
+    # AI Agent: continue a batch a restart interrupted, then run the nightly clock.
+    try:
+        from automation.agentic import scheduler as agent_scheduler
+        agent_scheduler.start()
+    except Exception as e:
+        _log.warning("agent scheduler not started: %s", e)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     ops_monitor.stop()
+    try:                                     # MCP servers are our child processes
+        from automation.mcp.registry import registry as _mcp_registry
+        _mcp_registry.stop_all()
+    except Exception:
+        pass

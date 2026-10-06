@@ -1,0 +1,17 @@
+
+[1;35m▸ Simulators[0m
+  [1;32m✓[0m sim D19D3EC7… booted
+  [1;32m✓[0m sim DA24A392… booted
+
+[1;35m▸ Appium :4723[0m
+  [1;32m✓[0m already running
+
+[1;35m▸ Backend :8000  (supervised)[0m
+  [1;32m✓[0m healthy + auto-restart on
+
+[1;35m▸ Dashboard :5173[0m
+  [1;32m✓[0m started
+
+[1;32m✅ Platform ready[0m   →   [1;4mhttp://localhost:5173[0m    (API: http://localhost:8000)
+   stop: ./stop.sh   ·   status: ./status.sh   ·   logs: ./logs/
+

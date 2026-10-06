@@ -1,0 +1,6 @@
+W| window: 30.0
+W| started: True
+W| note(static, failed): None
+W| note(static, ok=True): [SLOW LOAD] live: slow but ok — completed after 32.0s (over the 30s watchdog window)
+W| kill switch -> None
+W| note(short): None

@@ -1,0 +1,55 @@
+{
+  "_note": "The 10 'Consumer App' scenarios deleted per task 5 of docs/NEXT_SESSION_PROMPT.md. They targeted the production bundle (org.vyapy.sarls.vyaconsumer), installed only on the iPad while every scenario was pinned to the iPhone, and duplicated the 'Vya Staging connsumer' set. Kept here so the deletion is reversible. project_id was bd34a47c-c099-4d36-ac61-810edfff31ca; device_id on all ten was DA24A392-FF1B-4283-A5CE-CDDE0D000D21 (iPhone 16 Pro).",
+  "scenarios": [
+    {
+      "name": "book a table",
+      "bundle_id": "",
+      "steps": ["click NylaiKitchen2", "select 1 hr", "select the 2nd time slot", "click book now", "add items"]
+    },
+    {
+      "name": "Smoke — app launches",
+      "bundle_id": null,
+      "steps": ["Open app", "verify search bar", "verify bottom tabs"]
+    },
+    {
+      "name": "Browse & add to cart",
+      "bundle_id": null,
+      "steps": ["Open app", "click NylaiKitchen2", "open menu section", "add any product", "choose order later"]
+    },
+    {
+      "name": "Preorder a time slot",
+      "bundle_id": null,
+      "steps": ["Open app", "click NylaiKitchen2", "select 1 hr", "select the 2nd time slot", "click book now"]
+    },
+    {
+      "name": "Reach checkout & pay",
+      "bundle_id": null,
+      "steps": ["Open app", "click NylaiKitchen2", "open menu section", "add any product", "go to cart", "checkout", "pay"]
+    },
+    {
+      "name": "Navigate to wallet",
+      "bundle_id": null,
+      "steps": ["Open app", "click Wallet", "verify wallet"]
+    },
+    {
+      "name": "Book an event",
+      "bundle_id": "org.vyapy.sarls.vyaconsumer",
+      "steps": ["open app", "click homeSearchBar", "type Nylai kitchen 2 in searchModalInput", "click NylaiKitchen2", "select Any", "select 1 hr", "select the 2nd time slot", "click bookAppoitment", "click orderLater"]
+    },
+    {
+      "name": "Pre-book an event to earn +20 XP",
+      "bundle_id": null,
+      "steps": ["open app", "click Home", "click NylaiKitchen2", "select 1 hr", "select the 2nd time slot", "click book now", "capture XP balance as before", "click homeCouponIcon", "verify XP is visible", "capture XP balance as after", "verify calculation before + 20 = after"]
+    },
+    {
+      "name": "Cancel an event to deduct -30 XP",
+      "bundle_id": null,
+      "steps": ["open app", "click homeCouponIcon", "capture XP balance as before", "click Home", "click NylaiKitchen2", "select 1 hr", "select the 2nd time slot", "click book now", "click Cancel", "capture XP balance as after", "verify calculation before - 30 = after"]
+    },
+    {
+      "name": "Verify XP shows correctly",
+      "bundle_id": null,
+      "steps": ["open app", "click Home", "click NylaiKitchen2", "select 1 hr", "select the 2nd time slot", "click book now", "click homeCouponIcon", "verify XP is visible", "verify Points is not visible"]
+    }
+  ]
+}

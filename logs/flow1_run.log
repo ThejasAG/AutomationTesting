@@ -1,0 +1,13 @@
+RUN_ID 1ea8187b-3d27-4346-a564-88b3dde54f6e
+[8s] RUN running
+[40s] seg1 C-App: book + preorder + pay ( | [ok] open app — activated the app
+[40s] seg1 C-App: book + preorder + pay ( | ▶ @consumer_home
+[40s] seg1 -> running
+[48s] seg1 C-App: book + preorder + pay ( | ▶ click NylaiKitchen2
+[104s] seg1 C-App: book + preorder + pay ( | [ok] select Any — tapped "Any"
+[104s] seg1 C-App: book + preorder + pay ( | ▶ select 1 hr
+[112s] seg1 C-App: book + preorder + pay ( | ▶ @first_time_slot
+[120s] seg1 C-App: book + preorder + pay ( | ▶ click bookAppoitment
+[128s] seg1 C-App: book + preorder + pay ( | ▶ click preOrderBooking
+DONE run=running after 1801s
+  seg1 C-App: book + preorder + pay (card)    => running

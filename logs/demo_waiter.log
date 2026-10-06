@@ -1,0 +1,15 @@
+RUN_ID 054f946c-3899-4bb6-8b70-b5c0bf56460b
+[144s] «Waiter: create a booking»     · already logged in as waiter (detected waiter home) — skipping sign-in
+[144s] «Waiter: create a booking» [ok] logged in as waiter
+[144s] «Waiter: create a booking» ▶ click addNewEvent
+[156s] «Waiter: create a booking» [ok] @wait_form — form rendered (0s)
+[162s] «Waiter: create a booking» ▶ type roopa in firstName
+[174s] «Waiter: create a booking» ▶ type D in lastName
+[192s] «Waiter: create a booking» ▶ @hide_keyboard
+[204s] «Waiter: create a booking» ▶ click anyBtn
+[210s] «Waiter: create a booking» ▶ @first_time_slot
+[234s] «Waiter: create a booking» ▶ type 9686496589 in mobileInputBtn
+[252s] «Waiter: create a booking» ▶ @hide_keyboard
+[276s] «Waiter: create a booking» ▶ scroll down
+[288s] «Waiter: create a booking» ▶ click saveBtn
+DONE status=passed after 294s

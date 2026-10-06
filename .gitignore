@@ -1,1 +1,32 @@
-.aider*
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Node
+node_modules/
+
+# Reports — GENERATED report output only.
+# `reports/` matches at ANY depth, so it also swallowed automation/reports/, which is
+# SOURCE (generator.py, step_stats.py). Those were only ever committed via `git add -f`,
+# and a new file there is dropped silently — step_stats.py nearly shipped missing,
+# which would have crashed a fresh install on import. Anchor the rule and re-include
+# the package explicitly.
+/reports/
+!automation/reports/
+!automation/reports/*.py
+
+# Database
+*.db
+
+# Secrets — never commit
+.env
+automation/android_bot/bot_queue.json
+cross_app_config.json
+
+
+# Supabase staging credentials — 4G.6.0 validation only, never committed
+.env.supabase-staging
+logs/mcp-screenshots/

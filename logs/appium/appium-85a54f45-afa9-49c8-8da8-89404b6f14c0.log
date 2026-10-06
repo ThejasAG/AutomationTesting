@@ -1,0 +1,6 @@
+WARN Appium Appium encountered 1 warning while validating drivers found in manifest /Users/roops/.appium/node_modules/.cache/appium/extensions.yaml
+WARN Appium Driver "xcuitest" has 1 potential problem: 
+WARN Appium   - Driver "xcuitest" (package `appium-xcuitest-driver`) may be incompatible with the current version of Appium (v3.5.2) due to its peer dependency on Appium ^2.5.4. Please install a compatible version of the driver.
+[38;5;227m[9ae6afb9][0m[38;5;173m[Xcode][0m xcodebuild exited with code '65' and signal 'null'
+[38;5;227m[9ae6afb9][0m[38;5;173m[Xcode][0m xcodebuild exited with code '65' and signal 'null'
+[38;5;227m[9ae6afb9][0m[38;5;197m[XCUITestDriver@527b][0m {}

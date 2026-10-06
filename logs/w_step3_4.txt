@@ -1,0 +1,14 @@
+R| MODAL open_now True
+R| INVALID assign(Z99) -> False
+R|    [FAIL] @assign_table — requested table 'Z99' not on the sheet. Available: ['T0AssignAnyBtn', 'T1AssignAnyBtn', 'T2AssignAnyBtn', 'T3AssignAnyBtn', 'T4AssignAnyBtn', 'T5AssignAnyBtn', 'T6AssignAnyBtn',
+R| INVALID modal_after False
+R| INVALID board_visible True n= 70
+R| REOPEN -> True
+R|        · note: 2 identical 'RoopaDReservedCard' cards and no booked hour — opened the first
+R|    [ok] @open_reservation — opened 'RoopaDReservedCard' (auto-scrolled) at slot '?'
+R| MODAL up_before_assign True
+R| ASSIGN default -> True
+R|        · @assign_table — selected 'T0AssignAnyBtn' (verified: commit button went from disabled to enabled)
+R|    [ok] @assign_table — assigned 'T0' and the sheet closed
+R| MODAL up_after_assign False
+R| SCREEN ['STG-VyaBusiness', 'Log 8 of 31', 'Console Error', 'no valid “aps-environment” ent', 'Source', '2 |', 'var', 'isNativeReflectConstruct', '=', 'require(', '"./isNativeReflectConstruct.js', ')', ';', '3 |']
