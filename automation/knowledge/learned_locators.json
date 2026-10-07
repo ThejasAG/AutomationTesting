@@ -41,12 +41,12 @@
 "ts": 1785993384
 },
 "additemsbtn": {
-"hits": 1,
-"heals": 0,
+"hits": 2,
+"heals": 1,
 "drifts": 0,
 "method": "aid",
 "value": "addItemsBtn",
-"ts": 1786101895
+"ts": 1791349253
 },
 "selectallitemsbtn": {
 "hits": 6,

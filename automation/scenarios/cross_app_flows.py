@@ -144,11 +144,8 @@ _C_ACCEPT_APPT = [
 _C_PAY_FINAL = [
     "open app",
     "click walletTab",                # bottom tab (confirmed id)
-    "click Checkout",                 # wallet card: "Left to pay … / Checkout"
-    "click YES, RE-CHECKOUT",         # "Re-Initiate Checkout?" dialog
-    "click Me Only",                  # "Would you also like to pay for…"
-    "click Proceed with the payment",
-    "verify payment successful",
+    "@consumer_checkout",             # this booking's Wallet card → scroll → Checkout
+    "@consumer_epay",                 # E-Payment → Stripe 'Pay € X' (saved test card) → confirmed
 ]
 
 # Waiter: create the appointment for the diner (flows 5/6). Mirrors the verified
@@ -206,7 +203,7 @@ _W_PAY_CLOSE = [
 
 # Waiter: just close the table (used when the consumer paid in the C-App).
 _W_CLOSE = [
-    "click closeTableBtn",
+    "@waiter_close_table",            # open THIS booking (paid in the C-App) → Close Table
 ]
 
 # Waiter: serve → notify → settle by a SPECIFIC method (cash / voucher) → close.
@@ -548,6 +545,8 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@send_to_kitchen", "help": "Tap SEND and confirm the order went to the kitchen"},
         {"step": "@order_later", "help": "After booking: order later (nothing to do from the Wallet)"},
         {"step": "@pre_order", "help": "After booking: open the menu to pre-order"},
+        {"step": "@consumer_epay", "help": "After Checkout: E-Payment → Stripe 'Pay €' → confirmed"},
+        {"step": "@consumer_checkout", "help": "Wallet: this booking's card → scroll → Checkout"},
         {"step": "@duration:not_sure", "help": "Slide the duration bar to Not Sure (or @duration:1/2/3)"},
         {"step": "@invite_guests:3", "help": "Reservation form: Persons + → add N guests → Invite"},
         {"step": "@void_item", "help": "Swipe an order row → VOID → Entry Error → Apply"},
@@ -556,6 +555,7 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@comp_item", "help": "Swipe a served row → COMP → Birthday → 10 % → Apply"},
         {"step": "@notify_payment", "help": "NOTIFY PAYMENT → Yes"},
         {"step": "@pay_for_all", "help": "Profile card → Pay For → every profile → Apply"},
+        {"step": "@waiter_close_table", "help": "Waiter: open this booking (paid in the C-App) → Close Table"},
         {"step": "@close_table", "help": "Wait for Close Table after payment, close, confirm"},
         {"step": "@pay:epay", "help": "Settle by E-Payment"},
         {"step": "@pay:cash", "help": "Settle by cash"},
@@ -6092,6 +6092,272 @@ class FlowRunner:
                      + (" (booking-confirmed modal dismissed via orderLater)" if post_modal else ""))
         return True
 
+    # ── Consumer: Checkout on THIS booking's Wallet card ───────────────────
+    # vya-consumer Screens/Wallet/UpcomingCard.js: once the waiter has notified
+    # payment, the booking's card shows Checkout as `${username}finishedCard`
+    # (:4475, onPress -> handlePayingUser) or `${username}checkoutCard` (:4586).
+    # `${username}consumerCheckout` (:4345) has NO onPress -- it does nothing. There
+    # is no element named 'Checkout'. MEASURED 2026-10-07: the card's Checkout sat at
+    # y=834, under the tab bar (780-840), so it must be scrolled into view.
+    _CHECKOUT_RE = re.compile(r"(finishedCard|checkoutCard)$")
+
+    # The Wallet lists events as COLLAPSED cards: `<Restaurant>Card` with the status
+    # printed just below ('NOW', 'PAYMENT REQUESTED', 'PAYMENT COMPLETED'). Opening
+    # one shows its date ('TODAY' or '06 OCT 2026') and time ('15:20') at the top;
+    # `<user>Close` folds it back (showDetails(false), UpcomingCard.js:3285).
+    # MEASURED 2026-10-07: 'PAYMENT REQUESTED' alone is not this run's event -- the
+    # first such card was a 06 OCT 16:20 booking for 4 (90.56€) left from an older run.
+    _RESTAURANT_CARD = "NylaiKitchen2Card"
+    _DATE_RE = re.compile(r"^(TODAY|\d{1,2} [A-Z]{3} \d{4})$")
+
+    def _event_open(self, es) -> Optional[Tuple[str, str]]:
+        """(date, time) of the event card that is OPEN, or None in the list view."""
+        name, frame = _idbd.name, _idbd.frame
+        if not any(name(e).endswith("Close") and " " not in name(e) for e in es):
+            return None
+        dates = [e for e in es if self._DATE_RE.match(name(e))]
+        if not dates:
+            return None
+        d = min(dates, key=lambda e: frame(e)[1])
+        t = next((e for e in es if re.fullmatch(r"\d{1,2}:\d{2}", name(e))
+                  and abs(frame(e)[1] - frame(d)[1]) < 12), None)
+        return name(d), (name(t) if t is not None else "")
+
+    def _tap_inside(self, udid: str, e: dict) -> Tuple[bool, str]:
+        """Tap *e* when the point under its centre lies INSIDE it. The Wallet's
+        cards and Close buttons expose their inner text ('Close'), so a probe at
+        the centre returns that child, which idb_driver's strict check reads as
+        'covered' (MEASURED 2026-10-07: hit 'Close' inside RoopaDClose). A child
+        inside the frame is the element itself; anything reaching outside is not."""
+        name, frame = _idbd.name, _idbd.frame
+        x, y, w, h = frame(e)
+        hit = _idbd._probe(udid, e)
+        if not hit:
+            return False, "nothing under the point"
+        hx, hy, hw, hh = frame(hit)
+        if hx >= x - 1 and hy >= y - 1 and hx + hw <= x + w + 1 and hy + hh <= y + h + 1:
+            return _idbd.tap_point(udid, x + w / 2, y + h / 2)
+        return False, f"covered by {name(hit)!r}"
+
+    @staticmethod
+    def _event_code(es) -> str:
+        """The booking code an open event prints (e.g. 'MEPHSR'), its identity."""
+        return next((_idbd.name(e) for e in es
+                     if re.fullmatch(r"[A-Z0-9]{6}", _idbd.name(e))
+                     and not _idbd.name(e).isdigit()), "")
+
+    def _consumer_checkout(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Wallet -> open THIS run's event (TODAY at the booked time) -> scroll -> Checkout."""
+        udid = self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
+        name, frame = _idbd.name, _idbd.frame
+        tag = "@consumer_checkout"
+        slot = getattr(self, "_booked_slot", "") or ""
+        key = _norm(CONSUMER_NAME)
+        els = _idbd.describe_all(udid)
+        if not any(name(e) == "walletUpcomingSearchInput" for e in els):
+            _idbd.tap(udid, ["walletTab", "Wallet"], els)
+            els, _ = self._wait_els(udid, lambda es: any(
+                name(e) == "walletUpcomingSearchInput" for e in es), 10.0)
+        _w, H = _idbd.app_size(els)
+
+        def ours(ev) -> bool:
+            return bool(ev) and ev[0] == "TODAY" and (not slot or ev[1] == slot)
+
+        def close_open(es) -> None:
+            btn = next((e for e in es if name(e).endswith("Close") and " " not in name(e)
+                        and _norm(name(e)).startswith(key)), None)
+            if btn is not None:
+                self._tap_inside(udid, btn)
+                self._wait_els(udid, lambda x: self._event_open(x) is None, 6.0)
+
+        def visible_cards(es):
+            """The restaurant's cards on screen (clear of the header and tab bar),
+            PAYMENT REQUESTED first -- Checkout exists only after Notify Payment."""
+            out = []
+            for c in (e for e in es if name(e) == self._RESTAURANT_CARD):
+                cy = frame(c)[1] + frame(c)[3] / 2
+                if not (190 <= cy <= H - 110):
+                    continue
+                bottom = frame(c)[1] + frame(c)[3]
+                st = next((name(e) for e in es if bottom - 2 <= frame(e)[1] <= bottom + 30
+                           and name(e).isupper() and len(name(e)) > 2), "")
+                out.append((c, st))
+            return sorted(out, key=lambda cs: (cs[1] != "PAYMENT REQUESTED", frame(cs[0])[1]))
+
+        seen_codes, seen = set(), []
+        opened = self._event_open(els)
+        if opened and not ours(opened):
+            seen_codes.add(self._event_code(els))
+            seen.append(" ".join(opened))
+            close_open(els)
+            opened = None
+        opens = 0
+        for page in range(5):
+            if opened:
+                break
+            tried_y = set()
+            while opens < 12:
+                els = _idbd.describe_all(udid)
+                todo = [(c, st) for c, st in visible_cards(els)
+                        if round(frame(c)[1]) not in tried_y]
+                if not todo:
+                    break
+                card, status = todo[0]
+                tried_y.add(round(frame(card)[1]))
+                ok, _how = self._tap_inside(udid, card)
+                if not ok:
+                    continue
+                opens += 1
+                els, ev = self._wait_els(udid, self._event_open, 6.0)
+                if not ev:
+                    continue
+                code = self._event_code(els)
+                if ours(ev):
+                    opened = ev
+                    break
+                if code not in seen_codes:
+                    seen_codes.add(code)
+                    seen.append(" ".join(ev) + (f" ({status.lower()})" if status else ""))
+                close_open(els)
+            if not opened:
+                _idbd.swipe(udid, 200, H * 0.70, 200, H * 0.35, 1.2)     # next page
+                time.sleep(1.0)
+        if not opened:
+            notes.append(f"[FAIL] {tag} — no {self._RESTAURANT_CARD[:-4]} event TODAY"
+                         f"{(' at ' + slot) if slot else ''} in the Wallet; opened: "
+                         f"{', '.join(seen) or 'none'}")
+            return False
+        which = f"the event TODAY {opened[1]}"
+        if seen:
+            notes.append(f"    · {tag}: skipped {', '.join(seen)} — not this run's event")
+        els, btn = self._wait_els(udid, lambda es: next(
+            (e for e in es if self._CHECKOUT_RE.search(name(e))
+             and _norm(name(e)).startswith(key)), None), 8.0)
+        if btn is None:
+            notes.append(f"[FAIL] {tag} — opened {which} but it has no Checkout (Checkout "
+                         f"shows only after the waiter's Notify Payment)")
+            return False
+        before = {name(e) for e in els}
+        ok, how = _idbd.tap_el(udid, btn, els)               # scrolls it clear of the tab bar
+        if not ok and r is not None and self._appium_click_id(r, name(btn)):
+            ok, how = True, "Appium click"
+        if not ok:
+            notes.append(f"[FAIL] {tag} — opened {which} but could not tap Checkout ({how})")
+            return False
+        els, changed = self._wait_els(
+            udid, lambda es: ({name(e) for e in es} - before) or self._toast(es), 8.0)
+        new = sorted(n for n in ({name(e) for e in els} - before) if n)[:6]
+        toast = self._toast(els)
+        if not changed:
+            notes.append(f"[FAIL] {tag} — tapped Checkout on {which} ({how}) but nothing "
+                         f"opened")
+            return False
+        notes.append(f"[ok] {tag} — opened {which} and tapped Checkout ({how}); "
+                     + (f"the app said {toast!r}" if toast else f"opened: {', '.join(new)}"))
+        return True
+
+    # ── Consumer: pay the bill by E-Payment (Stripe) ───────────────────────
+    # After Checkout the Wallet shows 'Payment / Select Payment Method' (ePayment,
+    # eCash, eFoodVoucher, Total, ePaymentConfirm). ePayment (Payment/
+    # PaymentStripe.js) opens Stripe's PaymentSheet; paying succeeds with the toast
+    # 'Your order is confirmed!' or fails with an alert 'Error code: ...'. MEASURED
+    # 2026-10-07: the sheet showed TEST MODE, 'Visa ending in 4 2 4 2' preselected,
+    # 'Pay with Link' and 'Pay €40.31' -- the amount of the card's Total.
+    _STRIPE_PAY_RE = re.compile(r"^Pay\s*€\s*([\d.,]+)$")
+
+    def _consumer_epay(self, notes: List[str]) -> bool:
+        udid = self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
+        name, tag = _idbd.name, "@consumer_epay"
+        has = lambda es, n: any(name(e) == n for e in es)  # noqa: E731
+
+        def pay_btn(es):
+            return next((e for e in es if self._STRIPE_PAY_RE.match(name(e))), None)
+
+        els = _idbd.describe_all(udid)
+        # Older builds ask first: 'Re-Initiate Checkout?' and 'Me Only' / Proceed.
+        for opt in ("YES, RE-CHECKOUT", "Mepay", "proceedPayment"):
+            if has(els, opt):
+                _idbd.tap(udid, [opt], els)
+                els, _ = self._wait_els(udid, lambda es, o=opt: not has(es, o), 6.0)
+                notes.append(f"    · {tag}: answered '{opt}'")
+        btn = pay_btn(els)
+        bill = None
+        if btn is None:
+            els, up = self._wait_els(udid, lambda es: has(es, "ePayment"), 10.0)
+            if not up:
+                notes.append(f"[FAIL] {tag} — the payment sheet (Select Payment Method / "
+                             f"E-Payment) is not on screen")
+                return False
+            bill = self._bill_total_idb(els)
+            ok, how = _idbd.tap(udid, ["ePayment"], els)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — could not tap E-Payment ({how})")
+                return False
+            els, btn = self._wait_els(
+                udid, lambda es: pay_btn(es) or next((e for e in es if "error"
+                                                      in name(e).lower()), None), 20.0)
+            if btn is None or not self._STRIPE_PAY_RE.match(name(btn)):
+                err = name(btn) if btn is not None else ""
+                notes.append(f"[FAIL] {tag} — tapped E-Payment but Stripe's payment sheet "
+                             f"did not open" + (f" ({err!r})" if err else ""))
+                return False
+        amount = self._STRIPE_PAY_RE.match(name(btn)).group(1).replace(",", ".")
+        card = next((name(e) for e in els if name(e).lower().startswith("visa ending")), "")
+        if bill is not None and abs(float(amount) - bill) > 0.01:
+            notes.append(f"    · {tag}: Stripe asks €{amount} for a bill of €{bill:.2f}")
+        ok, how = _idbd.tap_el(udid, btn, els)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — could not tap '{name(btn)}' ({how})")
+            return False
+
+        def outcome(es):
+            for e in es:
+                n = name(e).lower()
+                if "order is confirmed" in n or n == "success":
+                    return "ok", name(e)
+                if n.startswith("error code") or "error code:" in n:
+                    return "error", name(e)
+            # Closed = Stripe's own header gone too: while it processes, the Pay
+            # button turns into a spinner but the sheet (TEST MODE) is still up.
+            if not pay_btn(es) and not has(es, "ePayment") and not has(es, "Pay with Link") \
+                    and not has(es, "TEST MODE"):
+                return "ok", "the payment sheets closed"
+            return None
+
+        els, res = self._wait_els(udid, outcome, 45.0)
+        if not res or res[0] != "ok":
+            why = res[1] if res else "Stripe's sheet is still open after 45s"
+            notes.append(f"[FAIL] {tag} — tapped 'Pay €{amount}' but the payment did not "
+                         f"go through ({why!r})")
+            return False
+        # PROOF on the booking's card, not just closed sheets. MEASURED 2026-10-07:
+        # after paying, 'Left to pay' read 0.00€ and the card's button became
+        # 'RoopaDorderCardCompleted'.
+        def settled(es):
+            if any(name(e).endswith("orderCardCompleted") for e in es):
+                return "the booking shows Completed"
+            lbl = next((e for e in es if name(e).strip().lower() == "left to pay"), None)
+            if lbl is not None:
+                ly = _idbd.frame(lbl)[1]
+                for e in es:
+                    m = re.match(r"^\s*([\d.,]+)\s*€\s*$", name(e))
+                    if m and abs(_idbd.frame(e)[1] - ly) < 12:
+                        return ("Left to pay 0.00 €"
+                                if float(m.group(1).replace(",", ".")) == 0 else None)
+            return None
+
+        els, proof = self._wait_els(udid, settled, 15.0)
+        if not proof:
+            left = next((name(e) for e in els if "€" in name(e)), "?")
+            notes.append(f"[FAIL] {tag} — Stripe accepted €{amount} but the booking does not "
+                         f"show it as paid (still {left!r})")
+            return False
+        res = ("ok", f"{res[1]}; {proof}")
+        notes.append(f"[ok] {tag} — paid €{amount} by E-Payment"
+                     + (f" ({card.replace(' ', '').replace('ending', ' ending ')})" if card else "")
+                     + f"; {res[1]}")
+        return True
+
     # ── Consumer: the duration slider ──────────────────────────────────────
     # Reservation.js (Oct 2026): Duration is a 4-stop bar -- 1 hr, 2 hr, 3 hr, Not
     # Sure. The knob (a MultiSlider marker) has no id; each label under a stop is a
@@ -6116,6 +6382,29 @@ class FlowRunner:
             notes.append(f"[FAIL] {tag} — the duration bar is not on screen (is the "
                          f"reservation form open and a dining area chosen?)")
             return False
+
+        # The form gates Duration on a dining area (durationIndexChange toasts
+        # 'Please select a dining area first !!' and refuses), and its prompt says
+        # which is missing: 'Select a dining area to see available time slots'.
+        # MEASURED 2026-10-07 (run 488e1127): 'select Any' was tapped, the
+        # selection did not stick (the form re-rendered as its data arrived), and the
+        # slide was refused -- reported as "no time slots". Re-select Any first.
+        def needs_area(es) -> bool:
+            return any("select a dining area" in name(e).lower() for e in es)
+
+        if needs_area(els):
+            for _ in range(2):
+                ok, how = _idbd.tap(udid, ["Any"])
+                els, chosen = self._wait_els(udid, lambda es: not needs_area(es), 6.0)
+                if chosen:
+                    notes.append(f"    · {tag}: no dining area was selected (the form "
+                                 f"still asked for one) — tapped Any again ({how})")
+                    break
+            else:
+                notes.append(f"[FAIL] {tag} — the form asks for a dining area and tapping "
+                             f"Any did not select it")
+                return False
+            by = {name(e): e for e in els if re.fullmatch(r"duration[1-4]", name(e))} or by
 
         def prompt_gone(es) -> bool:
             # 'Select a duration to see available time slots' goes; slot chips come.
@@ -6143,8 +6432,13 @@ class FlowRunner:
             els, ok2 = self._wait_els(udid, prompt_gone, 6.0) if ok else (els, False)
             if not ok2:
                 toast = self._toast(els)
+                prompt = next((name(e) for e in els
+                               if name(e).lower().startswith("select a")), "")
                 notes.append(f"[FAIL] {tag} — slid the bar and tapped its label but no time "
-                             f"slots appeared" + (f" ({toast!r})" if toast else ""))
+                             f"slots appeared"
+                             + (f"; the form says {prompt!r}" if prompt else
+                                "; no prompt either — maybe no slots are left today")
+                             + (f" ({toast!r})" if toast else ""))
                 return False
             how = f"the slide did not take; tapped the stop's label ({tap_how})"
         label = {1: "1 hr", 2: "2 hr", 3: "3 hr", 4: "Not Sure"}[stop]
@@ -6910,6 +7204,30 @@ class FlowRunner:
         notes.append(f"[ok] {tag} — tapped NOTIFY PAYMENT, then Yes; payment notified")
         return True
 
+    def _waiter_close_table(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """After the diner paid in the C-App: open THIS booking and close its table.
+
+        This segment follows a consumer one, so the iPad sits on the bookings board,
+        not on the order -- the old bare 'click closeTableBtn' had nothing to press.
+        A booking paid in full can be completed by the app itself (measured on
+        4954: COMPLETED, no Close Table), and then there is nothing to close."""
+        tag = "@waiter_close_table"
+        settled = self._already_settled()
+        if "completed" in settled.lower():
+            notes.append(f"[ok] {tag} — nothing to close: {settled} (the app closed the "
+                         f"table itself once the bill was paid)")
+            return True
+        if "closeTableBtn" not in {_idbd.name(e) for e in _idbd.describe_all(
+                getattr(self, "_cur_udid", "") or self._business_udid())}:
+            if not self._open_reservation(r, notes, statuses=("payment", "serve", "inprogress"),
+                                          what=tag):
+                settled = self._already_settled()
+                if "completed" in settled.lower():
+                    notes.append(f"[ok] {tag} — nothing to close: {settled}")
+                    return True
+                return False
+        return self._close_table(notes)
+
     def _close_table(self, notes: List[str], wait: float = 15.0) -> bool:
         """Close Table once the bill is settled, and confirm the order closed.
 
@@ -7218,6 +7536,10 @@ class FlowRunner:
             return self._tap_text_contains(r, "logout")
         if step == "@accept_appointment":
             return self._accept_appointment(r, notes)
+        if step == "@consumer_epay":
+            return self._consumer_epay(notes)
+        if step == "@consumer_checkout":
+            return self._consumer_checkout(r, notes)
         if step.startswith("@duration:"):
             return self._set_duration(step.split(":", 1)[1].strip(), notes)
         if step == "@invite_guests" or step.startswith("@invite_guests:"):
@@ -7238,6 +7560,8 @@ class FlowRunner:
             return self._notify_payment(notes)
         if step == "@pay_for_all":
             return self._pay_for_all(notes)
+        if step == "@waiter_close_table":
+            return self._waiter_close_table(r, notes)
         if step == "@close_table":
             return self._close_table(notes)
         if step.startswith("@wait_screen:"):
@@ -7270,6 +7594,7 @@ class FlowRunner:
     _PLAIN_STEP_TOKENS = {
         # The duration chips became a slider (consumer Reservation.js, 2026-10):
         # 'Not Sure' is now the last stop of the bar, not a button with that text.
+        "click Checkout": "@consumer_checkout",
         "select Not Sure": "@duration:not_sure",
         "select 1 hr": "@duration:1",
         "select 2 hrs": "@duration:2",

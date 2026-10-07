@@ -16,13 +16,17 @@ def el(name, x, y, w=80, h=14, kind="GenericElement"):
 
 
 class Bar:
-    def __init__(self, slide_works=True):
+    def __init__(self, slide_works=True, area=True, area_sticks=True):
         self.stop, self.slide_works, self.swipes, self.taps = 0, slide_works, [], []
+        self.area, self.area_sticks = area, area_sticks
 
     def describe_all(self, udid):
         els = [el("Vya Consumer", 0, 0, 402, 874, "Application")]
         els += [el(f"duration{i}", 2 + 106 * (i - 1), 609) for i in range(1, 5)]
-        if self.stop:
+        if not self.area:                 # Duration is gated on a dining area
+            els.append(el("Select a dining area to see available time slots", 20, 735,
+                          279, 32, "StaticText"))
+        elif self.stop:
             els += [el("10:55", 20, 735, 60, 30), el("11:00", 90, 735, 60, 30)]
         else:
             els.append(el("Select a duration to see available time slots", 20, 735, 262, 32,
@@ -32,12 +36,15 @@ class Bar:
     def swipe(self, udid, x1, y1, x2, y2, duration=0.25):
         self.swipes.append((round(x1), round(y1), round(x2), round(y2)))
         knob_x = 42 + 106 * max(self.stop - 1, 0)        # the knob starts on 1 hr
-        if self.slide_works and abs(x1 - knob_x) < 20 and abs(y1 - 592) < 10:
+        if self.area and self.slide_works and abs(x1 - knob_x) < 20 and abs(y1 - 592) < 10:
             self.stop = 1 + round((x2 - 42) / 106)
 
     def tap(self, udid, names, els=None, scroll=True):
         self.taps.append(names[0])
-        self.stop = int(names[0][-1])
+        if names[0] == "Any":
+            self.area = self.area_sticks
+        elif self.area:
+            self.stop = int(names[0][-1])
         return True, "idb"
 
 
@@ -69,6 +76,21 @@ def test_falls_back_to_the_stop_label_when_the_slide_does_not_take(run):
     bar = Bar(slide_works=False)
     ok, notes = run(bar)
     assert ok and bar.taps == ["duration4"] and "tapped the stop's label" in notes[-1]
+
+
+def test_reselects_any_when_the_dining_area_did_not_stick(run):
+    """MEASURED 2026-10-07 (run 488e1127): 'select Any' was tapped but the form
+    still asked for a dining area, so the slide was refused."""
+    bar = Bar(area=False)
+    ok, notes = run(bar)
+    assert ok and bar.taps[0] == "Any" and bar.stop == 4
+    assert any("tapped Any again" in n for n in notes)
+
+
+def test_says_plainly_when_the_dining_area_will_not_select(run):
+    bar = Bar(area=False, area_sticks=False)
+    ok, notes = run(bar)
+    assert not ok and "dining area" in notes[-1] and bar.swipes == []
 
 
 def test_other_stops(run):
