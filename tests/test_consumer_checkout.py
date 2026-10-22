@@ -256,6 +256,46 @@ def test_another_bookings_event_at_the_same_slot_is_not_taken_as_paid(monkeypatc
     assert "(ticket 5232)" in notes[-1]
 
 
+def test_a_slow_opening_own_event_is_not_lost_to_a_fast_decoy(monkeypatch):
+    """MEASURED 2026-10-22 (flow2, run 5d85b999): this run's own ticket (5348) took
+    longer to render than the old 6s open-wait, so the next loop pass saw an empty
+    card list (the still-opening event hides it from `visible_cards`) and swiped
+    over it -- losing it for good in favour of a decoy (ticket 5347, the shared
+    account's) that had opened fast earlier. The fix: wait longer for an open (15s,
+    not 6s) and, win or lose that wait, classify any event already open at the top
+    of the next loop pass instead of assuming the list is empty."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+    card = el("NylaiKitchen2Card", 20, 400, 362, 100)
+    closed_list = [el("Vya Consumer", 0, 0, 402, 874), el("walletUpcomingSearchInput", 67, 151), card]
+    open_own = [el("Vya Consumer", 0, 0, 402, 874), el("RoopaDClose", 300, 200),
+                el("TODAY", 40, 230), el("13:10", 150, 230), el("TICKET: 5348", 200, 420),
+                el("RoopaDorderCardCompleted", 20, 834)]
+    state = {"tapped_at": None}
+
+    def describe_all(udid):
+        if state["tapped_at"] is None:
+            return closed_list
+        # Renders 16s after the tap: past the new 15s open-wait AND the old 6s one,
+        # so only the top-of-loop stray check (not the wait itself) can still catch it.
+        return open_own if clock["t"] - state["tapped_at"] >= 16.0 else closed_list
+
+    def tap_inside(udid, e):
+        state["tapped_at"] = clock["t"]
+        return True, "idb"
+
+    monkeypatch.setattr(caf._idbd, "describe_all", describe_all)
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: None)
+    r = FlowRunner.__new__(FlowRunner)
+    r.devices = {"consumer": "IPHONE"}
+    r._booked_slot, r._booked_ticket = "13:10", "5348"
+    monkeypatch.setattr(r, "_tap_inside", tap_inside, raising=False)
+    notes = []
+    assert r._consumer_checkout(None, notes), notes
+    assert "TODAY 13:10" in notes[-1]
+
+
 def test_epay_taps_inside_pay_when_its_text_answers_the_hit_test(monkeypatch, pay):
     """MEASURED 2026-10-22 (flow6): 'Pay €35.02' was plainly on screen but the verified
     tap refused it ('covered or scrolled out'); its own text answers the hit-test."""

@@ -233,6 +233,23 @@ def test_a_cancelled_invitation_is_skipped_and_an_already_accepted_slot_passes(m
     assert "already accepted" in notes[-1]
 
 
+def test_landing_on_the_coupons_subtab_switches_to_upcoming_first():
+    """MEASURED 2026-10-22 (flow5, run af87b74a): the Wallet opened on the Coupons
+    sub-tab (a stale route param from an earlier Coupon navigation survives a
+    remount, vya-consumer Wallet/index.js resolveWalletTabName) -- invites render
+    only under Upcoming, so the step found nothing and failed although a '1' badge
+    on the Wallet icon proved one was pending. Force Upcoming before giving up."""
+    ok, notes, scr = run([
+        ["walletCouponSearchInput", "couponBlock", "upcomingBlock", "Wallet", "Menu"],
+        WALLET + [CARD],
+        WALLET + [CARD, "eventAccept", "eventDecline"],
+        WALLET + ["NylaiKitchen2Card", "Appointment updated successfully"],
+    ])
+    assert ok is True, notes
+    assert "switched to Upcoming" in joined(notes)
+    assert len(scr.taps) == 3                     # the tab, the card, then ACCEPT
+
+
 def test_without_the_slot_on_screen_a_dead_invitation_still_fails(monkeypatch):
     from automation.scenarios import screen_text
     fr, scr = runner([WALLET + [CARD]])
