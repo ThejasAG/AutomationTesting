@@ -16,9 +16,10 @@ const scheduleChip = (sch: ScheduleState | undefined, enabled: boolean): ReactNo
 };
 
 /** Agent settings. The form is seeded once from `s`: the page reloads its status
- *  every few seconds, and re-seeding on each reload would wipe edits in progress. */
-export default function SettingsCard({ s, schedule, secrets, onSaved }: {
-  s: AgentSettings; schedule: ScheduleState; secrets: AgentStatus['secrets']; onSaved: () => void;
+ *  every few seconds, and re-seeding on each reload would wipe edits in progress.
+ *  `bare` renders just the form, for a dialog that supplies its own frame and title. */
+export default function SettingsCard({ s, schedule, secrets, onSaved, bare = false }: {
+  s: AgentSettings; schedule: ScheduleState; secrets: AgentStatus['secrets']; onSaved: () => void; bare?: boolean;
 }) {
   const [f, setF] = useState<AgentSettings>(s);
   const [emails, setEmails] = useState((s.report_emails ?? []).join(', '));
@@ -65,10 +66,9 @@ export default function SettingsCard({ s, schedule, secrets, onSaved }: {
     }
   };
 
-  return (
-    <div style={section}>
-      <h3 style={h3}><Settings size={18} /> Settings</h3>
-      <div className="card" style={{ padding: 22, transform: 'none', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 8, ...wrapText }}>
+  const form = (
+      <div className={bare ? undefined : 'card'}
+           style={{ ...(bare ? {} : { padding: 22, transform: 'none' }), display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 8, ...wrapText }}>
         <div style={{ fontWeight: 600, marginBottom: 2 }}>Nightly</div>
         {box('nightly_enabled', 'Run every night')}
         <div style={row}><span style={label}>Start time</span>
@@ -117,6 +117,12 @@ export default function SettingsCard({ s, schedule, secrets, onSaved }: {
           <span style={{ ...muted, marginLeft: 'auto' }}>Only an admin can change these.</span>
         </div>
       </div>
+  );
+  if (bare) return form;
+  return (
+    <div style={section}>
+      <h3 style={h3}><Settings size={18} /> Settings</h3>
+      {form}
     </div>
   );
 }

@@ -1,7 +1,8 @@
 import { useState } from 'react';
+import type { CSSProperties } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Map as MapIcon, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 import type { Coverage, Feature, FeatureMap, FeatureTotals } from '../../agentApi';
-import { AMBER, GREEN, GREY, RED, chip, ghost, h3, mono, muted, section, td, th, when, wrapText } from './ui';
+import { AMBER, BLUE, GREEN, GREY, RED, chip, ghost, h3, mono, muted, section, when, wrapText } from './ui';
 
 const COV: Record<string, string> = { covered: GREEN, partial: AMBER, missing: RED };
 const RISK: Record<string, string> = { high: RED, medium: AMBER, low: GREY };
@@ -23,6 +24,8 @@ export function FeatureMapSection({ fmap, loaded, canStart, starting, onCreate, 
 }) {
   const [picked, setPicked] = useState<Record<string, string>>({});
   const [showCovered, setShowCovered] = useState(true);
+  const [openApp, setOpenApp] = useState<Record<string, boolean>>({});   // folded until clicked
+  const [openRow, setOpenRow] = useState<Record<string, boolean>>({});
   const n = Object.keys(picked).length;
   const apps = fmap ? Object.entries(fmap.apps || {}).filter(([, l]) => Array.isArray(l)) as [string, Feature[]][] : [];
 
@@ -61,18 +64,6 @@ export function FeatureMapSection({ fmap, loaded, canStart, starting, onCreate, 
         </div>
       ) : (
         <>
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 12 }}>
-            {apps.map(([app, list]) => {
-              const t = fmap.totals?.[app] ?? totalsOf(list);
-              return (
-                <div key={app} style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span style={{ fontWeight: 600, fontSize: '0.88rem' }}>{APP_LABEL[app] ?? app}</span>
-                  {chip(`${t.covered} covered`, GREEN)}{chip(`${t.partial} partial`, AMBER)}{chip(`${t.missing} missing`, RED)}
-                </div>
-              );
-            })}
-          </div>
-
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
             <button className="btn" disabled={!n || !canStart || starting} onClick={() => onCreate(Object.values(picked))}
                     title={canStart ? '' : 'A session is already running'}>
@@ -83,62 +74,88 @@ export function FeatureMapSection({ fmap, loaded, canStart, starting, onCreate, 
             <span style={muted}>Tick partial or missing features to write scenarios for them.</span>
           </div>
 
-          <div style={{ display: 'grid', gap: 16 }}>
+          <div style={{ display: 'grid', gap: 12 }}>
             {apps.map(([app, list]) => {
+              const t = fmap.totals?.[app] ?? totalsOf(list);
+              const isOpen = !!openApp[app];
+              const chosenHere = Object.keys(picked).filter(k => k.startsWith(`${app}|`)).length;
               const rows = list
                 .map((f, i) => ({ f, key: `${app}|${i}` }))
                 .filter(({ f }) => showCovered || f.status !== 'covered')
                 .sort((a, b) => ((ORDER[a.f.status] ?? 3) - (ORDER[b.f.status] ?? 3))
                   || ((RISK_ORDER[a.f.risk] ?? 3) - (RISK_ORDER[b.f.risk] ?? 3)));
               return (
-                <div key={app} className="card" style={{ padding: 0, transform: 'none', overflowX: 'auto', maxWidth: '100%', minWidth: 0 }}>
-                  <div style={{ padding: '14px 16px 4px', fontWeight: 600 }}>{APP_LABEL[app] ?? app}</div>
-                  {rows.length === 0 ? (
-                    <p style={{ ...muted, padding: '6px 16px 14px' }}>Every feature is covered.</p>
-                  ) : (
-                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
-                      <thead><tr>
-                        <th style={{ ...th, width: 28 }} /><th style={th}>Feature</th><th style={th}>Role</th>
-                        <th style={th}>Status</th><th style={th}>Risk</th><th style={th}>Covered by</th><th style={th}>Gap</th>
-                      </tr></thead>
-                      <tbody>
-                        {rows.map(({ f, key }) => {
-                          const gap = f.status !== 'covered';
-                          return (
-                            <tr key={key} style={{ background: picked[key] ? 'rgba(129,140,248,0.08)' : 'transparent' }}>
-                              <td style={td}>
-                                {gap && <input type="checkbox" checked={!!picked[key]}
-                                               onChange={() => toggle(key, `[${app}] ${f.feature}: ${f.gap || f.scenario || ''}`)} />}
-                              </td>
-                              <td style={td}>
-                                <div style={{ fontWeight: 600 }}>{f.feature}</div>
-                                {arr(f.screens).length > 0 && (
-                                  <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>{arr(f.screens).join(', ')}</div>
-                                )}
-                              </td>
-                              <td style={td}>{f.role || '—'}</td>
-                              <td style={td}>{chip(f.status, COV[f.status] ?? GREY)}</td>
-                              <td style={td}>{chip(f.risk, RISK[f.risk] ?? GREY)}</td>
-                              <td style={{ ...td, ...mono, color: 'var(--text-secondary)' }}>
-                                {arr(f.covered_by).length ? arr(f.covered_by).join(', ') : '—'}
-                              </td>
-                              <td style={{ ...td, color: 'var(--text-secondary)', minWidth: 220 }}>
-                                {f.gap || '—'}
-                                {f.scenario && gap && (
-                                  <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: 2 }}>Would test: {f.scenario}</div>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                <div key={app} className="card" style={{ padding: 0, transform: 'none', minWidth: 0 }}>
+                  <button type="button" aria-expanded={isOpen} onClick={() => setOpenApp(o => ({ ...o, [app]: !isOpen }))}
+                          style={{ ...bareButton, width: '100%', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                                   padding: '14px 18px' }}>
+                    {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                    <span style={{ fontWeight: 600 }}>{APP_LABEL[app] ?? app}</span>
+                    <span style={muted}>{list.length} features</span>
+                    <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {chosenHere > 0 && chip(`${chosenHere} selected`, BLUE)}
+                      {chip(`${t.covered} covered`, GREEN)}{chip(`${t.partial} partial`, AMBER)}{chip(`${t.missing} missing`, RED)}
+                    </span>
+                  </button>
+                  {isOpen && (
+                    <div style={{ borderTop: '1px solid var(--border-color)' }}>
+                      {rows.length === 0 ? (
+                        <p style={{ ...muted, padding: '12px 18px' }}>Every feature is covered.</p>
+                      ) : rows.map(({ f, key }, i) => (
+                        <FeatureRow key={key} f={f} first={i === 0} picked={!!picked[key]} open={!!openRow[key]}
+                                    onPick={() => toggle(key, `[${app}] ${f.feature}: ${f.gap || f.scenario || ''}`)}
+                                    onToggle={() => setOpenRow(o => ({ ...o, [key]: !o[key] }))} />
+                      ))}
+                    </div>
                   )}
                 </div>
               );
             })}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+const bareButton: CSSProperties = {
+  background: 'none', border: 'none', color: 'inherit', font: 'inherit', cursor: 'pointer', textAlign: 'left',
+};
+
+/** One feature as a single line (tick, name, status, risk); click it for the details. */
+function FeatureRow({ f, first, picked, open, onPick, onToggle }: {
+  f: Feature; first: boolean; picked: boolean; open: boolean; onPick: () => void; onToggle: () => void;
+}) {
+  const gap = f.status !== 'covered';
+  const label = (text: string) => <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{text}: </span>;
+  return (
+    <div style={{ borderTop: first ? 'none' : '1px solid var(--border-color)',
+                  background: picked ? 'rgba(129,140,248,0.08)' : 'transparent' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 18px', minWidth: 0 }}>
+        <span style={{ width: 16, flexShrink: 0, display: 'flex' }}>
+          {gap && <input type="checkbox" checked={picked} onChange={onPick} aria-label={`Select ${f.feature}`} />}
+        </span>
+        <button type="button" aria-expanded={open} onClick={onToggle}
+                style={{ ...bareButton, flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8, padding: 0 }}>
+          {open ? <ChevronDown size={14} style={{ flexShrink: 0 }} /> : <ChevronRight size={14} style={{ flexShrink: 0 }} />}
+          <span style={{ fontWeight: 600, fontSize: '0.86rem', minWidth: 0,
+                         ...(open ? wrapText : { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) }}>
+            {f.feature}
+          </span>
+        </button>
+        <span style={{ width: 78, flexShrink: 0, textAlign: 'right' }}>{chip(f.status, COV[f.status] ?? GREY)}</span>
+        <span style={{ width: 70, flexShrink: 0, textAlign: 'right' }}>{chip(f.risk, RISK[f.risk] ?? GREY)}</span>
+      </div>
+      {open && (
+        <div style={{ padding: '0 18px 14px 60px', display: 'grid', gap: 6, fontSize: '0.82rem',
+                      color: 'var(--text-secondary)', ...wrapText }}>
+          {f.gap && <div>{label('Gap')}{f.gap}</div>}
+          {gap && f.scenario && <div>{label('Would test')}{f.scenario}</div>}
+          {arr(f.screens).length > 0 && <div>{label('Screens')}{arr(f.screens).join(', ')}</div>}
+          <div>{label('Covered by')}
+            {arr(f.covered_by).length ? <span style={mono}>{arr(f.covered_by).join(', ')}</span> : 'no flow yet'}</div>
+          {f.role && <div>{label('Role')}{f.role}</div>}
+        </div>
       )}
     </div>
   );

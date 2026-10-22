@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
-  AlertTriangle, Bot, CheckCircle2, History, Loader2, RefreshCw, ShieldCheck, Square, XCircle,
+  AlertTriangle, Bot, CheckCircle2, History, Loader2, RefreshCw, Settings, ShieldCheck, Square, X, XCircle,
 } from 'lucide-react';
+import ModalPortal from '../components/ModalPortal';
 import { agentApi, isActiveStatus } from '../agentApi';
 import type { AgentStatus, Coverage, FeatureMap, PreflightCheck, Session, StartSession } from '../agentApi';
 import {
@@ -40,6 +41,8 @@ export default function AgentPage() {
   const [loadErr, setLoadErr] = useState('');  // from background loading
   const [note, setNote] = useState('');
   const [restart, setRestart] = useState<RestartState>({ phase: 'idle' });
+  const [showSettings, setShowSettings] = useState(false);
+  const closeSettings = useCallback(() => setShowSettings(false), []);
   const restarting = useRef(false);
 
   const load = useCallback(async () => {
@@ -168,6 +171,7 @@ export default function AgentPage() {
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
           <button style={ghost} onClick={() => { load(); loadFmap(); }}><RefreshCw size={14} /> Refresh</button>
+          <button style={ghost} disabled={!st} onClick={() => setShowSettings(true)}><Settings size={14} /> Settings</button>
         </div>
       </div>
 
@@ -279,7 +283,22 @@ export default function AgentPage() {
 
       <CoverageSection coverage={coverage} onRefresh={loadCoverage} busy={covBusy} />
 
-      {st && <SettingsCard s={st.settings} schedule={st.schedule} secrets={st.secrets} onSaved={load} />}
+      {showSettings && st && (
+        <ModalPortal onClose={closeSettings}>
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.72)', backdropFilter: 'blur(6px)', display: 'flex',
+                        alignItems: 'center', justifyContent: 'center', zIndex: 999, padding: 16 }} onClick={closeSettings}>
+            <div className="card modal-pop" role="dialog" aria-label="AI Agent settings"
+                 style={{ width: 760, maxWidth: '96vw', maxHeight: '92vh', overflowY: 'auto', padding: 26, position: 'relative', transform: 'none' }}
+                 onClick={e => e.stopPropagation()}>
+              <button onClick={closeSettings} aria-label="Close"
+                      style={{ position: 'absolute', top: 16, right: 16, background: 'transparent', border: 'none', cursor: 'pointer',
+                               color: 'var(--text-muted)', display: 'flex' }}><X size={18} /></button>
+              <h3 style={{ ...h3, marginBottom: 16 }}><Settings size={18} /> AI Agent settings</h3>
+              <SettingsCard bare s={st.settings} schedule={st.schedule} secrets={st.secrets} onSaved={load} />
+            </div>
+          </div>
+        </ModalPortal>
+      )}
     </div>
   );
 }

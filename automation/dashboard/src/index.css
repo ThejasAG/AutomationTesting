@@ -133,7 +133,11 @@ h1, h2, h3, h4, h5, h6 {
   flex: 1;
   min-width: 0;
   padding: 48px;
-  overflow-y: auto;
+  /* The page (body) scrolls, not this column. `clip` never makes it a scroller:
+     overflow-y: auto used to, so one too-wide line (a long error) let the column
+     scroll sideways and slid the start of every section under the sidebar. Wide
+     tables scroll on their own (.table-container). */
+  overflow-x: clip;
 }
 
 /* Typography & Utils */
@@ -162,6 +166,9 @@ h1, h2, h3, h4, h5, h6 {
   padding: 28px;
   transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease;
   box-shadow: 0 4px 24px -1px rgba(0, 0, 0, 0.2);
+  /* A card in a grid/flex list may shrink to its column: without this, one long
+     unbroken line (an error message) widens the whole list past the screen. */
+  min-width: 0;
 }
 
 .card:hover {
@@ -174,6 +181,17 @@ h1, h2, h3, h4, h5, h6 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 24px;
+}
+
+/* Two even columns (one on narrow screens). For a set of four cards: auto-fit
+   gives 3 + 1 at common widths, leaving one card alone next to a gap. */
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (max-width: 900px) {
+  .grid-2 { grid-template-columns: minmax(0, 1fr); }
 }
 
 .stat-value {

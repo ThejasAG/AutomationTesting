@@ -35,7 +35,7 @@ export default function StartPanel({ disabled, busy, defaultMaxNew, onStart }: {
       {disabled && (
         <p style={{ ...muted, marginBottom: 12 }}>A session is running. Start another when it finishes, or stop it.</p>
       )}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 16 }}>
+      <div className="grid-2">
         <Card title="Run & heal" icon={<HeartPulse size={16} />}
               text="Runs every flow (or the ones you pick) and fixes what the automation got wrong. App bugs are reported, not fixed.">
           <button style={{ ...ghost, padding: '5px 10px', fontSize: '0.8rem', marginBottom: 10 }} onClick={openFlows}>
@@ -83,9 +83,9 @@ export default function StartPanel({ disabled, busy, defaultMaxNew, onStart }: {
 
         <Card title="Analyze apps" icon={<Microscope size={16} />}
               text="Reads both apps' code and maps which features the tests cover. Changes nothing.">
-          <div style={{ display: 'flex', gap: 8 }}>
-            <select style={{ ...input, flex: 1, minWidth: 0 }} value={mode} onChange={e => setMode(e.target.value as 'delta' | 'full')}>
-              <option value="delta">What changed since the last analysis</option>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <select style={{ ...input, flex: '1 1 210px', minWidth: 0 }} value={mode} onChange={e => setMode(e.target.value as 'delta' | 'full')}>
+              <option value="delta">Changes since last analysis</option>
               <option value="full">Everything (slower)</option>
             </select>
             <button className="btn" style={btn} disabled={off} onClick={() => onStart('analyze', { kind: 'analyze', mode })}>
