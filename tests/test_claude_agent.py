@@ -548,3 +548,38 @@ def test_untracked_checkouts_inside_a_partly_tracked_folder_reach_the_worktree(t
     assert os.path.islink(wt / "repos" / "app-checkout")
     assert (wt / "repos" / "app-checkout" / ".git").is_dir()
     assert os.path.islink(wt / ".venv") and not os.path.islink(wt / "repos")
+
+
+def test_a_temporary_service_error_resumes_the_same_claude_session(monkeypatch):
+    """MEASURED 2026-10-22: a generate session died after 19 turns on 'Your organization
+    has disabled Claude subscription access for Claude Code'; minutes later it worked.
+    The session must pick up where it was (same Claude session, its edits kept)."""
+    from datetime import datetime, timedelta
+    calls = []
+
+    def once(sid, sdir, wt, prompt, model, s, deadline, name, mode, resume=None):
+        calls.append((prompt[:30], mode, resume))
+        if len(calls) == 1:
+            return {"is_error": True, "turns": 19, "claude_session_id": "c-1",
+                    "result": "Your organization has disabled Claude subscription access for Claude Code"}
+        return {"is_error": False, "turns": 40, "claude_session_id": resume, "result": "done"}
+
+    monkeypatch.setattr(runner, "_run_claude_once", once)
+    monkeypatch.setattr(runner, "phase", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_stop_requested", lambda sid: False)
+    monkeypatch.setattr(runner, "RESUME_WAIT_S", 0)
+    info = runner.run_claude("s", "/s", "/wt", "the task", {"model": "sonnet", "effort": "high"},
+                             datetime.now() + timedelta(hours=1), "n")
+    assert calls[1] == (runner.CONTINUE_PROMPT[:30], "a", "c-1")
+    assert info["turns"] == 40 and len(info["resumed_after"]) == 1
+
+
+def test_a_usage_limit_is_not_retried_in_a_loop(monkeypatch):
+    from datetime import datetime, timedelta
+    calls = []
+    monkeypatch.setattr(runner, "_run_claude_once", lambda *a, **k: calls.append(1) or {
+        "is_error": True, "turns": 30, "result": "Claude usage limit reached. Your limit will reset at 7pm"})
+    monkeypatch.setattr(runner, "phase", lambda *a, **k: None)
+    info = runner.run_claude("s", "/s", "/wt", "t", {"model": "sonnet", "effort": "high"},
+                             datetime.now() + timedelta(hours=1), "n")
+    assert calls == [1] and "resumed_after" not in info

@@ -232,32 +232,75 @@ def model_unsupported(info: Dict[str, Any]) -> bool:
         and int(info.get("turns") or 0) <= 1
 
 
+# Service-side interruptions that clear by themselves. MEASURED 2026-10-22: a
+# generate session died after 19 turns on "Your organization has disabled Claude
+# subscription access for Claude Code", and a call a few minutes later worked.
+_TRANSIENT = ("disabled Claude subscription access", "Overloaded", "overloaded_error",
+              "API Error: 5", "Connection error", "ECONNRESET", "socket hang up",
+              "Request timed out", "fetch failed")
+RESUME_WAIT_S = 120
+MAX_RESUMES = 3
+CONTINUE_PROMPT = (
+    "Your session was interrupted by a temporary service error. Continue the task exactly "
+    "where you left off: check `git status` and `git diff` for the edits you have made so "
+    "far, then carry on. The rules, the time limits and the report are unchanged.")
+
+
+def transient_error(info: Dict[str, Any]) -> bool:
+    return bool(info.get("is_error")) and any(t in str(info.get("result") or "") for t in _TRANSIENT)
+
+
 def run_claude(sid: str, sdir: str, wt: str, prompt: str, s: Dict[str, Any],
                deadline: datetime, name: str) -> Dict[str, Any]:
-    info = _run_claude_once(sid, sdir, wt, prompt, s["model"], s, deadline, name, "w")
-    if model_unsupported(info) and s["model"] != FALLBACK_MODEL:
-        phase(sid, sdir, f"this Claude Code is too old for '{s['model']}' — continuing with "
-                         f"'{FALLBACK_MODEL}' (run `claude update` on the Mac to use {s['model']})")
+    model = s["model"]
+    info = _run_claude_once(sid, sdir, wt, prompt, model, s, deadline, name, "w")
+    if model_unsupported(info) and model != FALLBACK_MODEL:
+        phase(sid, sdir, f"this Claude Code is too old for '{model}' — continuing with "
+                         f"'{FALLBACK_MODEL}' (run `claude update` on the Mac to use {model})")
         first = info
-        info = _run_claude_once(sid, sdir, wt, prompt, FALLBACK_MODEL, s, deadline, name, "a")
-        info["model_fallback"] = {"wanted": s["model"], "used": FALLBACK_MODEL,
+        model = FALLBACK_MODEL
+        info = _run_claude_once(sid, sdir, wt, prompt, model, s, deadline, name, "a")
+        info["model_fallback"] = {"wanted": s["model"], "used": model,
                                   "why": str(first.get("result") or "")[:300]}
+    resumes = []
+    while (transient_error(info) and len(resumes) < MAX_RESUMES and not info.get("stopped")
+           and not info.get("timed_out")):
+        why = str(info.get("result") or "")[:200]
+        phase(sid, sdir, f"Claude Code was interrupted ({why}) — resuming the same session in "
+                         f"{RESUME_WAIT_S // 60} min")
+        t_end = time.time() + RESUME_WAIT_S
+        while time.time() < t_end and datetime.now() < deadline and not _stop_requested(sid):
+            time.sleep(5)
+        if _stop_requested(sid):
+            info["stopped"] = True
+            break
+        if datetime.now() >= deadline:
+            info["timed_out"] = True
+            break
+        resumes.append(why)
+        prev = info
+        info = _run_claude_once(sid, sdir, wt, CONTINUE_PROMPT, model, s, deadline, name, "a",
+                                resume=prev.get("claude_session_id"))
+        info.update({k: prev[k] for k in ("model_fallback",) if k in prev})
+    if resumes:
+        info["resumed_after"] = resumes
     return info
 
 
 def _run_claude_once(sid: str, sdir: str, wt: str, prompt: str, model: str, s: Dict[str, Any],
-                     deadline: datetime, name: str, mode: str) -> Dict[str, Any]:
+                     deadline: datetime, name: str, mode: str,
+                     resume: Optional[str] = None) -> Dict[str, Any]:
     from automation.claude_code import events
     claude = shutil.which("claude") or "/usr/local/bin/claude"
-    claude_sid = str(uuid.uuid4())
+    claude_sid = resume or str(uuid.uuid4())
     _set(sid, claude_session_id=claude_sid)
+    session_args = ["--resume", claude_sid] if resume else ["--session-id", claude_sid, "--name", name]
     cmd = [claude, "-p", prompt, "--model", model, "--effort", s["effort"],
            "--permission-mode", "dontAsk", "--setting-sources", "project",
            "--settings", json.dumps(session_settings(wt, sdir)),
            "--strict-mcp-config",              # no MCP servers: nothing else may drive the sims
            "--add-dir", sdir,
-           "--output-format", "stream-json", "--verbose",
-           "--session-id", claude_sid, "--name", name]
+           "--output-format", "stream-json", "--verbose", *session_args]
     transcript = os.path.join(sdir, "transcript.jsonl")
     info: Dict[str, Any] = {"claude_session_id": claude_sid, "timed_out": False, "stopped": False,
                             "model": model}
