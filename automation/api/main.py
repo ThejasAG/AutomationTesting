@@ -406,20 +406,53 @@ def health_check():
 app.include_router(v1_router)
 
 
+def _runs_alive_elsewhere() -> set:
+    """Run ids another process is still running: the AI Agent's flows run in their
+    own processes (scripts/agent_tools.py), so a backend restart does not end them.
+    A live run holds its simulators' file locks (cross_app_flows.acquire_devices),
+    whose files name the run; a run of a live agent session counts too."""
+    import fcntl
+    import glob
+    alive = set()
+    try:
+        from automation.scenarios.cross_app_flows import DEVICE_LOCK_DIR
+        for p in glob.glob(os.path.join(DEVICE_LOCK_DIR, "*.lock")):
+            fd = os.open(p, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                alive.add(os.pread(fd, 64, 0).decode(errors="ignore").strip())
+            finally:
+                os.close(fd)
+    except Exception:
+        pass
+    try:
+        from automation.claude_code import session as agent_session
+        live = agent_session.active()
+        if live:
+            alive.add(f"claude-agent:{live['id']}")
+    except Exception:
+        pass
+    return alive
+
+
 def _reap_orphaned_runs():
     """Mark in-flight iOS runs as failed on startup. A backend restart (or a
     killed run) leaves their processes dead but the row stuck at 'running', which
-    is what made a pile of ghost 'RUNNING' rows appear on the dashboard."""
+    is what made a pile of ghost 'RUNNING' rows appear on the dashboard. Runs
+    another process is still running (the AI Agent's) are left alone."""
     _log = logging.getLogger("api")
     try:
         from datetime import datetime
         from automation.database.config import SessionLocal
         from automation.database.models import ScenarioResult, TestRun
+        alive = _runs_alive_elsewhere()
         with SessionLocal() as db:
-            stuck = db.query(TestRun).filter(
+            stuck = [r for r in db.query(TestRun).filter(
                 TestRun.status == "running",
                 TestRun.bot_type.in_(["ios-crossapp-flow", "ios-crossapp", "ios-pr-qa"]),
-            ).all()
+            ).all() if r.id not in alive and (r.triggered_by or "") not in alive]
             for r in stuck:
                 r.status = "failed"
                 r.job_state = "cancelled"
@@ -484,12 +517,16 @@ async def startup_event():
     # Keep RN Metro packagers alive so the app never shows "No bundle URL present".
     from automation.projects.builder import start_metro_watchdog
     start_metro_watchdog()
-    # AI Agent: continue a batch a restart interrupted, then run the nightly clock.
+    # AI Agent (Claude Code): close sessions whose process died, and keep the
+    # nightly launchd job in step with the settings.
     try:
-        from automation.agentic import scheduler as agent_scheduler
-        agent_scheduler.start()
+        from automation.agentic import settings as agent_settings
+        from automation.claude_code import schedule as agent_schedule
+        from automation.claude_code import session as agent_session
+        agent_session.reap_orphans()
+        agent_schedule.sync(agent_settings.get())
     except Exception as e:
-        _log.warning("agent scheduler not started: %s", e)
+        _log.warning("AI Agent startup checks skipped: %s", e)
 
 
 @app.on_event("shutdown")

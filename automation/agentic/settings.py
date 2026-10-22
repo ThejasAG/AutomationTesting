@@ -1,7 +1,8 @@
-"""Agent configuration: one DB row (edited from the AI Agent page) over defaults.
+"""AI Agent configuration: one DB row (edited from the AI Agent page) over defaults.
 
-Secrets are NOT settings: ANTHROPIC_API_KEY, SMTP_PASSWORD and GITHUB_TOKEN stay
-in .env. The page only shows whether each is configured.
+The agent is Claude Code on the logged-in Claude plan — there is no API key to
+configure. Secrets that remain (SMTP_PASSWORD, SLACK_WEBHOOK_URL, GITHUB_TOKEN)
+stay in .env; the page only shows whether each is configured.
 """
 from __future__ import annotations
 
@@ -15,22 +16,21 @@ from automation.database.models import AgentSetting
 DEMO_FLOWS = ("flow_book_demo", "flow_waiter_demo", "flow_kitchen_demo")
 
 DEFAULTS: Dict[str, Any] = {
-    "enabled": False,               # nightly schedule on/off (Run now always works)
+    "nightly_enabled": True,        # launchd job (survives reboots) — see claude_code/schedule.py
     "nightly_time": "01:00",        # local time, HH:MM
-    "env": "staging",               # staging | prod
-    "flows": [],                    # [] = every flow except the quick demos
-    "include_demos": False,
-    "model": "claude-opus-5-5",
-    "budget_usd": 10.0,             # hard cap on Claude spend per batch
-    "triage": True,                 # ask Claude to diagnose failures
-    "autofix_tests": True,          # apply + verify test-step fixes
-    "app_fix_mode": "propose",      # off | propose (patch only) | pr (push branch + PR)
-    "max_fix_attempts": 2,
-    "infra_wait_minutes": 15,       # how long to wait for staging to come back
+    "nightly_mode": "auto",         # auto (full analysis on Sunday, delta otherwise) | delta | full
+    "auto_heal_after_run_all": True,  # a dashboard Run all with failures starts a heal session
+    "env": "staging",
+    "include_demos": False,         # heal/nightly: also run the quick demo flows
+    "model": "opus",                # the session's model (helper agents: see .claude/agents/)
+    "effort": "high",
+    "max_new_scenarios": 3,         # per generate / nightly session (full analysis: double)
+    "max_fix_attempts": 2,          # per failure, before it is left for a person
+    "max_changed_lines": 800,       # a bigger change is not approvable
+    "hours": {"heal": 4.0, "fix_run": 1.5, "analyze": 1.5, "generate": 3.0, "nightly": 5.0},
     "report_emails": [],            # [] = REPORT_EMAIL_TO from .env
     "report_slack": True,
-    "generator_enabled": False,     # weekly: propose new scenarios
-    "generator_day": "sun",         # mon..sun
+    "report_manual_sessions": False,  # also email sessions started by hand
 }
 
 _ROW_ID = "default"
@@ -42,6 +42,7 @@ def get() -> Dict[str, Any]:
         stored = dict(row.data or {}) if row else {}
     out = dict(DEFAULTS)
     out.update({k: v for k, v in stored.items() if k in DEFAULTS})
+    out["hours"] = {**DEFAULTS["hours"], **(out.get("hours") or {})}
     if not out["report_emails"]:
         env = os.getenv("REPORT_EMAIL_TO", "")
         out["report_emails"] = [e.strip() for e in env.split(",") if e.strip()]
@@ -65,9 +66,5 @@ def update(changes: Dict[str, Any]) -> Dict[str, Any]:
 def secrets_status() -> Dict[str, bool]:
     """Which secrets are configured — never their values."""
     smtp = all(os.getenv(k) for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"))
-    return {
-        "anthropic": bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")),
-        "smtp": smtp,
-        "slack": bool(os.getenv("SLACK_WEBHOOK_URL")),
-        "github": bool(os.getenv("GITHUB_TOKEN")),
-    }
+    return {"smtp": smtp, "slack": bool(os.getenv("SLACK_WEBHOOK_URL")),
+            "github": bool(os.getenv("GITHUB_TOKEN"))}

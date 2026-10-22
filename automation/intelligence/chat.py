@@ -307,8 +307,25 @@ def _tool_chat(system: str, prompt: str) -> Generator[str, None, None]:
     yield f"\n(stopped after {_MAX_TOOL_ROUNDS} rounds of tool calls)"
 
 
+def _claude_code_stream(system: str, prompt: str) -> Generator[str, None, None]:
+    """Claude Code on the Claude plan: streamed, with the enabled MCP servers as its
+    tools (a device-driving one is refused while a run is on the simulators)."""
+    from automation.ai import claude_code_llm
+    servers = []
+    try:
+        from automation.mcp.registry import registry
+        servers = registry.servers(enabled_only=True)
+    except Exception as exc:
+        logger.warning("MCP servers unavailable: %s", exc)
+    yield from claude_code_llm.stream_chat(system + (_TOOLS_NOTE if servers else ""), prompt,
+                                           servers, model=_OLLAMA_MODEL)
+
+
 def _get_token_stream(system: str, prompt: str) -> Generator[str, None, None]:
     """Route streaming to the appropriate provider."""
+    if _PROVIDER_TYPE == "claude_code":
+        yield from _claude_code_stream(system, prompt)
+        return
     if _openai_compatible() and _mcp_enabled():
         yield from _tool_chat(system, prompt)
         return

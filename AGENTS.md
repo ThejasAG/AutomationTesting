@@ -43,8 +43,8 @@ So "cross-app" = **three roles**: **consumer** (iPhone), **waiter** + **kitchen*
 
 ## 3. Architecture / directory map
 
-- **`automation/api/`** — FastAPI backend. `main.py` loads `.env` (`load_dotenv`) → real Groq
-  LLM. Routers in `api/v1/routers/` (pull_requests, scenarios, recorder, reports, tickets,
+- **`automation/api/`** — FastAPI backend. `main.py` loads `.env` (`load_dotenv`) → the LLM is
+  Claude Code (`LLM_PROVIDER_TYPE=claude_code`). Routers in `api/v1/routers/` (pull_requests, scenarios, recorder, reports, tickets,
   webhooks, automation, …).
 - **`automation/dashboard/`** — React 18 + Vite + TS UI. Pages in `src/pages/`.
 - **`automation/scenarios/cross_app_flows.py`** — the cross-app flow engine (FLOWS dict,
@@ -54,15 +54,33 @@ So "cross-app" = **three roles**: **consumer** (iPhone), **waiter** + **kitchen*
 - **`automation/intelligence/`** — `pr_planner.py` (picks test paths for a PR, grouped by
   role via `_role_of`), `scenario_runner.py` (`ScenarioRunner` — resolves plain-language
   steps against the LIVE tree, self-heals), `impact_selection.py`, `learned_locators.py`.
-- **`automation/agentic/`** — the autonomous test agent (dashboard **AI Agent** page, API
-  `/api/v1/agent/*`). Nightly batch over the flows → rule sorter (`classifier.py`, free) →
-  retry/resume → Claude triage (`triage.py`, `claude-opus-5-5`, per-batch $ budget) → test fix
-  applied as a `CrossAppFlowEdit` and kept ONLY if a re-run passes (else rolled back) → app
-  patches proposed / draft PR via a separate git worktree (app checkouts are never modified) →
-  email/Slack report. **Analyze application**: `inventory.py` maps every navigator screen of both
-  apps → its own testIDs → whether any flow/handler drives them (free, ~4s); `generator.py` has
-  Claude rate features covered/partial/missing and write flows for gaps (run only after approval).
-  Needs `ANTHROPIC_API_KEY`; state in `agent_batches/items/actions`; tests `tests/test_agentic.py`.
+- **`automation/claude_code/`** — the **AI Agent** (dashboard AI Agent page, API
+  `/api/v1/agent/*`): **Claude Code** (`claude -p`, on the logged-in Claude plan — no API key)
+  in sessions of five kinds: `heal` (run the flows, or the failures a dashboard Run all just
+  had, and fix what the automation got wrong), `fix_run` (one failed run — "Fix with Claude
+  Code" on Run Details), `analyze` (map both apps' features: covered/partial/missing + risk →
+  feature map), `generate` (new `cc_` flows for gaps, kept only if they pass on the sims),
+  `nightly` (all three; launchd job `com.vyapy.ai-agent.nightly`, `scripts/claude_nightly.sh`).
+  Each session runs in its own process (`runner.py`) and **its own git worktree** under
+  `~/.vya-platform/agent-worktrees/` on branch `agent/<stamp>-<kind>`; it may edit only
+  `automation/`, `tests/`, `scripts/` (not `automation/claude_code/`, `.claude/`,
+  `scripts/agent_tools.py`) and run only `scripts/agent_tools.py` + read-only git — enforced by
+  permission rules AND the `guard.py` PreToolUse hook. After it ends, `gates.py` checks the
+  change (scope, compiles, check-flows, no value check removed, full unit suite vs the base
+  commit's failures, the touched flows PASSED on the sims after the last edit, size); it is
+  committed on the branch and a person **approves (merge into the current branch, never main)
+  or rejects** it. Then restart the backend to load it. State: `agent_sessions` table +
+  `logs/agent_sessions/<id>/`. Tests `tests/test_claude_agent.py`.
+- **`automation/agentic/`** — the agent's plain parts: `classifier.py` (rule sorter, free),
+  `inventory.py` (every navigator screen → its testIDs → driven by a flow or not, ~4s),
+  `preflight.py`, `runinfo.py`, `settings.py`. Tests `tests/test_agentic.py`.
+- **`CLAUDE.md` + `.claude/`** — Claude Code project setup: skills `/run-all-heal`,
+  `/heal-failure`, `/write-scenario`, `/analyze-apps` (the same procedures the AI Agent
+  follows), helper agents `app-analyst`, `flow-debugger`. Known traps:
+  `automation/knowledge/known_issues.md`.
+- **LLM for the other AI features** (PR planning, summaries, RCA, AI Chat) is also Claude Code:
+  `LLM_PROVIDER_TYPE=claude_code` → `automation/ai/claude_code_llm.py` (one-shot `claude -p`, no
+  tools; the chat gets the enabled MCP servers, device-driving ones refused during a run).
 - **`automation/integrations/`** — `github.py` (list PRs), `jira.py` (`get_issue(key)` reads
   ticket descriptions; configured via `.env` JIRA_URL/EMAIL/TOKEN).
 - **`automation/knowledge/`** — grounded facts: `locator_map.md` (REAL element ids per screen,
@@ -71,7 +89,8 @@ So "cross-app" = **three roles**: **consumer** (iPhone), **waiter** + **kitchen*
   models: `TestRun`, `ScenarioResult`, `SavedScenario`, `Ticket`, `TestProject`.
 - **`repos/<uuid>/`** — cloned app source checkouts (vya-consumer, vya-business, vya_web_app).
   The **real testIDs live here** — grep the source, don't guess selectors.
-- **`scripts/`** — `dryrun.py` (run a flow + poll), `supervise_backend.sh`.
+- **`scripts/`** — `dryrun.py` (run a flow + poll), `supervise_backend.sh`, `agent_tools.py`
+  (every platform action the AI Agent takes; `--help`), `claude_nightly.sh` (the nightly job).
 - Root: `start.sh` / `stop.sh` / `status.sh`.
 
 ---

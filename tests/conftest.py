@@ -21,6 +21,9 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 # Belt and braces: never let a stray import point the suite at the real agent
 # token or platform either.
 os.environ.setdefault("APP_ENV", "test")
+# .env selects Claude Code as the platform's model (LLM_PROVIDER_TYPE=claude_code);
+# a unit test must never spend the Claude plan or wait on `claude -p`.
+os.environ.setdefault("LLM_PROVIDER_TYPE", "mock")
 
 
 def pytest_report_header(config):

@@ -758,3 +758,39 @@ class AgentAction(Base):
     cost_usd = Column(Float, default=0.0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentSession(Base):
+    """One Claude Code session of the AI Agent (automation/claude_code/).
+
+    The session works in its own git worktree on branch `branch`; what it changed is
+    committed there and waits for a person to approve (merge) or reject it. The
+    transcript, report and runs live in logs/agent_sessions/<id>/."""
+    __tablename__ = "agent_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind = Column(String(20), nullable=False)          # heal | fix_run | analyze | generate | nightly
+    trigger = Column(String(20), default="manual")     # manual | run_all | nightly | app_change
+    # queued | preparing | running | checking | review | no_changes | gates_failed
+    # | approved | rejected | failed | stopped | interrupted
+    status = Column(String(20), default="queued")
+    phase = Column(String(300), nullable=True)         # what it is doing now, for the page
+    options = Column(JSON, nullable=True)              # {"run_ids": [...], "focus": "", "mode": ...}
+    created_by = Column(String(120), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    pid = Column(Integer, nullable=True)               # the runner process
+    claude_session_id = Column(String(36), nullable=True)
+    base_commit = Column(String(40), nullable=True)
+    branch = Column(String(200), nullable=True)
+    worktree = Column(String(500), nullable=True)
+    files_changed = Column(JSON, nullable=True)        # [{"path", "added", "removed"}]
+    gates = Column(JSON, nullable=True)                # [{"name", "ok", "detail"}]
+    summary = Column(JSON, nullable=True)              # the session's summary.json
+    result = Column(JSON, nullable=True)               # exit code, turns, timed_out, usage
+    error = Column(Text, nullable=True)
+    stop_requested = Column(Boolean, default=False)
+    decision_by = Column(String(120), nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    report_sent = Column(Boolean, default=False)

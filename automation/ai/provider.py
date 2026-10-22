@@ -260,6 +260,37 @@ class OllamaProvider(LLMProvider):
         self._client.close()
 
 
+class ClaudeCodeProvider(LLMProvider):
+    """Claude Code on the logged-in Claude plan (`claude -p`, no API key) — see
+    automation/ai/claude_code_llm.py. Selected with LLM_PROVIDER_TYPE=claude_code."""
+
+    def __init__(self, model: str = ""):
+        from automation.ai import claude_code_llm
+        self._model = claude_code_llm.model_for(model)
+
+    @property
+    def name(self) -> str:
+        return "claude_code"
+
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        json_schema: Optional[dict] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.1,
+    ) -> LLMResponse:
+        from automation.ai import claude_code_llm
+        schema = json_schema if isinstance(json_schema, dict) and json_schema.get("type") else None
+        system = system_prompt
+        if json_schema and not schema:
+            system = (system_prompt + "\n\n" if system_prompt else "") + \
+                "Respond ONLY with a single valid JSON object, no prose and no code fences."
+        text, meta = claude_code_llm.generate(system, user_prompt, schema, self._model)
+        return LLMResponse(content=text, model=meta.get("model") or self._model,
+                           usage=meta.get("usage") or {}, provider=self.name)
+
+
 class MockLLMProvider(LLMProvider):
     """Mock provider for testing"""
 
@@ -340,6 +371,8 @@ def create_provider(config: dict[str, Any]) -> LLMProvider:
             model=model or "llama-3.1-8b-instant",
             base_url=config.get("api_base") or os.getenv("LLM_API_BASE") or "https://api.groq.com/openai/v1",
         )
+    elif provider_type == "claude_code":
+        return ClaudeCodeProvider(model=model or "")
     elif provider_type == "ollama":
         return OllamaProvider(
             base_url=config.get("base_url", "http://localhost:11434"),

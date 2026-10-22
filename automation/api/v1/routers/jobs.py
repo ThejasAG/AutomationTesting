@@ -578,17 +578,70 @@ def run_flows_in_order(flow_ids, env, start, session_factory, sleep=None,
     return done
 
 
+_RUN_ALL_ACTIVE = [0]          # Run all batches in progress (a backend restart would kill them)
+
+
+def run_all_in_progress() -> bool:
+    return _RUN_ALL_ACTIVE[0] > 0
+
+
+def heal_after_run_all(done, created_by: str = ""):
+    """When a Run all ends with failures, start an AI Agent heal session on exactly
+    those runs (setting auto_heal_after_run_all). Not after a batch the user
+    stopped, nor for runs the too-early toast stopped ("Waiting: …"). Returns the
+    session id, or None."""
+    from automation.agentic import settings as agent_settings
+    if not agent_settings.get().get("auto_heal_after_run_all"):
+        return None
+    if any(st == "cancelled" for _, _, st in done):
+        return None
+    if done and done[-1][2] == "stopped":
+        from automation.database.config import SessionLocal
+        from automation.database.models import TestRun
+        with SessionLocal() as db:
+            last = db.query(TestRun).filter_by(id=done[-1][1]).first()
+            if not (last and (last.error_message or "").startswith("Waiting:")):
+                return None                                   # the user pressed Stop
+    failed = [rid for _, rid, st in done if st == "failed"]
+    if not failed:
+        return None
+    from automation.claude_code import session as agent_session
+    try:
+        return agent_session.create("heal", trigger="run_all", options={"run_ids": failed},
+                                    created_by=created_by)
+    except (agent_session.Busy, agent_session.Refused, ValueError) as e:
+        logger.warning("run-all: no heal session started: %s", e)
+        return None
+
+
+def _run_all_then_heal(flow_ids, env, start, session_factory, created_by=""):
+    _RUN_ALL_ACTIVE[0] += 1
+    try:
+        done = run_flows_in_order(flow_ids, env, start, session_factory)
+    finally:
+        _RUN_ALL_ACTIVE[0] -= 1
+    try:
+        sid = heal_after_run_all(done, created_by)
+        if sid:
+            logger.info("run-all: %d failed — AI Agent heal session %s started",
+                        sum(st == "failed" for _, _, st in done), sid[:8])
+    except Exception as e:  # noqa: BLE001 — never let the hook break the batch's end
+        logger.warning("run-all: heal hook failed: %s", e)
+
+
 @runs_router.post("/cross-app-flows/run-all")
 def run_all_cross_app_flows(body: FlowRunAllIn, current_user=Depends(get_current_user)):
     """Run ALL cross-app flows sequentially against the chosen environment.
-    Returns the list of run_ids (one per flow), kicked off back-to-back."""
+    Returns the list of run_ids (one per flow), kicked off back-to-back. When the
+    batch ends with failures the AI Agent can start healing them (its setting)."""
     from automation.scenarios.cross_app_flows import FLOWS, start_flow_run
     from automation.database.config import SessionLocal
     import threading
 
     flow_ids = list(FLOWS.keys())
-    threading.Thread(target=run_flows_in_order,
-                     args=(flow_ids, body.env, start_flow_run, SessionLocal),
+    who = getattr(current_user, "email", "") or getattr(current_user, "username", "") or ""
+    threading.Thread(target=_run_all_then_heal,
+                     args=(flow_ids, body.env, start_flow_run, SessionLocal, who),
                      daemon=True).start()
     return {"started": True, "env": body.env, "flows": flow_ids,
             "message": f"Running all {len(flow_ids)} flows on {body.env} sequentially."}
