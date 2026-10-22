@@ -140,6 +140,7 @@ def create(kind: str, trigger: str = "manual", options: Optional[Dict[str, Any]]
     options = dict(options or {})
     if kind == "fix_run" and not options.get("run_ids"):
         raise ValueError("fix_run needs the failed run's id")
+    initialize_database()                     # the CLI may run before the backend made the table
     cur = active()
     if cur:
         raise Busy(f"an AI Agent session is already {cur['status']} ({cur['kind']}, {cur['id'][:8]})")
@@ -147,7 +148,6 @@ def create(kind: str, trigger: str = "manual", options: Optional[Dict[str, Any]]
     if not (st["installed"] and st["logged_in"]):
         raise Refused("Claude Code is not installed or not logged in on this Mac "
                       "(run `claude` once in a terminal and log in)")
-    initialize_database()
     import uuid
     sid = str(uuid.uuid4())
     with SessionLocal() as db:

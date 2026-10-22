@@ -511,3 +511,40 @@ def test_no_heal_when_all_passed_switched_off_or_the_user_stopped(monkeypatch):
     settings.update({"auto_heal_after_run_all": False})
     assert jobs.heal_after_run_all([("flow1", "r1", "failed")]) is None
     assert called == []
+
+
+def test_an_old_claude_code_falls_back_to_a_model_it_supports(monkeypatch):
+    """MEASURED 2026-10-22: Claude Code 2.1.205 refuses opus ('does not support this
+    model; version 2.1.280 or newer is required') — the session must not die of it."""
+    calls = []
+
+    def once(sid, sdir, wt, prompt, model, s, deadline, name, mode):
+        calls.append((model, mode))
+        if model == "opus":
+            return {"is_error": True, "turns": 1, "result": "API Error: 400 Claude Code 2.1.205 does not "
+                    "support this model; version 2.1.280 or newer is required."}
+        return {"is_error": False, "turns": 30, "result": "done"}
+
+    monkeypatch.setattr(runner, "_run_claude_once", once)
+    monkeypatch.setattr(runner, "phase", lambda *a, **k: None)
+    info = runner.run_claude("s", "/s", "/wt", "p", {"model": "opus", "effort": "high"}, None, "n")
+    assert calls == [("opus", "w"), ("sonnet", "a")]
+    assert info["turns"] == 30 and info["model_fallback"]["used"] == "sonnet"
+    monkeypatch.setattr(runner, "_run_claude_once",
+                        lambda *a: {"is_error": True, "turns": 40, "result": "does not support this model"})
+    assert "model_fallback" not in runner.run_claude("s", "/s", "/wt", "p", {"model": "opus", "effort": "high"},
+                                                     None, "n")
+
+
+def test_untracked_checkouts_inside_a_partly_tracked_folder_reach_the_worktree(tmp_path, monkeypatch):
+    """MEASURED 2026-10-22: repos/ holds tracked gitlinks, so the worktree got a real
+    repos/ folder, the link was skipped, and the analysis found no app at all."""
+    main, wt = tmp_path / "main", tmp_path / "wt"
+    (main / "repos" / "app-checkout" / ".git").mkdir(parents=True)
+    (main / ".venv").mkdir()
+    (wt / "repos" / "old-gitlink").mkdir(parents=True)
+    monkeypatch.setattr(paths, "MAIN_ROOT", str(main))
+    runner.link_runtime(str(wt))
+    assert os.path.islink(wt / "repos" / "app-checkout")
+    assert (wt / "repos" / "app-checkout" / ".git").is_dir()
+    assert os.path.islink(wt / ".venv") and not os.path.islink(wt / "repos")

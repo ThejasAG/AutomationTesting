@@ -152,8 +152,18 @@ def link_runtime(wt: str) -> None:
     for name in paths.WORKTREE_LINKS:
         src = os.path.join(paths.MAIN_ROOT, name)
         dst = os.path.join(wt, name)
-        if os.path.exists(src) and not os.path.lexists(dst):
+        if not os.path.exists(src):
+            continue
+        if not os.path.lexists(dst):
             os.symlink(src, dst)
+        elif os.path.isdir(dst) and not os.path.islink(dst) and os.path.isdir(src):
+            # A folder git tracks part of (repos/ holds a few tracked entries, while
+            # the app checkouts in it are untracked): link what the worktree lacks.
+            # MEASURED 2026-10-22: without this the analysis found no app at all.
+            for child in os.listdir(src):
+                c_dst = os.path.join(dst, child)
+                if not os.path.lexists(c_dst):
+                    os.symlink(os.path.join(src, child), c_dst)
 
 
 def remove_worktree(wt: str) -> None:
@@ -211,13 +221,37 @@ def build_prompt(row: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, Any]) ->
     return prompts.build(row["kind"], row.get("options") or {}, ctx, s)
 
 
+FALLBACK_MODEL = "sonnet"
+
+
+def model_unsupported(info: Dict[str, Any]) -> bool:
+    """The CLI refused the model before doing anything (MEASURED 2026-10-22: Claude Code
+    2.1.205 answers 'does not support this model; version 2.1.280 or newer is
+    required' for opus)."""
+    return bool(info.get("is_error")) and "does not support this model" in str(info.get("result") or "") \
+        and int(info.get("turns") or 0) <= 1
+
+
 def run_claude(sid: str, sdir: str, wt: str, prompt: str, s: Dict[str, Any],
                deadline: datetime, name: str) -> Dict[str, Any]:
+    info = _run_claude_once(sid, sdir, wt, prompt, s["model"], s, deadline, name, "w")
+    if model_unsupported(info) and s["model"] != FALLBACK_MODEL:
+        phase(sid, sdir, f"this Claude Code is too old for '{s['model']}' — continuing with "
+                         f"'{FALLBACK_MODEL}' (run `claude update` on the Mac to use {s['model']})")
+        first = info
+        info = _run_claude_once(sid, sdir, wt, prompt, FALLBACK_MODEL, s, deadline, name, "a")
+        info["model_fallback"] = {"wanted": s["model"], "used": FALLBACK_MODEL,
+                                  "why": str(first.get("result") or "")[:300]}
+    return info
+
+
+def _run_claude_once(sid: str, sdir: str, wt: str, prompt: str, model: str, s: Dict[str, Any],
+                     deadline: datetime, name: str, mode: str) -> Dict[str, Any]:
     from automation.claude_code import events
     claude = shutil.which("claude") or "/usr/local/bin/claude"
     claude_sid = str(uuid.uuid4())
     _set(sid, claude_session_id=claude_sid)
-    cmd = [claude, "-p", prompt, "--model", s["model"], "--effort", s["effort"],
+    cmd = [claude, "-p", prompt, "--model", model, "--effort", s["effort"],
            "--permission-mode", "dontAsk", "--setting-sources", "project",
            "--settings", json.dumps(session_settings(wt, sdir)),
            "--strict-mcp-config",              # no MCP servers: nothing else may drive the sims
@@ -225,9 +259,10 @@ def run_claude(sid: str, sdir: str, wt: str, prompt: str, s: Dict[str, Any],
            "--output-format", "stream-json", "--verbose",
            "--session-id", claude_sid, "--name", name]
     transcript = os.path.join(sdir, "transcript.jsonl")
-    info: Dict[str, Any] = {"claude_session_id": claude_sid, "timed_out": False, "stopped": False}
+    info: Dict[str, Any] = {"claude_session_id": claude_sid, "timed_out": False, "stopped": False,
+                            "model": model}
     roots = [wt, sdir, paths.MAIN_ROOT]
-    with open(transcript, "w") as out:
+    with open(transcript, mode) as out:
         proc = subprocess.Popen(cmd, cwd=wt, stdout=out, stderr=subprocess.STDOUT,
                                 env=claude_env(wt, sdir, sid), start_new_session=True)
         last_phase = 0.0
