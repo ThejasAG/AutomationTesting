@@ -7,9 +7,10 @@ import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult,
   VisualRegressionItem, RiskPrediction, PerformanceResponse } from '../api';
 import { format } from 'date-fns';
 import { parseServerDate } from '../time';
-import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown, SkipForward, StepForward } from 'lucide-react';
+import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown, SkipForward, StepForward, Wrench } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from 'recharts';
 import ReactMarkdown from 'react-markdown';
+import { agentApi } from '../agentApi';
 
 // ── Scenarios Tab (Android cross-app: Consumer + Business) ───────────────────
 
@@ -718,6 +719,7 @@ export default function RunDetails() {
   const [retryError, setRetryError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [resuming, setResuming] = useState(false);
+  const [fixing, setFixing] = useState(false);
   const [idCopied, setIdCopied] = useState(false);
   const navigate = useNavigate();
 
@@ -752,6 +754,22 @@ export default function RunDetails() {
       setRetryError(e?.message || 'Could not start the retry.');
     } finally {
       setRetrying(false);
+    }
+  }
+
+  // Hand a failed run to the AI Agent: a Claude Code session finds why it failed and
+  // fixes the test if the test was wrong. The change waits for approval on the AI Agent page.
+  async function onFixWithClaude() {
+    if (!id || fixing) return;
+    setFixing(true);
+    setRetryError(null);
+    try {
+      const res = await agentApi.start({ kind: 'fix_run', run_ids: [id] });
+      navigate(`/agent?session=${encodeURIComponent(res.id)}`);
+    } catch (e: any) {
+      setRetryError(e?.message || 'Could not start the AI Agent.');
+    } finally {
+      setFixing(false);
     }
   }
 
@@ -863,7 +881,7 @@ export default function RunDetails() {
             Retry mid-run would put two runs on the same simulators, which is a
             guaranteed WDA collision, so the two can never be offered together. */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {RESUMABLE.has(run.status) && run.bot_type === 'ios-crossapp-flow' && (
             <button
               onClick={onResume}
@@ -882,6 +900,26 @@ export default function RunDetails() {
               {resuming
                 ? <><Loader2 size={15} className="spin" /> Starting…</>
                 : <><StepForward size={15} /> Resume from failure</>}
+            </button>
+          )}
+          {run.status === 'failed' && (
+            <button
+              onClick={onFixWithClaude}
+              disabled={fixing}
+              title="Start an AI Agent session: Claude Code finds why this run failed and fixes the test if the test was wrong. You approve the change."
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                padding: '9px 16px', fontSize: '0.88rem', fontWeight: 600,
+                fontFamily: 'inherit', borderRadius: 8, cursor: fixing ? 'default' : 'pointer',
+                border: '1px solid var(--accent-primary)',
+                background: 'transparent',
+                color: fixing ? 'var(--text-secondary)' : 'var(--accent-primary)',
+                opacity: fixing ? 0.7 : 1,
+              }}
+            >
+              {fixing
+                ? <><Loader2 size={15} className="spin" /> Starting…</>
+                : <><Wrench size={15} /> Fix with Claude Code</>}
             </button>
           )}
           {ACTIVE_RUN_STATES.has(run.status) ? (

@@ -1,110 +1,105 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
-  Bot, Play, Square, RefreshCw, Loader2, CheckCircle2, XCircle, AlertTriangle, Wrench,
-  Sparkles, ShieldCheck, Clock, ChevronDown, ChevronRight, Undo2, GitPullRequest, Mail,
+  AlertTriangle, Bot, CheckCircle2, History, Loader2, RefreshCw, ShieldCheck, Square, XCircle,
 } from 'lucide-react';
-import { agentApi } from '../agentApi';
-import type {
-  AgentAction, AgentBatch, AgentFlow, AgentItem, AgentSettings, AgentStatus, Coverage, Feature, PreflightCheck,
-} from '../agentApi';
-import { parseServerDate } from '../time';
+import { agentApi, isActiveStatus } from '../agentApi';
+import type { AgentStatus, Coverage, FeatureMap, PreflightCheck, Session, StartSession } from '../agentApi';
+import {
+  AMBER, BLUE, GREEN, GREY, KIND, RED, TRIGGER, chip, fmtDur, ghost, h3, mono, ms, muted, section, statusChip,
+  td, th, when, wrapText,
+} from './agent/ui';
+import type { RestartState } from './agent/ui';
+import { Banner } from './agent/Bits';
+import EventFeed from './agent/EventFeed';
+import SessionDetail from './agent/SessionDetail';
+import StartPanel from './agent/StartPanel';
+import SettingsCard from './agent/SettingsCard';
+import { CoverageSection, FeatureMapSection } from './agent/FeatureMap';
 
-/** AI Agent — the autonomous test agent.
+/** AI Agent — Claude Code sessions.
  *
- *  One place to see what the agent did overnight (every flow, what failed, what
- *  it retried, diagnosed, fixed or proposed), to review what needs a person
- *  (scenario proposals, app patches), and to configure the schedule. */
+ *  Start a session (run & heal, fix a run, analyze the apps, create scenarios),
+ *  follow it live, and review what it changed: every change sits on its own branch
+ *  until a person approves and merges it. */
 
-const STATUS: Record<string, { label: string; color: string }> = {
-  passed: { label: 'Passed', color: '#34d399' },
-  passed_on_retry: { label: 'Passed on retry', color: '#a3e635' },
-  fixed: { label: 'Auto-fixed', color: '#22d3ee' },
-  app_bug: { label: 'App bug', color: '#f87171' },
-  infra: { label: 'Environment', color: '#fbbf24' },
-  failed: { label: 'Needs a person', color: '#f87171' },
-  running: { label: 'Running', color: '#60a5fa' },
-  pending: { label: 'Waiting', color: '#94a3b8' },
-  stopped: { label: 'Stopped', color: '#94a3b8' },
-  skipped: { label: 'Skipped', color: '#94a3b8' },
-};
-
-const when = (iso?: string | null) => (iso ? parseServerDate(iso).toLocaleString() : '—');
-const money = (n?: number) => `$${(n ?? 0).toFixed(2)}`;
-
-const chip = (text: string, color: string): ReactNode => (
-  <span style={{ padding: '3px 10px', borderRadius: 99, fontSize: '0.72rem', fontWeight: 600,
-                 color, background: `${color}1f`, border: `1px solid ${color}40`, whiteSpace: 'nowrap' }}>
-    {text}
-  </span>
-);
-
-const ghost: CSSProperties = {
-  background: 'transparent', border: '1px solid var(--border-highlight)', color: 'var(--text-primary)',
-  padding: '8px 14px', borderRadius: 'var(--radius-md)', cursor: 'pointer', display: 'inline-flex',
-  alignItems: 'center', gap: 6, font: 'inherit', fontSize: '0.85rem',
-};
-const input: CSSProperties = {
-  background: 'var(--bg-tertiary)', border: '1px solid var(--border-highlight)', color: 'var(--text-primary)',
-  padding: '8px 10px', borderRadius: 'var(--radius-sm)', font: 'inherit', fontSize: '0.85rem',
-};
-const section: CSSProperties = { marginTop: 24 };
-const h3: CSSProperties = { fontSize: '1.05rem', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 };
+const sleep = (t: number) => new Promise(r => setTimeout(r, t));
 
 export default function AgentPage() {
-  const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const selId = params.get('session') || '';
   const [st, setSt] = useState<AgentStatus | null>(null);
-  const [batches, setBatches] = useState<AgentBatch[]>([]);
-  const [sel, setSel] = useState<string>('');
-  const [detail, setDetail] = useState<{ batch: AgentBatch; items: AgentItem[]; actions: AgentAction[] } | null>(null);
-  const [review, setReview] = useState<AgentAction[]>([]);
-  const [fixes, setFixes] = useState<AgentAction[]>([]);
-  const [analysis, setAnalysis] = useState<AgentAction | null>(null);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [fmap, setFmap] = useState<FeatureMap | null>(null);
+  const [fmapLoaded, setFmapLoaded] = useState(false);
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [checks, setChecks] = useState<PreflightCheck[] | null>(null);
-  const [open, setOpen] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState('');
-  const [err, setErr] = useState('');
+  const [covBusy, setCovBusy] = useState(false);
+  const [err, setErr] = useState('');          // from an action the user took
+  const [loadErr, setLoadErr] = useState('');  // from background loading
   const [note, setNote] = useState('');
-  const [runId, setRunId] = useState('');
-  const [focus, setFocus] = useState('');
+  const [restart, setRestart] = useState<RestartState>({ phase: 'idle' });
+  const restarting = useRef(false);
 
   const load = useCallback(async () => {
+    if (restarting.current) return;   // the backend is down on purpose
     try {
-      const [s, b, r, f, m] = await Promise.all([
-        agentApi.status(), agentApi.batches(),
-        agentApi.actions('scenario_proposal,app_fix', 'proposed'),
-        agentApi.actions('test_fix', 'applied,verified'),
-        agentApi.analysis(),
-      ]);
+      const [s, l] = await Promise.all([agentApi.status(), agentApi.sessions(30)]);
       setSt(s);
-      setBatches(b.batches);
-      setReview(r.actions);
-      setFixes(f.actions);
-      setAnalysis(m.analysis);
-      if (!coverage) agentApi.inventory().then(setCoverage).catch(() => {});
-      const pick = sel || s.batch_id || b.batches[0]?.id || '';
-      if (pick) {
-        setSel(pick);
-        setDetail(await agentApi.batch(pick));
-      }
-      setErr('');
+      setSessions(l.sessions);
+      setLoadErr('');
     } catch (e) {
-      setErr((e as Error).message);
+      setLoadErr((e as Error).message);
     }
-  }, [sel, coverage]);
+  }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const loadFmap = useCallback(async () => {
+    try {
+      setFmap((await agentApi.featureMap()).feature_map);
+    } catch (e) {
+      setLoadErr((e as Error).message);
+    } finally {
+      setFmapLoaded(true);
+    }
+  }, []);
+
+  const loadCoverage = useCallback(async () => {
+    setCovBusy(true);
+    try {
+      setCoverage(await agentApi.inventory());
+    } catch (e) {
+      setLoadErr(`Coverage: ${(e as Error).message}`);
+      setCoverage(c => c ?? {});
+    } finally {
+      setCovBusy(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); loadFmap(); loadCoverage(); }, [load, loadFmap, loadCoverage]);
+
+  // Poll the status: every 5 s while a session works, every 30 s otherwise.
+  const activeId = st?.active?.id ?? '';
   useEffect(() => {
-    if (!st?.running) return;
-    const t = setInterval(load, 5000);
+    const t = setInterval(load, activeId ? 5000 : 30000);
     return () => clearInterval(t);
-  }, [st?.running, load]);
+  }, [activeId, load]);
+
+  // A session just ended: it may have written a new feature map.
+  const prevActive = useRef('');
+  useEffect(() => {
+    if (prevActive.current && prevActive.current !== activeId) loadFmap();
+    prevActive.current = activeId;
+  }, [activeId, loadFmap]);
+
+  const select = useCallback((id: string) => {
+    setParams(id ? { session: id } : {});
+  }, [setParams]);
 
   const act = async (label: string, fn: () => Promise<unknown>, done?: string) => {
     setBusy(label);
     setErr('');
+    setNote('');
     try {
       await fn();
       if (done) setNote(done);
@@ -116,495 +111,207 @@ export default function AgentPage() {
     }
   };
 
-  const itemActions = useMemo(() => {
-    const by: Record<string, AgentAction[]> = {};
-    for (const a of detail?.actions ?? []) if (a.item_id) (by[a.item_id] ||= []).push(a);
-    return by;
-  }, [detail]);
+  const start = (label: string, body: StartSession) => act(label, async () => {
+    const r = await agentApi.start(body);
+    select(r.id);
+  }, `${KIND[body.kind] ?? body.kind} started — follow it below.`);
 
-  const ready = st?.secrets;
-  const running = !!st?.running;
+  // Approved changes load when the backend restarts. It is down for a few seconds:
+  // wait until it has gone away and answers again.
+  const restartBackend = async () => {
+    setRestart({ phase: 'restarting' });
+    try {
+      await agentApi.restartBackend();
+    } catch (e) {
+      setRestart({ phase: 'idle', error: (e as Error).message });
+      return;
+    }
+    restarting.current = true;
+    const t0 = Date.now();
+    let wentDown = false;
+    let back = false;
+    while (Date.now() - t0 < 120_000) {
+      await sleep(1500);
+      try {
+        await agentApi.status();
+        if (wentDown || Date.now() - t0 > 20_000) { back = true; break; }
+      } catch {
+        wentDown = true;
+      }
+    }
+    restarting.current = false;
+    if (back) {
+      setRestart({ phase: 'done' });
+      load();
+    } else {
+      setRestart({ phase: 'idle', error: 'The backend did not come back after 2 minutes — check ./status.sh on the test Mac.' });
+    }
+  };
+
+  const selRow = sessions.find(s => s.id === selId);
+  const live = selRow && isActiveStatus(selRow.status) ? selRow : st?.active ?? null;
+  const waiting = sessions.filter(s => s.status === 'review');
+  const claude = st?.claude;
+  const settings = st?.settings;
 
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in" style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}>
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <h1 className="page-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <Bot size={34} color="var(--accent-primary)" /> AI Agent
           </h1>
           <p className="page-subtitle">
-            Runs every flow unattended, sorts each failure, retries what is flaky, asks Claude to diagnose the rest,
-            applies test fixes only after a re-run proves them, and sends a morning report.
+            Claude Code analyzes the Vyapy apps, writes new scenarios and fixes the automation when a flow fails.
+            Every change waits for your approval.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-          {running ? (
-            <button className="btn" style={{ background: 'var(--danger)', boxShadow: 'none' }}
-                    disabled={!!busy} onClick={() => act('stop', agentApi.stop, 'Stopping after the current step…')}>
-              <Square size={16} /> Stop
-            </button>
-          ) : (
-            <button className="btn" disabled={!!busy} onClick={() => act('run', () => agentApi.run(), 'Batch started.')}>
-              {busy === 'run' ? <Loader2 size={16} className="spin" /> : <Play size={16} />} Run all flows now
-            </button>
-          )}
-          <button style={ghost} onClick={load}><RefreshCw size={14} /> Refresh</button>
+          <button style={ghost} onClick={() => { load(); loadFmap(); }}><RefreshCw size={14} /> Refresh</button>
         </div>
       </div>
-
-      {err && <Banner color="#f87171" icon={<XCircle size={16} />}>{err}</Banner>}
-      {note && !err && <Banner color="#34d399" icon={<CheckCircle2 size={16} />}>{note}</Banner>}
 
       {/* ── status ── */}
-      <div className="card" style={{ padding: 20 }}>
-        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 260 }}>
-            {running ? <Loader2 size={18} className="spin" color="#60a5fa" /> : <Clock size={18} color="var(--text-secondary)" />}
-            <div>
-              <div style={{ fontWeight: 600 }}>{running ? 'Working' : 'Idle'}</div>
-              <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                {running ? (st?.phase || st?.busy || 'starting…')
-                  : st?.settings.enabled ? `Next nightly run: ${st.next_run ? new Date(st.next_run).toLocaleString() : '—'}`
-                  : 'Nightly schedule is off'}
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {chip(ready?.anthropic ? 'Claude: ready' : 'Claude: no API key', ready?.anthropic ? '#34d399' : '#fbbf24')}
-            {chip(ready?.smtp ? 'Email: ready' : 'Email: not set up', ready?.smtp ? '#34d399' : '#94a3b8')}
-            {chip(ready?.slack ? 'Slack: ready' : 'Slack: not set up', ready?.slack ? '#34d399' : '#94a3b8')}
-            {chip(ready?.github ? 'GitHub: ready' : 'GitHub: no token', ready?.github ? '#34d399' : '#94a3b8')}
-          </div>
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button style={ghost} disabled={!!busy}
-                    onClick={() => act('pre', async () => setChecks((await agentApi.preflight(st?.settings.env || 'staging')).checks))}>
-              {busy === 'pre' ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />} Check the rig
-            </button>
-            {checks?.map(c => <span key={c.name}>{chip(`${c.name}: ${c.detail}`, c.ok ? '#34d399' : '#f87171')}</span>)}
-          </div>
-        </div>
-        {!ready?.anthropic && (
-          <p style={{ marginTop: 12, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-            Without <code>ANTHROPIC_API_KEY</code> in <code>.env</code> the agent still runs, retries and reports — it just
-            cannot diagnose or fix. Add the key and restart the backend (<code>./stop.sh && ./start.sh</code>).
-          </p>
-        )}
-      </div>
-
-      {/* ── review queue ── */}
-      {review.length > 0 && (
-        <div style={section}>
-          <h3 style={h3}><AlertTriangle size={18} color="#fbbf24" /> Needs your review ({review.length})</h3>
-          <div style={{ display: 'grid', gap: 12 }}>
-            {review.map(a => <ReviewCard key={a.id} a={a} busy={busy}
-              onApprove={() => act(a.id, () => agentApi.approve(a.id),
-                a.kind === 'app_fix' ? 'Draft PR opened.' : 'Scenario added — it runs in the next batch.')}
-              onApproveTest={running ? undefined : () => act(a.id, () => agentApi.approveTest(a.id),
-                'Scenario added and running now — watch it in the Batch list.')}
-              onReject={() => act(a.id, () => agentApi.reject(a.id), 'Rejected.')} />)}
-          </div>
-        </div>
-      )}
-
-      {/* ── batch ── */}
-      <div style={section}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-          <h3 style={{ ...h3, marginBottom: 0 }}><Play size={18} /> Batch</h3>
-          <select style={input} value={sel} onChange={e => setSel(e.target.value)}>
-            {batches.length === 0 && <option value="">No batches yet</option>}
-            {batches.map(b => (
-              <option key={b.id} value={b.id}>
-                {when(b.started_at)} · {b.trigger} · {b.env} · {b.status}
-              </option>
-            ))}
-          </select>
-          {detail && (
-            <>
-              <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                Claude spend {money(detail.batch.spend_usd)} · {detail.items.length} flows
-              </span>
-              <button style={ghost} disabled={!!busy || detail.batch.status === 'running'}
-                      onClick={() => act('mail', () => agentApi.resendReport(detail.batch.id), 'Report sent.')}>
-                <Mail size={14} /> Send report
-              </button>
-            </>
+      <div className="card" style={{ padding: 20, transform: 'none' }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          {!claude ? chip('Checking Claude Code…', GREY)
+            : !claude.installed ? chip('Claude Code is not installed on the test Mac', RED)
+            : !claude.logged_in
+              ? chip(<>Claude Code not logged in — run <code>claude</code> in a terminal on the test Mac</>, RED, true)
+              : chip(['Claude Code logged in', claude.plan, claude.version && `v${claude.version}`].filter(Boolean).join(' · '), GREEN)}
+          {settings && st && (
+            settings.nightly_enabled && st.schedule?.installed
+              ? chip(`Nightly at ${st.schedule.time || settings.nightly_time}`, GREEN)
+              : settings.nightly_enabled
+                ? chip(`Nightly on, but not scheduled${st.schedule?.error ? ` — ${st.schedule.error}` : ''}`, AMBER, true)
+                : chip('Nightly off', GREY)
           )}
-        </div>
-        {detail && (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-            {Object.entries(detail.items.reduce<Record<string, number>>((m, i) => ({ ...m, [i.status]: (m[i.status] || 0) + 1 }), {}))
-              .map(([k, v]) => <span key={k}>{chip(`${STATUS[k]?.label ?? k}: ${v}`, STATUS[k]?.color ?? '#94a3b8')}</span>)}
-          </div>
-        )}
-        <div style={{ display: 'grid', gap: 8 }}>
-          {detail?.items.map(it => {
-            const s = STATUS[it.status] ?? { label: it.status, color: '#94a3b8' };
-            const isOpen = !!open[it.id];
-            const acts = itemActions[it.id] ?? [];
-            return (
-              <div key={it.id} className="card" style={{ padding: 0, transform: 'none' }}>
-                <div onClick={() => setOpen(o => ({ ...o, [it.id]: !isOpen }))}
-                     style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px', cursor: 'pointer' }}>
-                  {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600 }}>{it.flow_name}</div>
-                    {it.root_cause && it.status !== 'passed' && (
-                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', overflow: 'hidden',
-                                    textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.root_cause}</div>
-                    )}
-                  </div>
-                  {it.category && it.status !== 'passed' && chip(it.category, '#a78bfa')}
-                  {it.attempts > 1 && chip(`${it.attempts} attempts`, '#94a3b8')}
-                  {it.status === 'running' && <Loader2 size={14} className="spin" color="#60a5fa" />}
-                  {chip(s.label, s.color)}
-                </div>
-                {isOpen && (
-                  <div style={{ borderTop: '1px solid var(--border-color)', padding: '14px 18px 18px 46px', fontSize: '0.88rem' }}>
-                    <div style={{ display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
-                      {it.run_id && <button style={ghost} onClick={() => navigate(`/run/${it.run_id}`)}>First run</button>}
-                      {it.final_run_id && it.final_run_id !== it.run_id &&
-                        <button style={ghost} onClick={() => navigate(`/run/${it.final_run_id}`)}>Last run</button>}
-                    </div>
-                    {it.verdict?.root_cause && (
-                      <div style={{ marginBottom: 10 }}>
-                        <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                          Claude: {it.verdict.category} · confidence {it.verdict.confidence} · {it.verdict.recommended_action}
-                        </div>
-                        <div>{it.verdict.root_cause}</div>
-                        {!!it.verdict.evidence?.length && (
-                          <ul style={{ margin: '6px 0 0 18px', color: 'var(--text-secondary)' }}>
-                            {it.verdict.evidence.map((e, i) => <li key={i}>{e}</li>)}
-                          </ul>
-                        )}
-                      </div>
-                    )}
-                    {acts.length > 0 && (
-                      <div style={{ display: 'grid', gap: 6 }}>
-                        {acts.map(a => (
-                          <div key={a.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                            {chip(a.kind, '#818cf8')} {chip(a.status, a.status === 'verified' || a.status === 'done' ? '#34d399'
-                              : a.status === 'failed' || a.status === 'rolled_back' || a.status === 'rejected' ? '#f87171' : '#fbbf24')}
-                            <span>{a.title}</span>
-                            {a.cost_usd > 0 && <span style={{ color: 'var(--text-muted)' }}>{money(a.cost_usd)}</span>}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-          {detail && detail.items.length === 0 && <p style={{ color: 'var(--text-secondary)' }}>No flows in this batch.</p>}
-        </div>
-      </div>
-
-      {/* ── applied test fixes ── */}
-      {fixes.length > 0 && (
-        <div style={section}>
-          <h3 style={h3}><Wrench size={18} /> Test fixes the agent applied</h3>
-          <div style={{ display: 'grid', gap: 8 }}>
-            {fixes.map(a => (
-              <div key={a.id} className="card" style={{ padding: '12px 18px', display: 'flex', gap: 12, alignItems: 'center', transform: 'none' }}>
-                {chip(a.status === 'verified' ? 'verified by re-run' : a.status, a.status === 'verified' ? '#34d399' : '#fbbf24')}
-                <span style={{ flex: 1 }}>{String(a.detail.flow_id ?? '')} — {a.title}</span>
-                <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>{when(a.created_at)}</span>
-                <button style={ghost} disabled={!!busy}
-                        onClick={() => act(a.id, () => agentApi.rollback(a.id), 'Fix rolled back — the flow is as before.')}>
-                  <Undo2 size={14} /> Roll back
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── on demand ── */}
-      <div style={section}>
-        <h3 style={h3}><Sparkles size={18} /> Ask the agent</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
-          <div className="card" style={{ padding: 20, transform: 'none' }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Diagnose a failed run</div>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: 10 }}>
-              Paste a failed cross-app run id. Claude finds the cause and, if allowed, fixes and re-verifies it.
-            </p>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input style={{ ...input, flex: 1 }} placeholder="run id" value={runId} onChange={e => setRunId(e.target.value.trim())} />
-              <button className="btn" style={{ padding: '8px 14px' }} disabled={!runId || !!busy || running}
-                      onClick={() => act('analyze', () => agentApi.analyze(runId), 'Diagnosis started — follow it in the batch list.')}>
-                Diagnose
-              </button>
-            </div>
-          </div>
-          <div className="card" style={{ padding: 20, transform: 'none' }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Analyze the application</div>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: 10 }}>
-              Claude studies both apps' code and every screen, rates which features the tests cover, and writes
-              new scenarios for the gaps. They run only after you approve them.
-            </p>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input style={{ ...input, flex: 1 }} placeholder="focus (optional), e.g. refunds, inventory"
-                     value={focus} onChange={e => setFocus(e.target.value)} />
-              <button className="btn" style={{ padding: '8px 14px' }} disabled={!!busy || running || !st?.claude_ready}
-                      title={st?.claude_ready ? '' : 'Needs ANTHROPIC_API_KEY in .env'}
-                      onClick={() => act('gen', () => agentApi.generate(focus),
-                        'Analysis started — features and new scenarios appear here when Claude finishes (a few minutes).')}>
-                {busy === 'gen' ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} Analyze
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <CoverageSection coverage={coverage} analysis={analysis}
-        onRefresh={() => act('inv', async () => setCoverage(await agentApi.inventory()))} busy={busy} />
-
-      {st && <SettingsCard s={st.settings} busy={busy}
-        onSave={(ch) => act('settings', () => agentApi.saveSettings(ch), 'Settings saved.')} />}
-    </div>
-  );
-}
-
-function Banner({ color, icon, children }: { color: string; icon: ReactNode; children: ReactNode }) {
-  return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '10px 14px', marginBottom: 16,
-                  borderRadius: 'var(--radius-md)', color, background: `${color}14`, border: `1px solid ${color}33` }}>
-      {icon}<span>{children}</span>
-    </div>
-  );
-}
-
-function ReviewCard({ a, busy, onApprove, onApproveTest, onReject }: {
-  a: AgentAction; busy: string; onApprove: () => void; onApproveTest?: () => void; onReject: () => void;
-}) {
-  const [show, setShow] = useState(false);
-  const isPatch = a.kind === 'app_fix';
-  const flow = a.detail.flow as { description?: string; rationale?: string;
-    segments?: { name: string; role: string; steps: string[] }[] } | undefined;
-  return (
-    <div className="card" style={{ padding: 18, transform: 'none' }}>
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        {chip(isPatch ? 'App patch' : 'New scenario', isPatch ? '#f87171' : '#22d3ee')}
-        <span style={{ fontWeight: 600, flex: 1 }}>{a.title}
-          {typeof a.detail.feature === 'string' && a.detail.feature &&
-            <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}> · {a.detail.feature}</span>}</span>
-        <button style={ghost} onClick={() => setShow(s => !s)}>{show ? 'Hide' : 'Details'}</button>
-        <button className="btn" style={{ padding: '8px 14px' }} disabled={!!busy} onClick={onApprove}>
-          {busy === a.id ? <Loader2 size={14} className="spin" /> : isPatch ? <GitPullRequest size={14} /> : <CheckCircle2 size={14} />}
-          {isPatch ? 'Open draft PR' : 'Approve'}
-        </button>
-        {!isPatch && onApproveTest && (
-          <button style={ghost} disabled={!!busy} onClick={onApproveTest}><Play size={14} /> Approve &amp; test now</button>
-        )}
-        <button style={ghost} disabled={!!busy} onClick={onReject}><XCircle size={14} /> Reject</button>
-      </div>
-      {show && (
-        <div style={{ marginTop: 12, fontSize: '0.85rem' }}>
-          {isPatch ? (
-            <>
-              <p style={{ marginBottom: 6 }}><b>Cause:</b> {String(a.detail.root_cause ?? '')}</p>
-              <p style={{ marginBottom: 6, color: 'var(--text-secondary)' }}>
-                {String(a.detail.app ?? '')} app · {String(a.detail.check ?? '')}
-                {a.detail.pr_error ? ` · last PR attempt: ${String(a.detail.pr_error)}` : ''}
-              </p>
-              <pre style={{ background: 'var(--bg-primary)', padding: 12, borderRadius: 8, overflowX: 'auto',
-                            fontSize: '0.78rem' }}>{String(a.detail.patch ?? '')}</pre>
-            </>
-          ) : (
-            <>
-              {flow?.rationale && <p style={{ marginBottom: 8 }}><b>Why:</b> {flow.rationale}</p>}
-              {flow?.segments?.map((s, i) => (
-                <div key={i} style={{ marginBottom: 8 }}>
-                  <div style={{ fontWeight: 600 }}>{i + 1}. [{s.role}] {s.name}</div>
-                  <ol style={{ margin: '4px 0 0 22px', color: 'var(--text-secondary)' }}>
-                    {s.steps.map((x, j) => <li key={j}><code>{x}</code></li>)}
-                  </ol>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-
-function SettingsCard({ s, busy, onSave }: {
-  s: AgentSettings; busy: string; onSave: (ch: Partial<AgentSettings>) => void;
-}) {
-  const [f, setF] = useState<AgentSettings>(s);
-  const [flows, setFlows] = useState<AgentFlow[]>([]);
-  const [emails, setEmails] = useState(s.report_emails.join(', '));
-  useEffect(() => { setF(s); setEmails(s.report_emails.join(', ')); }, [s]);
-  useEffect(() => { agentApi.flows().then(r => setFlows(r.flows)).catch(() => {}); }, []);
-  const set = <K extends keyof AgentSettings>(k: K, v: AgentSettings[K]) => setF(x => ({ ...x, [k]: v }));
-  const row: CSSProperties = { display: 'flex', alignItems: 'center', gap: 10, minHeight: 36 };
-  const label: CSSProperties = { width: 210, color: 'var(--text-secondary)', fontSize: '0.88rem', flexShrink: 0 };
-  const box = (k: 'enabled' | 'include_demos' | 'triage' | 'autofix_tests' | 'report_slack' | 'generator_enabled', text: string) => (
-    <label style={row}><input type="checkbox" checked={f[k]} onChange={e => set(k, e.target.checked)} /> {text}</label>
-  );
-  const chosen = new Set(f.flows);
-  return (
-    <div style={section}>
-      <h3 style={h3}><Wrench size={18} /> Settings</h3>
-      <div className="card" style={{ padding: 22, transform: 'none', display: 'grid', gap: 10 }}>
-        {box('enabled', 'Run every night')}
-        <div style={row}><span style={label}>Nightly start time</span>
-          <input type="time" style={input} value={f.nightly_time} onChange={e => set('nightly_time', e.target.value)} /></div>
-        <div style={row}><span style={label}>Environment</span>
-          <select style={input} value={f.env} onChange={e => set('env', e.target.value)}>
-            <option value="staging">Staging</option><option value="prod">Old Vya (prod)</option></select></div>
-        <div style={{ ...row, alignItems: 'flex-start' }}><span style={label}>Flows (none ticked = all except demos)</span>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {flows.map(fl => (
-              <label key={fl.id} style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: '0.82rem',
-                                          padding: '4px 10px', borderRadius: 99, border: '1px solid var(--border-highlight)' }}>
-                <input type="checkbox" checked={chosen.has(fl.id)}
-                       onChange={e => set('flows', e.target.checked ? [...f.flows, fl.id] : f.flows.filter(x => x !== fl.id))} />
-                {fl.name}{fl.agent ? ' ✦' : ''}
-              </label>
-            ))}
-          </div></div>
-        {box('include_demos', 'Include the quick demo flows when none are ticked')}
-        {box('triage', 'Ask Claude to diagnose failures')}
-        {box('autofix_tests', 'Apply test fixes (kept only if a re-run passes)')}
-        <div style={row}><span style={label}>App fixes</span>
-          <select style={input} value={f.app_fix_mode} onChange={e => set('app_fix_mode', e.target.value as AgentSettings['app_fix_mode'])}>
-            <option value="off">Off</option>
-            <option value="propose">Propose a patch for review</option>
-            <option value="pr">Open a draft PR automatically</option>
-          </select></div>
-        <div style={row}><span style={label}>Claude budget per batch (USD)</span>
-          <input type="number" min={0} step={1} style={{ ...input, width: 100 }} value={f.budget_usd}
-                 onChange={e => set('budget_usd', Number(e.target.value))} /></div>
-        <div style={row}><span style={label}>Fix attempts per failure</span>
-          <input type="number" min={1} max={5} style={{ ...input, width: 100 }} value={f.max_fix_attempts}
-                 onChange={e => set('max_fix_attempts', Number(e.target.value))} /></div>
-        <div style={row}><span style={label}>Wait for staging (minutes)</span>
-          <input type="number" min={0} max={120} style={{ ...input, width: 100 }} value={f.infra_wait_minutes}
-                 onChange={e => set('infra_wait_minutes', Number(e.target.value))} /></div>
-        <div style={row}><span style={label}>Report emails</span>
-          <input style={{ ...input, flex: 1 }} placeholder="qa@company.com, dev@company.com" value={emails}
-                 onChange={e => setEmails(e.target.value)} /></div>
-        {box('report_slack', 'Also post the report to Slack')}
-        {box('generator_enabled', 'Propose new scenarios every week')}
-        <div style={row}><span style={label}>Scenario day</span>
-          <select style={input} value={f.generator_day} onChange={e => set('generator_day', e.target.value)}>
-            {DAYS.map(d => <option key={d} value={d}>{d}</option>)}</select></div>
-        <div style={row}><span style={label}>Model</span><code>{f.model}</code></div>
-        <div>
-          <button className="btn" disabled={!!busy}
-                  onClick={() => onSave({ ...f, report_emails: emails.split(',').map(x => x.trim()).filter(Boolean) })}>
-            {busy === 'settings' ? <Loader2 size={16} className="spin" /> : <CheckCircle2 size={16} />} Save settings
+          {live && chip('Working', BLUE)}
+          <button style={{ ...ghost, marginLeft: 'auto' }} disabled={busy === 'pre'}
+                  onClick={() => act('pre', async () => setChecks((await agentApi.preflight(settings?.env || 'staging')).checks))}>
+            {busy === 'pre' ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />} Preflight check
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-const COV: Record<string, string> = { covered: '#34d399', partial: '#fbbf24', missing: '#f87171' };
-const RISK: Record<string, string> = { high: '#f87171', medium: '#fbbf24', low: '#94a3b8' };
-
-function Bar({ value, total }: { value: number; total: number }) {
-  const pct = total ? Math.round((value / total) * 100) : 0;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-      <div style={{ flex: 1, height: 8, borderRadius: 99, background: 'var(--bg-tertiary)', overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: pct >= 70 ? '#34d399' : pct >= 40 ? '#fbbf24' : '#f87171' }} />
-      </div>
-      <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', minWidth: 90 }}>{value}/{total} ({pct}%)</span>
-    </div>
-  );
-}
-
-function CoverageSection({ coverage, analysis, onRefresh, busy }: {
-  coverage: Coverage | null; analysis: AgentAction | null; onRefresh: () => void; busy: string;
-}) {
-  const [showApp, setShowApp] = useState<string>('');
-  const features = (analysis?.detail.features as Feature[] | undefined) ?? [];
-  const summary = typeof analysis?.detail.summary === 'string' ? analysis.detail.summary : '';
-  const order = { missing: 0, partial: 1, covered: 2 } as Record<string, number>;
-  const riskOrder = { high: 0, medium: 1, low: 2 } as Record<string, number>;
-  const sorted = [...features].sort((a, b) =>
-    (order[a.coverage] - order[b.coverage]) || (riskOrder[a.risk] - riskOrder[b.risk]));
-  return (
-    <div style={section}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-        <h3 style={{ ...h3, marginBottom: 0 }}><ShieldCheck size={18} /> Application coverage</h3>
-        <button style={ghost} disabled={!!busy} onClick={onRefresh}>
-          {busy === 'inv' ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />} Recompute
-        </button>
-      </div>
-      <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: 12 }}>
-        Every screen found in the apps' navigation, and whether any test drives one of its own element ids.
-        Computed from the source — no AI.
-      </p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
-        {coverage ? Object.entries(coverage).map(([app, a]) => (
-          <div key={app} className="card" style={{ padding: 20, transform: 'none' }}>
-            <div style={{ fontWeight: 600, marginBottom: 10, textTransform: 'capitalize' }}>{app} app</div>
-            <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>Screens tested</div>
-            <Bar value={a.screens_covered} total={a.screens} />
-            <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginTop: 8 }}>Element ids used by tests</div>
-            <Bar value={a.ids_covered} total={a.ids} />
-            <button style={{ ...ghost, marginTop: 12 }} onClick={() => setShowApp(showApp === app ? '' : app)}>
-              {showApp === app ? <ChevronDown size={14} /> : <ChevronRight size={14} />} Screens
-            </button>
-            {showApp === app && (
-              <div style={{ marginTop: 10, display: 'grid', gap: 4, fontSize: '0.82rem' }}>
-                {[...a.routes].sort((x, y) => Number(x.covered) - Number(y.covered)).map((r, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-                    {chip(r.covered ? 'tested' : 'untested', r.covered ? '#34d399' : '#f87171')}
-                    <span style={{ fontWeight: 600 }}>{r.route}</span>
-                    <span style={{ color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {r.file ?? ''} · {r.ids} ids{r.covered_ids.length ? ` · uses ${r.covered_ids.slice(0, 3).join(', ')}` : ''}
-                    </span>
-                  </div>
-                ))}
+        {checks && (
+          <div style={{ display: 'grid', gap: 4, marginTop: 14, fontSize: '0.85rem' }}>
+            {checks.map(c => (
+              <div key={c.name} style={{ display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 }}>
+                {c.ok ? <CheckCircle2 size={14} color={GREEN} style={{ alignSelf: 'center' }} />
+                  : <XCircle size={14} color={RED} style={{ alignSelf: 'center' }} />}
+                <span style={{ fontWeight: 600, flexShrink: 0 }}>{c.name}</span>
+                <span style={{ color: 'var(--text-secondary)', ...wrapText }}>{c.detail}</span>
               </div>
-            )}
+            ))}
           </div>
-        )) : <div className="card" style={{ padding: 20 }}><Loader2 size={16} className="spin" /> Mapping the apps…</div>}
+        )}
       </div>
 
-      {analysis && (
-        <div className="card" style={{ padding: 20, marginTop: 16, transform: 'none' }}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap', marginBottom: 10 }}>
-            <span style={{ fontWeight: 600 }}>Feature coverage — Claude's analysis</span>
-            <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-              {when(analysis.created_at)} · {money(analysis.cost_usd)}{analysis.status === 'failed' ? ` · did not finish (${String(analysis.detail.error || analysis.detail.stop || '')})` : ''}
-            </span>
-            {features.length > 0 && (['missing', 'partial', 'covered'] as const).map(c =>
-              <span key={c}>{chip(`${c}: ${features.filter(f => f.coverage === c).length}`, COV[c])}</span>)}
-          </div>
-          {sorted.length > 0 && (
-            <div style={{ display: 'grid', gap: 6, fontSize: '0.85rem' }}>
-              {sorted.map((f, i) => (
-                <div key={i} style={{ display: 'grid', gridTemplateColumns: '90px 70px 1fr', gap: 10, alignItems: 'baseline',
-                                      padding: '6px 0', borderTop: i ? '1px solid var(--border-color)' : 'none' }}>
-                  {chip(f.coverage, COV[f.coverage] ?? '#94a3b8')}
-                  {chip(`${f.risk} risk`, RISK[f.risk] ?? '#94a3b8')}
-                  <div>
-                    <b>{f.name}</b> <span style={{ color: 'var(--text-muted)' }}>({f.app}{f.screens.length ? ` · ${f.screens.join(', ')}` : ''})</span>
-                    {f.covered_by.length > 0 && <span style={{ color: 'var(--text-secondary)' }}> — covered by {f.covered_by.join(', ')}</span>}
-                    {f.notes && <div style={{ color: 'var(--text-secondary)' }}>{f.notes}</div>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          {summary && (
-            <details style={{ marginTop: 12 }}>
-              <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>How the agent understands the app</summary>
-              <pre style={{ whiteSpace: 'pre-wrap', marginTop: 8, fontFamily: 'inherit', fontSize: '0.85rem',
-                            color: 'var(--text-secondary)' }}>{summary}</pre>
-            </details>
-          )}
+      <div style={{ marginTop: 16 }}>
+        {err && <Banner color={RED} icon={<XCircle size={16} />}>{err}</Banner>}
+        {loadErr && !err && <Banner color={RED} icon={<AlertTriangle size={16} />}>{loadErr}</Banner>}
+        {note && !err && <Banner color={GREEN} icon={<CheckCircle2 size={16} />}>{note}</Banner>}
+        {waiting.length > 0 && !(waiting.length === 1 && waiting[0].id === selId) && (
+          <Banner color={AMBER} icon={<AlertTriangle size={16} />}>
+            {waiting.length === 1 ? 'A session is' : `${waiting.length} sessions are`} waiting for your approval.{' '}
+            <button onClick={() => select(waiting[0].id)}
+                    style={{ background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer',
+                             font: 'inherit', textDecoration: 'underline', fontWeight: 600 }}>
+              Review {waiting.length > 1 ? 'the latest' : 'it'}
+            </button>
+          </Banner>
+        )}
+      </div>
+
+      <StartPanel disabled={!!st?.active} busy={busy} defaultMaxNew={settings?.max_new_scenarios ?? 3} onStart={start} />
+
+      {/* ── live ── */}
+      {live && (
+        <div style={section}>
+          <h3 style={h3}><Loader2 size={18} className="spin" color={BLUE} /> Working now</h3>
+          <ActivePanel s={live} busy={busy} selected={live.id === selId} onOpen={() => select(live.id)}
+                       onStop={() => act('stop', () => agentApi.stop(live.id),
+                         'Stopping — Claude Code finishes its current step first.')} />
         </div>
       )}
+
+      {/* ── sessions ── */}
+      <div style={section}>
+        <h3 style={h3}><History size={18} /> Sessions</h3>
+        <div className="card" style={{ padding: 0, transform: 'none', overflowX: 'auto', maxWidth: '100%' }}>
+          {sessions.length === 0 ? (
+            <p style={{ ...muted, padding: 20 }}>{st ? 'No sessions yet — start one above.' : 'Loading…'}</p>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead><tr>
+                <th style={th}>Started</th><th style={th}>Kind</th><th style={th}>Trigger</th>
+                <th style={th}>Status</th><th style={th}>Duration</th><th style={th}>Branch</th>
+              </tr></thead>
+              <tbody>
+                {sessions.map(s => {
+                  const on = s.id === selId;
+                  const began = ms(s.started_at || s.created_at);
+                  const end = s.finished_at ? ms(s.finished_at) : isActiveStatus(s.status) ? Date.now() : NaN;
+                  return (
+                    <tr key={s.id} onClick={() => select(on ? '' : s.id)}
+                        style={{ cursor: 'pointer', background: on ? 'rgba(129,140,248,0.10)' : 'transparent' }}>
+                      <td style={{ ...td, whiteSpace: 'nowrap', borderLeft: `3px solid ${on ? 'var(--accent-primary)' : 'transparent'}` }}>
+                        {when(s.started_at || s.created_at)}
+                      </td>
+                      <td style={{ ...td, fontWeight: 600 }}>{KIND[s.kind] ?? s.kind}</td>
+                      <td style={td}>{TRIGGER[s.trigger] ?? s.trigger}</td>
+                      <td style={td}>{statusChip(s.status)}</td>
+                      <td style={{ ...td, whiteSpace: 'nowrap' }}>{fmtDur(end - began)}</td>
+                      <td style={{ ...td, ...mono, color: 'var(--text-secondary)', maxWidth: 280 }}>{s.branch || '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {selId && <SessionDetail key={selId} id={selId} onChanged={load} restart={restart} onRestart={restartBackend} />}
+
+      <FeatureMapSection fmap={fmap} loaded={fmapLoaded} canStart={!st?.active} starting={busy === 'fmap'}
+                         onOpenSession={select}
+                         onCreate={features => start('fmap', { kind: 'generate', features })} />
+
+      <CoverageSection coverage={coverage} onRefresh={loadCoverage} busy={covBusy} />
+
+      {st && <SettingsCard s={st.settings} schedule={st.schedule} secrets={st.secrets} onSaved={load} />}
+    </div>
+  );
+}
+
+/** The session that is working right now: what, how long, and its live steps. */
+function ActivePanel({ s, busy, selected, onOpen, onStop }: {
+  s: Session; busy: string; selected: boolean; onOpen: () => void; onStop: () => void;
+}) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const began = ms(s.started_at || s.created_at);
+  return (
+    <div className="card" style={{ padding: 20, transform: 'none', borderColor: `${BLUE}55`, minWidth: 0, maxWidth: '100%' }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+        <span style={{ fontWeight: 600 }}>{KIND[s.kind] ?? s.kind}</span>
+        {statusChip(s.status)}
+        <span style={muted}>{TRIGGER[s.trigger] ?? s.trigger}</span>
+        {s.phase && <span style={{ ...muted, ...wrapText }}>· {s.phase}</span>}
+        <span style={{ ...muted, fontVariantNumeric: 'tabular-nums' }}>· {fmtDur(Date.now() - began)}</span>
+        {s.stop_requested && chip('Stopping…', AMBER)}
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          {!selected && <button style={ghost} onClick={onOpen}>Open</button>}
+          <button className="btn" style={{ background: 'var(--danger)', boxShadow: 'none', padding: '8px 14px' }}
+                  disabled={!!busy || s.stop_requested} onClick={onStop}>
+            {busy === 'stop' ? <Loader2 size={14} className="spin" /> : <Square size={14} />} Stop
+          </button>
+        </span>
+      </div>
+      <EventFeed key={s.id} sessionId={s.id} live />
     </div>
   );
 }
