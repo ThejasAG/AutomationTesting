@@ -129,3 +129,35 @@ def test_coverage_counts_only_ids_the_automation_drives(monkeypatch):
     a = inventory.build()["apps"]["consumer"]
     assert [r["covered"] for r in a["routes"]] == [True, False]
     assert (a["screens_covered"], a["ids_covered"], a["ids"]) == (1, 1, 3)
+
+
+def test_the_registered_project_checkout_wins_over_a_stale_clone(tmp_path, monkeypatch):
+    """MEASURED 2026-10-22: two vya-business clones under repos/; the first by name was
+    a March `main` copy, not the preprod checkout Metro serves to the simulators."""
+    import subprocess as sp
+    from automation.agentic import sources
+
+    def clone(name, when):
+        p = tmp_path / name
+        (p / "App").mkdir(parents=True)
+        sp.run(["git", "init", "-q", str(p)], check=True)
+        sp.run(["git", "-C", str(p), "remote", "add", "origin", "https://x/vya-business.git"], check=True)
+        (p / "App" / "a.js").write_text("x")
+        env = {**__import__("os").environ, "GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when}
+        sp.run(["git", "-C", str(p), "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], check=True)
+        sp.run(["git", "-C", str(p), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+               check=True, env=env)
+        return str(p)
+
+    old = clone("3484-old", "2026-03-25T10:00:00")
+    new = clone("b223-new", "2026-09-29T10:00:00")
+    monkeypatch.setattr(sources, "REPOS", str(tmp_path))
+    sources.app_repo.cache_clear()
+    try:
+        monkeypatch.setattr(sources, "_project_ids", lambda: set())
+        assert sources.app_repo("business") == new                 # newest commit
+        sources.app_repo.cache_clear()
+        monkeypatch.setattr(sources, "_project_ids", lambda: {"3484-old"})
+        assert sources.app_repo("business") == old                 # a registered project wins
+    finally:
+        sources.app_repo.cache_clear()

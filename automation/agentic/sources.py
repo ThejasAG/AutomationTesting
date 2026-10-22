@@ -19,11 +19,37 @@ KNOWLEDGE = os.path.join(ROOT, "automation", "knowledge")
 _REMOTE_MARK = {"consumer": "vya-consumer", "business": "vya-business"}
 
 
+def _project_ids() -> set:
+    """Checkouts the platform knows as projects: a project's checkout is repos/<its id>."""
+    try:
+        from automation.database.config import SessionLocal
+        from automation.database.models import TestProject
+        with SessionLocal() as db:
+            return {r[0] for r in db.query(TestProject.id).all()}
+    except Exception:
+        return set()
+
+
+def _head_time(path: str) -> int:
+    try:
+        out = subprocess.run(["git", "-C", path, "log", "-1", "--format=%ct"],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+        return int(out or 0)
+    except Exception:
+        return 0
+
+
 @lru_cache(maxsize=4)
 def app_repo(app: str) -> Optional[str]:
+    """The app's checkout. Several clones of one app can sit under repos/: MEASURED
+    2026-10-22 there were two vya-business clones — 34840656 on `main` (March) and
+    b2233d0c on `preprod-2-May18` (the one Metro serves to the simulators) — and the
+    first by name was the stale one, so the agent read code the app no longer runs.
+    The checkout registered as a project wins; otherwise the newest commit."""
     mark = _REMOTE_MARK.get(app)
     if not mark or not os.path.isdir(REPOS):
         return None
+    found = []
     for d in sorted(os.listdir(REPOS)):
         path = os.path.join(REPOS, d)
         if not os.path.isdir(os.path.join(path, ".git")):
@@ -34,8 +60,11 @@ def app_repo(app: str) -> Optional[str]:
         except Exception:
             continue
         if mark in url and os.path.isdir(os.path.join(path, "App")):
-            return path
-    return None
+            found.append(path)
+    if not found:
+        return None
+    projects = _project_ids()
+    return max(found, key=lambda p: (os.path.basename(p) in projects, _head_time(p)))
 
 
 def _repo_or_raise(app: str) -> str:
