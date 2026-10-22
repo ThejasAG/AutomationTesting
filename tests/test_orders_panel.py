@@ -228,3 +228,133 @@ def test_a_missing_booking_searches_both_ends_then_says_why(monkeypatch):
     assert not runner._open_from_panel("16:00", ("reserved",), "@open_reservation", notes)
     assert taps == []
     assert "trying the calendar" in notes[-1]
+
+
+# MEASURED 2026-10-17 (run 30c434a6's failure screenshot, OCR'd offline; app points):
+# card 5203's second row is '11:20- 12:20 | I16 | 11:18' and OCR reads the table
+# badge 'I16' as '116'. Taken for a ticket, it split the card: 5203 lost its window
+# and '116' got it with no status, so @open_order "read ?" and fell back to the
+# calendar on every run that seated the diner at I16.
+TABLE_I16 = [("5202", 834, 213, 40, 12), ("RESERVED", 1095, 217, 56, 8),
+             ("11:07", 1131, 246, 31, 10), ("11:15- 12:15", 832, 247, 63, 8),
+             ("5203", 834, 344, 40, 12), ("SERVE", 1118, 346, 35, 8),
+             ("11:18", 1133, 378, 31, 10), ("11:20- 12:20", 832, 379, 65, 8),
+             ("116", 958, 380, 12, 7)]
+
+
+def test_a_table_badge_read_as_digits_is_not_a_ticket(panel):
+    ok, notes, taps = panel("11:20", ("serve", "inprogress", "payment"), text=TABLE_I16)
+    assert ok and taps == [291]
+    assert "5203 SERVE" in notes[-2] and not any("reads ?" in n for n in notes)
+
+
+# MEASURED 2026-10-19 (flow2): another diner's 5230 sat at 11:25 next to this run's
+# 5229. Staging is shared and everyone's earliest slot is the same one, so status
+# alone can pick someone else's booking once theirs is served too.
+TWO_AT_1125 = [("5230", 834, 213, 40, 12), ("SERVE", 1118, 217, 35, 8),
+               ("11:25- 12:25", 832, 247, 63, 8), ("11:21", 1131, 246, 31, 10),
+               ("5229", 834, 344, 40, 12), ("SERVE", 1118, 346, 35, 8),
+               ("11:25- 12:25", 832, 379, 65, 8), ("11:20", 1133, 378, 31, 10)]
+
+
+def test_this_runs_own_ticket_wins_over_another_booking_at_the_same_slot(monkeypatch, panel):
+    monkeypatch.setattr(FlowRunner, "_booked_ticket", "5229", raising=False)
+    ok, notes, taps = panel("11:25", ("serve", "inprogress", "payment"), text=TWO_AT_1125)
+    assert ok and taps == [291]                        # 5229's card, not 5230's
+    assert any("5230 is not this run's (5229)" in n for n in notes)
+
+
+def test_without_a_known_ticket_the_first_match_is_still_opened(panel):
+    ok, notes, taps = panel("11:25", ("serve", "inprogress", "payment"), text=TWO_AT_1125)
+    assert ok and taps == [162]
+
+
+# MEASURED 2026-10-19 (Guests): another diner on the shared 'Roopa D' account had
+# 5232 RESERVED at 11:40 (1 person, 11x pre-orders) beside this run's booking, and
+# the panel opened theirs -- the first match. Each card prints when its booking last
+# changed (OrderCard: updatedAt, right of the window); this run's changed while it
+# was booking, between its BOOK NOW and the waiter segment's start.
+TWO_RESERVED_1140 = [("5232", 834, 213, 40, 12), ("RESERVED", 1095, 217, 56, 8),
+                     ("11:40- 12:40", 832, 247, 63, 8), ("11:31", 1131, 246, 31, 10),
+                     ("5233", 834, 344, 40, 12), ("RESERVED", 1095, 346, 56, 8),
+                     ("11:40- 12:40", 832, 379, 65, 8), ("11:37", 1133, 378, 31, 10)]
+
+
+def _today(hh, mm, ss=0):
+    import time as _t
+    from datetime import datetime as _dt
+    return _t.mktime(_dt.now().replace(hour=hh, minute=mm, second=ss, microsecond=0).timetuple())
+
+
+def test_the_booking_changed_while_this_run_booked_is_taken(monkeypatch, panel):
+    monkeypatch.setattr(FlowRunner, "_touched_since", _today(11, 36, 20), raising=False)
+    monkeypatch.setattr(FlowRunner, "_seg_started_at", _today(11, 38, 5), raising=False)
+    ok, notes, taps = panel("11:40", ("reserved", "confirmationpending"), text=TWO_RESERVED_1140)
+    assert ok and taps == [291]                        # 5233, not the other diner's 5232
+    assert any("took 5233" in n and "11:37" in n for n in notes)
+    assert notes[-1] == "    · booking ticket 5233"
+
+
+def test_two_bookings_changed_in_the_same_span_take_the_first_and_say_so(monkeypatch, panel):
+    monkeypatch.setattr(FlowRunner, "_touched_since", _today(11, 30), raising=False)
+    monkeypatch.setattr(FlowRunner, "_seg_started_at", _today(11, 38), raising=False)
+    ok, notes, taps = panel("11:40", ("reserved",), text=TWO_RESERVED_1140)
+    assert ok and taps == [162]
+    assert any("none is clearly this run's" in n for n in notes)
+
+
+def test_without_booking_times_the_first_match_is_taken(panel):
+    ok, notes, taps = panel("11:40", ("reserved",), text=TWO_RESERVED_1140)
+    assert ok and taps == [162]
+
+
+def test_an_unread_change_time_is_not_taken_as_someone_elses(monkeypatch, panel):
+    """OCR can miss or merge the small updatedAt. A card whose time was not read must
+    not lose to the other one by default (review 2026-10-19)."""
+    unread = [t for t in TWO_RESERVED_1140 if t[0] != "11:37"]     # 5233's time not read
+    monkeypatch.setattr(FlowRunner, "_touched_since", _today(11, 30), raising=False)
+    monkeypatch.setattr(FlowRunner, "_seg_started_at", _today(11, 38), raising=False)
+    ok, notes, taps = panel("11:40", ("reserved",), text=unread)
+    assert ok and taps == [162]
+    assert any("none is clearly this run's" in n for n in notes)
+
+
+def test_a_slow_panel_search_hands_over_to_the_calendar_in_time(monkeypatch):
+    """MEASURED 2026-10-22 (flow3, run 0aadbb00): a page took 20-30s on a busy iPad; the
+    panel searched for the whole 240s step and the calendar route never ran."""
+    import types
+    clock = {"t": 0.0}
+
+    def slow_read(udid):
+        clock["t"] += 30.0                                 # one busy page
+        return PANEL
+
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+    monkeypatch.setattr(caf._idbd, "describe_all", slow_read)
+    pages = iter(range(100))
+    monkeypatch.setattr(screen_text, "read_text",          # a different list on every page
+                        lambda udid, region=None, els=None: [(str(4700 + next(pages)), 830, 205, 40, 14),
+                                                             ("RESERVED", 1070, 208, 90, 10),
+                                                             ("09:00 10:00", 820, 240, 100, 14)])
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: None)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner.devices = {"waiter": "IPAD"}
+    notes = []
+    assert not runner._open_from_panel("12:10", ("serve",), "@open_order", notes)
+    assert clock["t"] < 200, "handed over well inside the 240s step"
+    assert "of searching — trying the calendar" in notes[-1]
+
+
+def test_a_fully_visible_queue_is_not_paged_through(monkeypatch, panel):
+    """MEASURED 2026-10-22: 'In Queue 05' with five cards, all on screen; the search
+    still paged down and back up for minutes."""
+    swipes = []
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: swipes.append(a))
+    text = [("In Queue", 1099, 37, 60, 12), ("05", 1157, 31, 18, 16)] + TABLE_I16 + [
+        ("5335", 834, 470, 40, 12), ("RESERVED", 1095, 474, 56, 8), ("11:55 12:55", 832, 504, 63, 8),
+        ("5334", 834, 600, 40, 12), ("RESERVED", 1095, 604, 56, 8), ("11:55 12:55", 832, 634, 63, 8),
+        ("5340", 834, 730, 40, 12), ("RESERVED", 1095, 734, 56, 8), ("12:15 13:15", 832, 764, 63, 8)]
+    ok, notes, taps = panel("12:10", ("serve",), text=text)
+    assert not ok and taps == []
+    assert "among the 5 listed" in notes[-1] and swipes == []

@@ -205,5 +205,88 @@ def test_a_lost_amount_is_entered_again_after_reopening_the_card(pay):
     assert ok and s.paid
     assert s.inputs == ["36.05", "36.05"], "entered once, lost, entered again"
     assert any("the profile card folded — reopened it" in n for n in notes)
-    assert any("did not stay on the payment (0 €) — entering it again" in n for n in notes)
+    assert any("the payment shows 0.00 € after Input of 36.05 € — entering it again" in n
+               for n in notes)
     assert s.log[-1] == "paymentConfirmBtn"
+
+
+# -- 2026-10-19: Confirm ACCEPTED, booking never settles (pay for all) --------------
+
+class AcceptsButNeverSettles(FoldingScreen):
+    """MEASURED 2026-10-19 on booking 5237: Confirm took the payment -- the app
+    zeroed the entered 85.80 € within ~4s (onConfirmPay on a 2xx) -- but the booking
+    stayed PAYMENT and Close Table never came."""
+
+    def __init__(self):
+        super().__init__()
+        self.lose_first = False
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if e["AXLabel"] == "paymentConfirmBtn":
+            self.log.append("paymentConfirmBtn")
+            self.applied = 0.0
+            return True, "idb"
+        return super().tap_el(udid, e, els, scroll)
+
+
+def _fake_clock(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+
+
+def test_a_confirm_that_clears_the_amount_is_accepted_and_remembered(monkeypatch):
+    _fake_clock(monkeypatch)
+    s = AcceptsButNeverSettles()
+    for fn in ("describe_all", "tap_el", "tap"):
+        monkeypatch.setattr(caf._idbd, fn, getattr(s, fn))
+    runner = FlowRunner.__new__(FlowRunner)
+    runner._cur_udid = "IPAD"
+    notes = []
+    assert runner._pay_business("epay", notes)
+    assert s.inputs == ["36.05"] and s.log.count("paymentConfirmBtn") == 1
+    assert "accepted (the app cleared the entered amount)" in notes[-1]
+    assert runner._payment_accepted == 36.05
+
+
+class GuestCardBelow(PaymentScreen):
+    """MEASURED 2026-10-19 (run 309869d5): after Pay For, each paid-for guest's card
+    prints 'Total 0€', and in content space it sits BELOW the payer's card and the
+    footer -- the bottom-most 'Total' read 0.00 and 0.00 was entered."""
+
+    def describe_all(self, udid):
+        els = super().describe_all(udid)
+        if self.open:
+            els += [el("Total", 840, 363, 37, 18, "StaticText"),
+                    el(f"{self.total} €", 1108, 363, 58, 18, "StaticText"),
+                    el("G Guest1accordionCard ", 834, 760, 336, 49),
+                    el("Total", 840, 830, 37, 18, "StaticText"),
+                    el("0€", 1120, 830, 30, 18, "StaticText")]
+        return els
+
+
+def test_the_bill_is_the_payers_own_card_total_not_a_paid_for_guests_zero(pay):
+    s = GuestCardBelow(total="85.80")
+    ok, notes = pay(s)
+    assert ok and s.inputs == ["85.80"]
+
+
+def test_close_table_never_repays_an_accepted_payment(monkeypatch):
+    """When one profile pays for others, staging ignores an amount equal to the bill
+    (server event log: paidAmount 0 for all 13 such payments since 10-01); paying the
+    same amount again is ignored again. After an ACCEPTED payment, report instead."""
+    _fake_clock(monkeypatch)
+    screen = [el("Vya Business", 0, 0, 1210, 834, "Application"),
+              el("epaymentBtn", 850, 300), el("paymentConfirmBtn", 1000, 560, 170, 60)]
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: screen)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner._cur_udid = "IPAD"
+    runner._payment_accepted = 85.80
+    runner._paid_for_others = ["Guest 1", "Guest 2", "Guest 3"]
+    monkeypatch.setattr(runner, "_pay_business",
+                        lambda *a, **k: pytest.fail("must not pay again"), raising=False)
+    notes = []
+    assert not runner._close_table(notes, wait=2.0)
+    assert "accepted the payment of 85.80 €" in notes[-1]
+    assert "staging ignores a payment equal to such a bill" in notes[-1]
+    assert "Server bug, not the test" in notes[-1]

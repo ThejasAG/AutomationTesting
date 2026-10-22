@@ -548,28 +548,48 @@ class FlowRunAllIn(BaseModel):
     env: str = "prod"
 
 
+def run_flows_in_order(flow_ids, env, start, session_factory, sleep=None,
+                       poll_s: float = 5.0, max_polls: int = 600):
+    """Run each flow after the previous one ENDS (the simulators are shared).
+
+    Returns [(flow_id, run_id, final_status)]. Every final status ends the wait --
+    "stopped" and "cancelled" used to hold the batch for the full ~50 min. A run
+    the too-early toast stopped ("Waiting: ..." -- its booking only opens later)
+    lets the batch go on; a Stop or Cancel pressed by the user ENDS the batch,
+    since the batch has no stop of its own (review 2026-10-19)."""
+    import time as _t
+    from automation.database.models import TestRun
+    sleep = sleep or _t.sleep
+    done = []
+    for fid in flow_ids:
+        rid = start(fid, env=env)
+        status, why = None, ""
+        for _ in range(max_polls):                    # up to ~50 min per flow
+            with session_factory() as db:
+                r = db.query(TestRun).filter_by(id=rid).first()
+                if r and r.status in ("passed", "failed", "stopped", "cancelled"):
+                    status, why = r.status, (r.error_message or "")
+                    break
+            sleep(poll_s)
+        done.append((fid, rid, status))
+        if status == "cancelled" or (status == "stopped" and not why.startswith("Waiting:")):
+            logger.info("run-all: %s was stopped by the user -- ending the batch", fid)
+            break
+    return done
+
+
 @runs_router.post("/cross-app-flows/run-all")
 def run_all_cross_app_flows(body: FlowRunAllIn, current_user=Depends(get_current_user)):
     """Run ALL cross-app flows sequentially against the chosen environment.
     Returns the list of run_ids (one per flow), kicked off back-to-back."""
     from automation.scenarios.cross_app_flows import FLOWS, start_flow_run
-    import threading, time as _t
-
-    def _sequential(flow_ids, env):
-        from automation.database.config import SessionLocal
-        from automation.database.models import TestRun
-        for fid in flow_ids:
-            rid = start_flow_run(fid, env=env)
-            # wait for this run to finish before starting the next (shared sims)
-            for _ in range(600):                      # up to ~50 min per flow
-                with SessionLocal() as db:
-                    r = db.query(TestRun).filter_by(id=rid).first()
-                    if r and r.status in ("passed", "failed"):
-                        break
-                _t.sleep(5)
+    from automation.database.config import SessionLocal
+    import threading
 
     flow_ids = list(FLOWS.keys())
-    threading.Thread(target=_sequential, args=(flow_ids, body.env), daemon=True).start()
+    threading.Thread(target=run_flows_in_order,
+                     args=(flow_ids, body.env, start_flow_run, SessionLocal),
+                     daemon=True).start()
     return {"started": True, "env": body.env, "flows": flow_ids,
             "message": f"Running all {len(flow_ids)} flows on {body.env} sequentially."}
 

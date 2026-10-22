@@ -362,6 +362,8 @@ def _dismiss_with(els):
     fr.business_bundle = "org.example.app"
     fr._idb_els = lambda *a, **k: els
     d = _FakeDriver()
+    # The relaunch goes through xcrun simctl now (an Appium one could fire late).
+    fr._relaunch_business = lambda notes, tag: setattr(d, "relaunched", True) or True
     ok = fr._dismiss_table_modal(_FakeRunner(d), [])
     return ok, d.relaunched
 

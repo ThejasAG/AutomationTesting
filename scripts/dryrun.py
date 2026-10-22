@@ -7,10 +7,19 @@ mid-step and leaves its run stuck at 'running'. This used to give up after 420s
 thread itself; on the (long) safety cap or Ctrl-C it asks the flow to stop and
 waits for it to unwind, so the run always ends with a real status.
 """
-import sys, threading, time
+import signal, sys, threading, time
 from automation.scenarios.cross_app_flows import start_flow_run, request_flow_stop
 from automation.database.config import SessionLocal
 from automation.database.models import TestRun
+
+# SIGTERM (a stopped background task, `kill`) unwinds like Ctrl-C. Without this
+# the process died at once and left its run stuck at 'running' -- two ghost rows
+# on 2026-10-17, until the next backend start reaped them.
+def _on_term(_signum, _frame):
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, _on_term)
 
 flow = sys.argv[1] if len(sys.argv) > 1 else "flow_book_demo"
 env = sys.argv[2] if len(sys.argv) > 2 else "staging"

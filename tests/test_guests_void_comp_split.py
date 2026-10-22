@@ -781,3 +781,91 @@ def test_new_flow_is_listed_for_the_suite():
     assert "@pre_order" not in steps and "@order_later" in steps
     w2 = f["segments"][3]["steps"]
     assert w2.index("click serveItemsBtn") < w2.index("@comp_item") < w2.index("@notify_payment")
+
+
+class SwallowsFirstAssign(Order):
+    """MEASURED 2026-10-17 (run 9b4b29bf): 0 rows after Assign where eight earlier
+    runs saw all 4 -- the press was lost and the dialog stayed open."""
+    swallowed = False
+
+    def press(self, name, e):
+        if name == "assignProductsBtn" and self.modal == "assign" and not self.swallowed:
+            self.swallowed = True
+            return
+        super().press(name, e)
+
+
+def test_add_for_all_taps_assign_again_when_the_first_press_is_lost(runner):
+    s = SwallowsFirstAssign()
+    notes = []
+    assert runner(s)._add_item_for_all(None, notes), notes
+    assert s.taps.count("assignProductsBtn") == 2
+    assert any("tapped Assign again" in n for n in notes)
+    assert "4 row(s)" in notes[-1]
+
+
+class SlowPayForList(Order):
+    """MEASURED 2026-10-19 (run 518bffc6): "pay for all" selected only Guest 1 of three
+    -- the Pay For dialog was read while it still listed two avatars."""
+
+    def __init__(self, *a, show_after=1, **k):
+        super().__init__(*a, **k)
+        self.dialog_reads, self.show_after = 0, show_after
+
+    def describe_all(self, udid):
+        els = super().describe_all(udid)
+        if self.modal == "payfor":
+            self.dialog_reads += 1
+            if self.dialog_reads <= self.show_after:
+                els = [e for e in els if caf._idbd.name(e) not in ("Guest2select", "Guest3select")]
+        return els
+
+
+def test_pay_for_all_waits_for_the_dialog_to_list_everyone(runner):
+    s = SlowPayForList(served=True)
+    s.notified, s.payer = True, "RoopaD"
+    notes = []
+    assert runner(s)._pay_for_all(notes), notes
+    assert {"Guest1select", "Guest2select", "Guest3select"} <= set(s.taps)
+    assert "Roopa D pays for Guest 1, Guest 2, Guest 3" in notes[-1]
+
+
+class ListsOnlyTwo(Order):
+    def describe_all(self, udid):
+        els = super().describe_all(udid)
+        if self.modal == "payfor":
+            els = [e for e in els if caf._idbd.name(e) not in ("Guest2select", "Guest3select")]
+        return els
+
+
+def test_pay_for_all_fails_when_not_everyone_can_be_selected(runner):
+    """A partial "pay for all" once passed the whole flow without testing it (Roopa paid
+    the full bill for herself + Guest 1 and staging settled that)."""
+    s = ListsOnlyTwo(served=True)
+    s.notified, s.payer = True, "RoopaD"
+    notes = []
+    assert not runner(s)._pay_for_all(notes)
+    assert "Guest 2, Guest 3 could not be selected" in notes[-1]
+    assert "applyPayment" not in s.taps
+
+
+def test_waiter_board_goes_home_from_a_leftover_order_screen(monkeypatch):
+    """MEASURED 2026-10-21 (waiter demo, run 91a23db5): the iPad was still on the
+    previous flow's order screen; 'click addNewEvent' (board only) hung 240s."""
+    import types
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+    state = {"home": False}
+    order = [el("homeBtn", 20, 60, 60, 60), el("epaymentBtn", 850, 300)]
+    board = [el("homeBtn", 20, 60, 60, 60), el("addNewEvent", 600, 700, 60, 60)]
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: board if state["home"] else order)
+    monkeypatch.setattr(caf._idbd, "tap",
+                        lambda udid, names, els=None, scroll=True:
+                        state.__setitem__("home", names == ["homeBtn"]) or (True, "idb"))
+    r = FlowRunner.__new__(FlowRunner)
+    r._cur_udid = "IPAD"
+    notes = []
+    assert r._waiter_board(notes)
+    assert state["home"] and "went Home" in notes[-1]
+    assert caf._W_CREATE_APPT[0] == "@waiter_board"

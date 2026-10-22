@@ -145,7 +145,7 @@ def test_an_invite_still_pending_after_the_final_modal_is_a_failure():
         WALLET + [CARD],                            # ...and the invite is STILL pending
     ])
     assert ok is False
-    assert "STILL in the pending list" in joined(notes)
+    assert "still 1 pending invitation(s) after ACCEPT (was 1)" in joined(notes)
 
 
 def test_failure_notes_always_name_the_screen_for_tuning():
@@ -153,3 +153,92 @@ def test_failure_notes_always_name_the_screen_for_tuning():
         ok, notes, _ = run(frames)
         assert ok is False
         assert "On screen:" in joined(notes)
+
+
+def test_an_old_open_event_is_closed_and_the_invitation_waited_for():
+    """MEASURED 2026-10-21 (flow5/flow6): the Wallet opened with the previous flow's
+    Completed event expanded -- no list cards in the tree -- and one read failed the
+    step although the waiter had just saved the invitation."""
+    open_old = ["walletUpcomingSearchInput", "RoopaDClose", "NylaiKitchen2Card",
+                "RoopaDorderCardCompleted", "Wallet", "Menu"]
+    ok, notes, scr = run([
+        open_old,                                     # an old event is expanded
+        WALLET + [CARD],                              # closed: the invitation shows
+        WALLET + [CARD, "eventAccept", "eventDecline"],
+        WALLET + ["NylaiKitchen2Card", "Appointment updated successfully"],
+    ])
+    assert ok is True, notes
+    assert "closed an open event" in joined(notes)
+    assert len(scr.taps) == 3                     # Close, the card, ACCEPT
+
+
+class TwoInvites(Screen):
+    """Two pending invitations with the SAME label; the second is this run's (11:20).
+    MEASURED 2026-10-22: a dashboard run that stopped after creating one left it
+    pending, and accepting 'the first' then failed the label-based check."""
+
+    def __init__(self):
+        super().__init__([[]])
+        self.state = "list"          # list -> modal(a|b) -> accepted
+
+    def els(self, udid=""):
+        def e(label, cy):
+            return {"id": "", "label": label, "type": "GenericElement",
+                    "x": 0, "y": cy - 20, "w": 300, "h": 40, "cx": 150, "cy": cy}
+        if self.state == "list":
+            return [e(l, 20) for l in WALLET] + [e(CARD, 300), e(CARD, 420)]
+        if self.state == "modal-a":
+            return [e("inviteclose", 100), e("TODAY 10:55 - Not Sure", 150), e("eventAccept", 600)]
+        if self.state == "modal-b":
+            return [e("inviteclose", 100), e("TODAY 11:20 - Not Sure", 150), e("eventAccept", 600)]
+        return [e(l, 20) for l in WALLET] + [e(CARD, 300), e("Appointment updated successfully", 700)]
+
+    def tap(self, x, y, udid=""):
+        self.taps.append((x, y))
+        if self.state == "list":
+            self.state = "modal-a" if y == 300 else "modal-b"
+        elif y == 100:                                   # inviteclose
+            self.state = "list"
+        elif y == 600:                                   # eventAccept
+            self.accepted = self.state
+            self.state = "accepted"
+        return True
+
+
+def test_with_several_invitations_the_one_for_this_slot_is_accepted():
+    fr = object.__new__(F.FlowRunner)
+    scr = TwoInvites()
+    fr._idb_els = scr.els
+    fr._idb_tap = scr.tap
+    fr._clear_logbox = lambda *a, **k: 0
+    fr._smart_click = scr.smart_click
+    fr._booked_slot = "11:20"
+    notes = []
+    assert fr._accept_appointment(None, notes), notes
+    assert scr.accepted == "modal-b"
+    assert any("#2 is this run's (11:20)" in n for n in notes)
+
+
+def test_a_cancelled_invitation_is_skipped_and_an_already_accepted_slot_passes(monkeypatch):
+    """MEASURED 2026-10-22 (flow6, 11:45): the only card was a CANCELLED invitation (its
+    tap does nothing) and this run's booking was already an accepted reservation."""
+    from automation.scenarios import screen_text
+    fr, scr = runner([WALLET + [CARD]])                 # tapping never opens anything
+    fr._booked_slot = "11:45"
+    monkeypatch.setattr(screen_text, "read_text", lambda udid, *a, **k: [
+        ("TODAY", 36, 515, 40, 12), ("11:45", 36, 535, 40, 12),
+        ("RESERVATION", 107, 535, 90, 12), ("PRE-ORDER NOW", 150, 560, 120, 14)])
+    notes = []
+    assert fr._accept_appointment(None, notes) is True
+    assert "already accepted" in notes[-1]
+
+
+def test_without_the_slot_on_screen_a_dead_invitation_still_fails(monkeypatch):
+    from automation.scenarios import screen_text
+    fr, scr = runner([WALLET + [CARD]])
+    fr._booked_slot = "11:45"
+    monkeypatch.setattr(screen_text, "read_text", lambda udid, *a, **k: [
+        ("TODAY", 36, 315, 40, 12), ("11:15", 36, 335, 40, 12), ("EVENT CANCELLED", 140, 357, 120, 14)])
+    notes = []
+    assert fr._accept_appointment(None, notes) is False
+    assert "never opened" in joined(notes)

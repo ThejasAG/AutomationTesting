@@ -104,3 +104,20 @@ def test_old_wording_still_works_in_saved_flows():
     for f in FLOWS.values():
         for s in f["segments"]:
             assert "select Not Sure" not in s["steps"], f["id"]
+
+
+class Drops(Bar):
+    """MEASURED 2026-10-17 (PAY4, run fabc22b9): the form re-rendered as its data
+    arrived and dropped 'Any' after the step had begun; slide and label were refused."""
+
+    def swipe(self, udid, *a, **k):
+        self.area = False
+        super().swipe(udid, *a, **k)
+
+
+def test_reselects_any_when_the_form_drops_it_mid_step(run):
+    bar = Drops()
+    ok, notes = run(bar)
+    assert ok and bar.stop == 4
+    assert bar.taps == ["duration4", "Any", "duration4"]
+    assert any("dropped the dining area" in n for n in notes)

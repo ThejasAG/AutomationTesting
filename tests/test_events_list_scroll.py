@@ -6,6 +6,8 @@ further DOWN. The step found the 4773 row in the tree, tapped its reported
 centre -- below the visible part of the sheet -- and "the reservation did not
 open"; the segment then timed out after 240s.
 """
+import types
+
 import pytest
 
 from automation.scenarios import cross_app_flows as caf
@@ -157,3 +159,57 @@ def test_the_my_orders_panel_is_checked_before_the_calendar(monkeypatch):
     notes = []
     assert FlowRunner._open_reservation(runner, None, notes, statuses=("serve",), what="@open_order")
     assert calls == [("rows", "events list"), ("panel", "17:05")]
+
+
+def test_an_empty_board_is_relaunched_before_any_calendar_search(monkeypatch):
+    """MEASURED 2026-10-17 (new iPad Pro M5): after the login the board stayed empty
+    and the panel read "Orders Not Found"; the calendar search then polled the empty
+    board ~100s before relaunching, and the relaunch found the booking at once."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+    runner = FlowRunner.__new__(FlowRunner)
+    runner.devices = {"waiter": "IPAD"}
+    runner._booked_slot = "17:05"
+    runner.business_bundle = "b"
+    events = []
+    monkeypatch.setattr(runner, "_dismiss_table_modal", lambda r, n: None, raising=False)
+    monkeypatch.setattr(runner, "_idb_els", lambda udid="": [], raising=False)   # empty board
+    monkeypatch.setattr(runner, "_click_sidebar_row", lambda *a, **k: False, raising=False)
+    monkeypatch.setattr(runner, "_open_from_panel",
+                        lambda slot, st, what, notes: events.append("panel") or "relaunch" in events,
+                        raising=False)
+    monkeypatch.setattr(runner, "_relaunch_business",
+                        lambda notes, tag: events.append("relaunch") or True, raising=False)
+    monkeypatch.setattr(runner, "_swipe_calendar",
+                        lambda *a: pytest.fail("no calendar search on an empty board"), raising=False)
+    notes = []
+    assert FlowRunner._open_reservation(runner, None, notes, statuses=("reserved",),
+                                        what="@open_reservation")
+    assert events == ["panel", "relaunch", "panel"]
+    assert any("has not received the booking" in n for n in notes)
+    assert clock["t"] < 40, "relaunched at once, not after a ~100s search"
+
+
+def test_this_runs_ticket_wins_over_another_row_at_the_same_start(monkeypatch, events):
+    """Staging is shared: another diner's booking can start at this exact time. The
+    events list used to open the first such row (review 2026-10-19)."""
+    monkeypatch.setattr(FlowRunner, "_booked_ticket", "4774", raising=False)
+    ok, notes, ev = events([[row("4773", "16:35", y=300), row("4774", "16:35", y=400)]])
+    assert ok and ev.tapped == ["4774"]
+    assert any("opening this run's ticket 4774" in n for n in notes)
+
+
+def test_without_a_ticket_the_row_changed_while_booking_is_taken(monkeypatch, events):
+    import time as _t
+    from datetime import datetime as _dt
+    t = lambda hh, mm: _t.mktime(_dt.now().replace(hour=hh, minute=mm, second=0, microsecond=0).timetuple())  # noqa: E731
+    monkeypatch.setattr(FlowRunner, "_touched_since", t(16, 20), raising=False)
+    monkeypatch.setattr(FlowRunner, "_seg_started_at", t(16, 22), raising=False)
+    theirs = row("4773", "16:35", y=300)
+    theirs["AXLabel"] = theirs["AXLabel"].replace("16:28", "16:05")       # changed earlier
+    ours = row("4774", "16:35", y=400)
+    ours["AXLabel"] = ours["AXLabel"].replace("16:28", "16:21")
+    ok, notes, ev = events([[theirs, ours]])
+    assert ok and ev.tapped == ["4774"]
+    assert any("took 4774" in n for n in notes)

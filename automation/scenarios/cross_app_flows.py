@@ -151,6 +151,7 @@ _C_PAY_FINAL = [
 # Waiter: create the appointment for the diner (flows 5/6). Mirrors the verified
 # 'Business: Book event (waiter)' block, with roopa's details.
 _W_CREATE_APPT = [
+    "@waiter_board",                  # addNewEvent lives on the bookings board only
     "click addNewEvent",
     "@wait_form",                     # form renders a beat later — wait or the first type() misses
     "type roopa in firstName",
@@ -309,6 +310,36 @@ def _safe_displayed(el) -> bool:
         return bool(el.is_displayed())
     except Exception:
         return False
+
+
+_NOT_GIVEN = object()
+
+
+def _bounded_call(fn: Callable[[], Any], secs: float = 20.0, default: Any = None,
+                  late: Any = _NOT_GIVEN) -> Any:
+    """fn() with a ceiling; *default* on error, and on timeout too unless *late* is
+    given (then *late*, so a caller can tell "WDA did not answer" from "it failed").
+
+    A wedged WDA parks in an Appium call on this app's huge tree with no ceiling of
+    its own. Measured 2026-10-17: @open_order sat silent after "target 11:00 row"
+    until the 240s step watchdog killed it (runs 100df69f, adbb3f49, 30c434a6,
+    e0685fc6). Manual executor + shutdown(wait=False), never `with` (AGENTS.md #5).
+
+    A timed-out call is NOT cancelled: Appium queues each session's commands and
+    runs it once WDA frees up. So after a timeout, send nothing more that could
+    act on the screen late -- and never relaunch the app through Appium (see
+    FlowRunner._relaunch_business).
+    """
+    import concurrent.futures as _fut
+    ex = _fut.ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(fn).result(timeout=secs)
+    except _fut.TimeoutError:
+        return default if late is _NOT_GIVEN else late
+    except Exception:
+        return default
+    finally:
+        ex.shutdown(wait=False)
 
 
 def _appium_binary() -> str:
@@ -538,6 +569,7 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@save_appointment", "help": "Tap Save and confirm the form closed"},
         {"step": "@open_reservation", "help": "Open the diner's Reserved booking"},
         {"step": "@open_order", "help": "Re-open the in-progress order after a role switch"},
+        {"step": "@waiter_board", "help": "Waiter: go Home to the bookings board"},
         {"step": "@assign_table", "help": "Assign a table on the Select A Table sheet"},
         {"step": "@ensure_order_items", "help": "Add items only if the order is empty"},
         {"step": "@kitchen_ready", "help": "Mark a queued order Ready"},
@@ -1396,6 +1428,8 @@ class FlowRunner:
                     break
                 time.sleep(2)
             if btn:
+                if not getattr(self, "_touched_since", None):
+                    self._touched_since = time.time()      # see _own_panel_card
                 self._idb_tap(btn["cx"], btn["cy"])
             elif attempt == 1:
                 notes.append("[FAIL] @book_appointment — BOOK NOW is not on screen "
@@ -1403,15 +1437,59 @@ class FlowRunner:
                              f"{[e['label'] or e['id'] for e in self._idb_els() if e['label'] or e['id']][:16]}")
                 return False
             # Give the dialog a moment; the app re-renders after committing the slot.
-            for _ in range(5):
+            # By the CLOCK, not a count: a read while the app submits the booking can
+            # take many seconds, so "5 polls" had no fixed length.
+            #
+            # And never re-tap while the booking may be in flight. MEASURED
+            # 2026-10-17 (flow3): tap 1 "did not open the dialog", tap 2 went on,
+            # and the step took 220s. If BOOK NOW has left the screen, the form is
+            # submitting: keep waiting rather than risk a second booking.
+            # MEASURED 2026-10-17 (flow3 220s, book demo 126s): BOOK NOW left the
+            # form and the Wallet came up 1.5-2 min later -- staging was slow to
+            # create the booking. That is a wait, not a lost tap.
+            t_tap = time.time()
+            confirmed, submitting, form_back = False, False, False
+            deadline = time.time() + 12.0
+            while time.time() < deadline:
                 time.sleep(1.5)
                 if dialog_open():
-                    notes.append(f"[ok] @book_appointment — booking confirmed"
-                                 + (" — the app went straight to the Wallet (no pre-order "
-                                    "prompt for this duration)"
-                                    if getattr(self, "_booked_to_wallet", False) else "")
-                                 + f"{' (retry %d)' % attempt if attempt > 1 else ''}")
-                    return True
+                    confirmed = True
+                    break
+                if submitting:
+                    # A failed request puts the form back (Reservation.js
+                    # handleReservation .catch -> loader off): stop waiting then, do
+                    # not idle out the 150s (review 2026-10-19).
+                    if any(e.get("label") == "bookAppoitment" for e in self._idb_els()):
+                        form_back = True
+                        break
+                    continue
+                now_els = self._idb_els() if time.time() >= deadline else []
+                if now_els and not any(e.get("label") == "bookAppoitment" for e in now_els):
+                    submitting, deadline = True, time.time() + 150.0
+                    notes.append("    · @book_appointment — BOOK NOW accepted; the app is "
+                                 "creating the booking (waiting for the server)")
+            if form_back:
+                notes.append(f"[FAIL] @book_appointment — the booking request failed: the "
+                             f"form came back {time.time() - t_tap:.0f}s after BOOK NOW "
+                             f"(staging error?). Not tapping again: the server may still "
+                             f"have made the booking")
+                return False
+            if confirmed and submitting:
+                notes.append(f"    · @book_appointment — the server took "
+                             f"{time.time() - t_tap:.0f}s to confirm the booking")
+            if confirmed:
+                notes.append(f"[ok] @book_appointment — booking confirmed"
+                             + (" — the app went straight to the Wallet (no pre-order "
+                                "prompt for this duration)"
+                                if getattr(self, "_booked_to_wallet", False) else "")
+                             + f"{' (retry %d)' % attempt if attempt > 1 else ''}")
+                return True
+            if submitting:
+                notes.append(f"[FAIL] @book_appointment — BOOK NOW was accepted but the "
+                             f"booking was not confirmed within {time.time() - t_tap:.0f}s "
+                             f"(staging slow or down?); not tapping again, to avoid a "
+                             f"second booking")
+                return False
             notes.append(f"[warn] @book_appointment — tap {attempt} did not open the "
                          f"dialog; retrying")
             time.sleep(1.0)
@@ -1524,6 +1602,8 @@ class FlowRunner:
             # (idb) does see it, so use that; but do not RELY on it, because tapping the
             # strip's right edge does not close it on the iPad (see _tap_save_btn).
             self._clear_logbox()
+            if not getattr(self, "_touched_since", None):
+                self._touched_since = time.time()          # see _own_panel_card
             tapped = self._tap_save_btn()
             if not tapped:
                 try:                                  # no idb node -> fall back to Appium
@@ -2039,8 +2119,22 @@ class FlowRunner:
             rows = matching(els)
             if rows:
                 if len(rows) > 1:
-                    notes.append(f"    · {len(rows)} sidebar rows start at {want_hhmm}; "
-                                 f"opening the first")
+                    # Staging is shared: another diner's booking can start at this exact
+                    # time (review 2026-10-19). A row reads '4657 <icon> RESERVED 13:45 -
+                    # 14:45 <icon> 13:38' -- its ticket first, its updatedAt last.
+                    mine = getattr(self, "_booked_ticket", "")
+                    own = [e for e in rows if mine and _idbd.name(e).split()[:1] == [mine]]
+                    if own:
+                        notes.append(f"    · {len(rows)} {where} rows start at {want_hhmm}; "
+                                     f"opening this run's ticket {mine}")
+                        rows = own
+                    else:
+                        def changed_at(lbl: str) -> str:
+                            times = re.findall(r"\b\d{1,2}:\d{2}\b", lbl)
+                            return times[-1] if len(times) >= 3 else ""
+                        cands = [((_idbd.name(e).split() or [""])[0], "", e,
+                                  [(changed_at(_idbd.name(e)),)]) for e in rows]
+                        rows = [self._own_panel_card(cands, want_hhmm, notes, where)[2]]
                 e = rows[0]
                 notes.append(f"    · opening the {want_hhmm} booking from the {where}: "
                              f"{_idbd.name(e)[:60]!r}"
@@ -2096,6 +2190,35 @@ class FlowRunner:
         return "modifytable" in labels and bool(
             labels & {"assigntablebtn", "applytablebtn"})
 
+    def _window_size(self, r) -> Tuple[float, float]:
+        """The business session's window (width, height) in points, (0, 0) if unknown.
+
+        Cached per Appium SESSION (its id is never reused, unlike id() of a freed
+        driver): the size does not change within a session, and an unbounded
+        get_window_size() is one of the Appium calls that froze @open_order (see
+        _bounded_call). Falls back to idb's app size when WDA does not answer."""
+        key = getattr(getattr(r, "d", None), "session_id", None) or id(getattr(r, "d", None))
+        cache = self.__dict__.setdefault("_win_size_cache", {})
+        if key not in cache:
+            size = _bounded_call(lambda: r.d.get_window_size(), 15.0, None) or {}
+            w, h = float(size.get("width") or 0.0), float(size.get("height") or 0.0)
+            if not (w and h):
+                try:
+                    w, h = (float(v or 0.0) for v in
+                            _idbd.app_size(_idbd.describe_all(self._business_udid())))
+                except Exception:
+                    w, h = 0.0, 0.0
+            if not (w and h):
+                return 0.0, 0.0                  # don't cache a miss
+            cache[key] = (w, h)
+        return cache[key]
+
+    def _window_h(self, r) -> float:
+        return self._window_size(r)[1]
+
+    def _window_w(self, r) -> float:
+        return self._window_size(r)[0]
+
     def _swipe_calendar(self, r, direction: str) -> bool:
         """Scroll the bookings calendar vertically. True if it actually moved.
 
@@ -2116,6 +2239,7 @@ class FlowRunner:
         before = hour_positions()
         if not before:
             return False
+        _late = object()                          # an Appium call that did not answer
         # FASTEST: a slow idb drag moves the list 1:1 (measured: 200pt drag in >=1s
         # -> 190pt of travel; faster drags fling unpredictably), so drag by exactly
         # the distance to the target hour. ~1-2s a drag, no Appium round-trips.
@@ -2139,10 +2263,7 @@ class FlowRunner:
         # the step's whole 240s budget spent scrolling. The rows are 100pt apart and
         # idb reports live positions, so the exact distance is known: one drag covers
         # it. Falls through to the swipe loop if the drag does not move the list.
-        try:
-            h0 = float(r.d.get_window_size()["height"])
-        except Exception:
-            h0 = 834.0
+        h0 = self._window_h(r) or 834.0
         want_dy = 0.0
         target = getattr(self, "_scroll_target_hour", "")
         if target:
@@ -2153,27 +2274,28 @@ class FlowRunner:
             x = 600
             y_from = min(max(0.55 * h0, 120), h0 - 80)
             y_to = min(max(y_from - want_dy, 90), h0 - 60)
-            try:
-                r.d.execute_script("mobile: dragFromToForDuration", {
+            # A timed-out gesture still runs later (Appium queues it): send nothing
+            # more, or the late drag and the next swipe both land and overshoot the
+            # booked hour (review 2026-10-19).
+            if _bounded_call(lambda: r.d.execute_script("mobile: dragFromToForDuration", {
                     "fromX": x, "fromY": y_from, "toX": x, "toY": y_to,
-                    "duration": 0.6})
-                time.sleep(1.0)
-                after0 = hour_positions()
-                if any(after0.get(k) != v for k, v in before.items() if k in after0):
-                    return True
-            except Exception:
-                pass
-        try:
-            h = float(r.d.get_window_size()["height"])
-        except Exception:
-            h = 0.0
+                    "duration": 0.6}), 20.0, None, late=_late) is _late:
+                return False
+            time.sleep(1.0)
+            after0 = hour_positions()
+            if any(after0.get(k) != v for k, v in before.items() if k in after0):
+                return True
+        h = self._window_h(r)
         on_screen = [lbl for lbl, y in before.items()
                      if not h or 0.1 * h <= y <= 0.9 * h]
         if not on_screen:
             return False
         for lbl in on_screen[:3]:
             try:
-                els = r.d.find_elements(AppiumBy.IOS_PREDICATE, f'label == "{lbl}"')
+                els = _bounded_call(lambda: r.d.find_elements(
+                    AppiumBy.IOS_PREDICATE, f'label == "{lbl}"'), 20.0, [], late=_late)
+                if els is _late:
+                    return False                  # WDA busy: queue nothing behind it
                 if not els:
                     continue
                 # An hour label resolves to TWO elements (the text and its row
@@ -2183,9 +2305,10 @@ class FlowRunner:
                 # the match whose own rect is really inside the viewport.
                 anchor = None
                 for e in els:
-                    try:
-                        rect = e.rect or {}
-                    except Exception:
+                    rect = _bounded_call(lambda: e.rect, 10.0, None, late=_late)
+                    if rect is _late:
+                        return False
+                    if not rect:
                         continue
                     ey = (rect.get("y") or 0) + (rect.get("height") or 0) / 2
                     if not h or 0.1 * h <= ey <= 0.9 * h:
@@ -2193,8 +2316,10 @@ class FlowRunner:
                         break
                 if anchor is None:
                     continue
-                r.d.execute_script("mobile: swipe",
-                                   {"direction": direction, "element": anchor.id})
+                if _bounded_call(lambda: r.d.execute_script(
+                        "mobile: swipe", {"direction": direction, "element": anchor.id}),
+                        20.0, None, late=_late) is _late:
+                    return False
             except Exception:
                 continue
             time.sleep(0.8)
@@ -3151,15 +3276,25 @@ class FlowRunner:
 
         if not modal_up():
             return True
-        for ident in ("closeBtn", "modalCloseBtn", "cancelBtn", "Close", "Cancel"):
-            try:
-                els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
-                if els:
-                    els[0].click(); time.sleep(1.2)
-                    if not modal_up():
-                        return True
-            except Exception:
-                pass
+
+        # One ceiling for the whole id sweep: five whole-tree finds on this app can
+        # each hang, and this runs inside @open_reservation's bounded search
+        # (review 2026-10-19). None of the first three ids exists in the business
+        # source; 'Close'/'Cancel' are kept for a build that labels its text.
+        def _close_by_id() -> bool:
+            for ident in ("closeBtn", "modalCloseBtn", "cancelBtn", "Close", "Cancel"):
+                try:
+                    els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, ident)
+                    if els:
+                        els[0].click(); time.sleep(1.2)
+                        if not modal_up():
+                            return True
+                except Exception:
+                    pass
+            return False
+
+        if _bounded_call(_close_by_id, 15.0, False):
+            return True
         # DO NOT RELAUNCH A REAL RESERVATION.
         #
         # 'AssignTableBtn' means the table sheet is up -- but a reservation that
@@ -3191,12 +3326,36 @@ class FlowRunner:
             return True
 
         # No close affordance — a relaunch always clears a transient sheet.
-        try:
-            r.d.terminate_app(self.business_bundle); time.sleep(1.5)
-            r.d.activate_app(self.business_bundle); time.sleep(6)
-        except Exception:
-            pass
+        if self._relaunch_business(notes, "table sheet"):
+            time.sleep(6)
         return not modal_up()
+
+    def _relaunch_business(self, notes: List[str], tag: str) -> bool:
+        """Terminate and launch the business app with xcrun simctl, not Appium.
+
+        A timed-out Appium terminate_app/activate_app is not cancelled: Appium
+        queues each session's commands, so a call abandoned while WDA was wedged
+        ran later and killed the app in the middle of a later step (review
+        2026-10-19). simctl runs outside the session, and a subprocess timeout
+        kills the child -- nothing can fire late. ensure_business_metro uses the
+        same simctl terminate."""
+        import subprocess as _sp
+        udid = self._business_udid()
+        try:
+            _sp.run(["xcrun", "simctl", "terminate", udid, self.business_bundle],
+                    capture_output=True, timeout=20)       # non-zero when not running: fine
+            time.sleep(1.5)
+            res = _sp.run(["xcrun", "simctl", "launch", udid, self.business_bundle],
+                          capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            notes.append(f"    · {tag}: could not relaunch the business app "
+                         f"({type(e).__name__})")
+            return False
+        if res.returncode != 0:
+            notes.append(f"    · {tag}: could not relaunch the business app "
+                         f"({(res.stderr or res.stdout or '').strip()[:90]})")
+            return False
+        return True
 
     def _appium_click_id(self, r: ScenarioRunner, ident: str, secs: float = 30.0) -> bool:
         """Click by accessibility id through Appium, which SCROLLS the element into
@@ -3474,6 +3633,28 @@ class FlowRunner:
         cards.sort(key=lambda c: (frame(c["button"])[1], frame(c["button"])[0]))
         return cards
 
+    def _waiter_board(self, notes: List[str]) -> bool:
+        """Bring the waiter to the bookings board (My Bookings + My Orders).
+
+        MEASURED 2026-10-21 (waiter demo, run 91a23db5): the iPad was still on the
+        previous flow's order screen (booking 5283) when 'click addNewEvent' ran; the
+        button exists on the board only, and the step hung its full 240s."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        on_board = lambda es: any(_idbd.name(e) == "addNewEvent" for e in es)  # noqa: E731
+        els = _idbd.describe_all(udid)
+        if on_board(els):
+            notes.append("[ok] @waiter_board — already on the bookings board")
+            return True
+        how = "homeBtn not on screen"
+        for _ in range(2):
+            ok, how = _idbd.tap(udid, ["homeBtn"], els)
+            els, up = self._wait_els(udid, on_board, 10.0)
+            if up:
+                notes.append(f"[ok] @waiter_board — went Home to the bookings board ({how})")
+                return True
+        notes.append(f"[FAIL] @waiter_board — could not reach the bookings board ({how})")
+        return False
+
     def _kitchen_board(self, udid: str, notes: List[str], wait: float = 15.0) -> List[dict]:
         """The kitchen board's elements, once an order card is on it (or the wait
         runs out). Goes back Home if a previous step left another screen up."""
@@ -3639,6 +3820,17 @@ class FlowRunner:
             b = card["button"]
             bx, by, bw, bh = frame(b)
             if _idbd.is_dark(_idbd.sample_colors(udid, [(bx + 14, by + bh / 2)], els)[0]) is False:
+                if not card["radios"] and not mine:
+                    # Measured 2026-10-17: ticket 5205, the only one queued, showed no
+                    # item dot; Ready enables only once a dot is selected
+                    # (KitchenCards: disabled={!readyActive(id)}), so nothing can be
+                    # readied. "selecting 0 item(s)" read like a broken tap.
+                    tickets = ", ".join(c["ticket"] for c in queued if c["ticket"]) or "unnumbered"
+                    notes.append(f"[FAIL] @kitchen_ready — no queued ticket has an item to "
+                                 f"select ({tickets}), so Ready cannot enable. The kitchen "
+                                 "demo needs an order a waiter has sent with items — run a "
+                                 "full cross-app flow first.")
+                    return False
                 notes.append(f"[FAIL] @kitchen_ready — {tag}: Ready is still disabled after "
                              f"selecting {len(selected)} item(s)")
                 return False
@@ -3719,6 +3911,49 @@ class FlowRunner:
         notes.append("[ok] @hide_keyboard — keyboard closed (return key)")
         return True
 
+    def _slot_into_view_and_tap(self, udid: str, chip: str,
+                                tries: int = 12) -> Tuple[bool, str]:
+        """Drag the waiter form's horizontal slot row until *chip* is on screen, then
+        tap it (verified). idb reports the chip's CONTENT-space x, so the distance
+        to drag is known; a slow drag moves the row 1:1 (the calendar's measured
+        rule, see _swipe_calendar)."""
+        name, frame, centre = _idbd.name, _idbd.frame, _idbd.centre
+        moved = 0
+        for _ in range(tries):
+            els = _idbd.describe_all(udid)
+            hits = [e for e in els if name(e) == chip]
+            if len(hits) != 1:
+                return False, f"{len(hits)} chips named {chip!r}"
+            w, _h = _idbd.app_size(els)
+            cx, cy = centre(hits[0])
+            if not w:
+                return False, "no screen size"
+            # The row is only visible INSIDE the form. On the iPad the New
+            # Appointment form is the right-hand panel (saveBtn measured at x
+            # 832..1179, chips at 850/972/1096), so aiming at the middle of the whole
+            # screen parked the chip over the bookings board, where the verified
+            # tap refuses it (review 2026-10-19). Its Save button spans the form.
+            save = next((e for e in els if name(e) == "saveBtn" and frame(e)[2] > 0), None)
+            x0, x1 = (frame(save)[0], frame(save)[0] + frame(save)[2]) if save else (0.0, w)
+            span, half = x1 - x0, frame(hits[0])[2] / 2
+            if x0 + half + 4 <= cx <= x1 - half - 4:
+                # scroll=True: the row can also sit below the fold or under the
+                # keyboard -- the vertical bring-into-view handles that part.
+                ok, how = _idbd.tap(udid, [chip], els)
+                if ok:
+                    return True, f"idb, dragged the slot row {moved}x"
+                return False, f"in view after {moved} drag(s) but {how}"
+            # Drag inside the form only, slowly (1:1), toward its middle.
+            travel = max(-0.7 * span, min(0.7 * span, cx - (x0 + x1) / 2))
+            x_from = x0 + (0.85 if travel > 0 else 0.15) * span
+            _idbd.swipe(udid, x_from, cy, x_from - travel, cy, max(1.0, abs(travel) / 200.0))
+            moved += 1
+            time.sleep(0.5)
+            after = [e for e in _idbd.describe_all(udid) if name(e) == chip]
+            if after and frame(after[0]) == frame(hits[0]):
+                return False, "the slot row did not move"
+        return False, f"not in view after {moved} drag(s)"
+
     def _first_time_slot(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """Tap the first available time slot — via idb (fast + bounded), NOT an Appium
         `MATCHES` predicate. That regex predicate traverses AND regex-matches this app's
@@ -3789,17 +4024,40 @@ class FlowRunner:
         # first read finds nothing, scroll the form down and re-read — a few times — before
         # concluding there's no slot. This is the fix for "no time chip visible -> Save blocked":
         # without a selected time the app's validation silently rejects Save.
+        #
+        # WAIT for them first: they render only once the dining area is chosen and the
+        # day's slots have loaded. MEASURED 2026-10-22 (flow6, run 0b9bfc7b): on a slow
+        # staging the first read found none, the step scrolled 3x through the Appium
+        # resolver (~70s each), and by the end the New Appointment form was gone --
+        # the bookings board was on screen.
+        _wait_until = time.time() + 12.0
+        while not slots and time.time() < _wait_until:
+            time.sleep(1.0)
+            slots = _read_slots()
+        # Then drag the FORM's content up (finger up), slowly, inside the form: on the
+        # iPad it is the right-hand panel (its Save spans it), so a swipe in the middle
+        # of the screen would move the board instead.
         _scrolls = 0
         while not slots and _scrolls < 3:
-            try:
-                r.run_one("scroll down", 0)
-                time.sleep(1.0)
-            except Exception:
+            els_f = _idbd.describe_all(udid)
+            w_f, h_f = _idbd.app_size(els_f)
+            if not (w_f and h_f):
                 break
+            save = next((e for e in els_f if _idbd.name(e) == "saveBtn"), None)
+            x = _idbd.centre(save)[0] if save is not None else w_f / 2
+            _idbd.swipe(udid, x, h_f * 0.70, x, h_f * 0.40, 1.5)
+            time.sleep(1.0)
             _scrolls += 1
             slots = _read_slots()
         if _scrolls:
             notes.append(f"    · @first_time_slot — scrolled {_scrolls}x to reveal the time slots")
+        if not slots:
+            names_now = {_idbd.name(e) for e in _idbd.describe_all(udid)}
+            if "addNewEvent" in names_now and not names_now & {"saveBtn", "closeEventModal"}:
+                notes.append("[FAIL] @first_time_slot — the New Appointment form is no longer "
+                             "open (the bookings board is showing), so there is no time chip "
+                             "to pick")
+                return False
         if slots:
             # The LogBox toasts are NOT avoided here any more.
             #
@@ -3906,6 +4164,19 @@ class FlowRunner:
             # (a content-space frame that is really the Save button), now checked
             # instead of avoided. ~2-5s against ~40-56s.
             _ok_slot, _how = _idbd.tap(udid, [f"{safe}Btn", safe])
+            if not _ok_slot:
+                # The waiter's chips are ONE horizontal row of the whole day, and
+                # idb's scroll-into-view is vertical only. MEASURED 2026-10-17 (waiter
+                # demo, iPad Pro M5): 12:55 sat far right of the strip, the verified
+                # tap refused it, Appium's click failed too, and the step ran past
+                # 240s. Drag the row itself, slowly (1:1), until the chip is in view.
+                # Only the waiter's chips carry 'Btn'; on the consumer's form the
+                # drag finds none, and the first reason is the one to keep.
+                _ok2, _how2 = self._slot_into_view_and_tap(udid, f"{safe}Btn")
+                if _ok2:
+                    _ok_slot, _how = _ok2, _how2
+                elif not _how2.startswith("0 chips"):
+                    _how = f"{_how}; row drag: {_how2}"
             if _ok_slot:
                 tapped = True                    # no fixed pause: the next step waits for its target
                 notes.append(f"[ok] @first_time_slot — selected slot '{lbl}' ({_how}, {tag})")
@@ -3927,10 +4198,8 @@ class FlowRunner:
                 # coordinate tap only works for a chip that is really in the
                 # viewport. Tapping an off-screen x hits whatever is at that point
                 # -- usually nothing -- and selectedTime stays null.
-                try:
-                    _vw = float(r.d.get_window_size()["width"])
-                except Exception:
-                    _vw = 0.0
+                size = _bounded_call(lambda: r.d.get_window_size(), 15.0, None) or {}
+                _vw = float(size.get("width") or 0.0)
                 if _vw and not (0 <= cx <= _vw):
                     notes.append(f"[FAIL] @first_time_slot — slot '{lbl}' is outside the "
                                  f"visible strip (x={cx:.0f} of {_vw:.0f}) and its chip "
@@ -4510,9 +4779,8 @@ class FlowRunner:
         Returns True when the target is (or becomes) fully visible. Reports the search
         as it goes so a failure says which cards were seen and what the scroll did.
         """
-        try:
-            viewport_w = float(r.d.get_window_size()["width"])
-        except Exception:
+        viewport_w = self._window_w(r)           # bounded (see _window_size)
+        if not viewport_w:
             return False
 
         def _fmt(cards):
@@ -4599,11 +4867,9 @@ class FlowRunner:
                     continue
             r.d.execute_script("mobile: swipe", {"direction": direction, "element": el.id})
             return True
-        try:
-            with _fut.ThreadPoolExecutor(max_workers=1) as ex:
-                return ex.submit(_do).result(timeout=45)
-        except Exception:
-            return False
+        # NOT `with ThreadPoolExecutor()`: its __exit__ waits for a wedged call, so
+        # the 45s ceiling never held (AGENTS.md #5; review 2026-10-19).
+        return bool(_bounded_call(_do, 45.0, False))
 
     # Steps that settle or close a booking. When the diner has already paid in full
     # (a card pre-order in the C-App), "notify payment" COMPLETES the booking and the
@@ -4691,25 +4957,85 @@ class FlowRunner:
             return True
         # Pre-order: the Menu button of THIS booking's card -- the one under its time.
         key = CONSUMER_NAME.replace(" ", "").lower()          # 'Roopa' -> 'RoopaD...'
-        menus = [e for e in els if re.search(r"(menuOrderCard|preOrderCard)$", name(e))
-                 and name(e).lower().startswith(key)]
         slot = getattr(self, "_booked_slot", "")
-        when = [e for e in els if slot and name(e) == slot]
-        if when and menus:
-            ty = frame(when[0])[1]
-            below = [m for m in menus if frame(m)[1] > ty] or menus
-            menus = sorted(below, key=lambda m: frame(m)[1] - ty)
-        if not menus:
-            notes.append("[FAIL] pre-order — no Menu button on the booking's Wallet card")
+
+        def booked_menu(es) -> Optional[dict]:
+            """The Menu button under the booked slot's time. Every booking on the
+            (shared) account carries the same 'RoopaDmenuOrderCard', so it is
+            picked by position under the time, never by name alone."""
+            menus = [e for e in es if re.search(r"(menuOrderCard|preOrderCard)$", name(e))
+                     and name(e).lower().startswith(key)]
+            when = [e for e in es if slot and name(e) == slot]
+            if when and menus:
+                ty = frame(when[0])[1]
+                below = [m for m in menus if frame(m)[1] > ty] or menus
+                menus = sorted(below, key=lambda m: frame(m)[1] - ty)
+            return menus[0] if menus else None
+
+        target = booked_menu(els)
+        if target is None:
+            # MEASURED 2026-10-19 (flow1, run bcac5b28): BOOK NOW confirmed in 6s and
+            # the Wallet came up before its list loaded (search box and coupons, no
+            # cards); one read failed the step in 0.3s. Wait for the booked card.
+            els, target = self._wait_els(udid, booked_menu, 15.0)
+        if target is None:
+            notes.append("[FAIL] pre-order — no Menu button on the booking's Wallet card "
+                         "(waited 15s for the Wallet to list it)")
             return False
-        ok, how = _idbd.tap_el(udid, menus[0], els)
-        for _ in range(16):
-            time.sleep(0.5)
-            if any(name(e).endswith("Inc") for e in _idbd.describe_all(udid)):
-                notes.append(f"[ok] pre-order — opened the menu from the booking's Wallet "
-                             f"card ({name(menus[0])}, {how})")
-                return True
-        notes.append(f"[FAIL] pre-order — tapped {name(menus[0])} but the menu did not open")
+        label = name(target)
+        # Two tries. MEASURED 2026-10-17 (PAY4, run 4824d34d): one tap on the card's
+        # Menu, right after BOOK NOW landed on the Wallet, left the Wallet as it was --
+        # the card was still settling. The tap's own result was not even recorded.
+        def press(t, es) -> Tuple[bool, str]:
+            """Tap the Menu / Pre-Order button. Its inner text answers a hit-test at its
+            centre, which tap_el's strict check reads as 'covered' -- MEASURED
+            2026-10-21 (flow1/flow2, runs 2618714e, cc098587): the open event's
+            Pre-Order, fully on screen, refused twice. _tap_inside accepts a child
+            inside the button's own frame (the same trap as the Wallet's Close)."""
+            ok, how = _idbd.tap_el(udid, t, es, scroll=False)
+            if ok:
+                return True, how
+            if self._tap_inside(udid, t)[0]:
+                return True, "idb, inside its frame"
+            ok, how = _idbd.tap_el(udid, t, es)          # off-screen: scroll it into view
+            if ok:
+                return True, how
+            fresh = booked_menu(_idbd.describe_all(udid) or es)
+            if fresh is not None and self._tap_inside(udid, fresh)[0]:
+                return True, "idb, scrolled into view, inside its frame"
+            return False, how
+
+        tries = []
+        for attempt, wait in ((1, 8.0), (2, 12.0)):
+            if attempt > 1:
+                # Re-pick from a FRESH read: the list may have settled since, and
+                # "the Menu nearest the old y" can be another booking's (review
+                # 2026-10-19). If the booked card's Menu is gone, the first tap is
+                # navigating: do not tap (and scroll) the menu page that is opening.
+                els = _idbd.describe_all(udid) or els
+                target = booked_menu(els) if any(name(e) == slot for e in els) else None
+                if target is None:
+                    tries.append("no second tap: the Wallet card is gone")
+                    deadline = time.time() + wait
+                    while time.time() < deadline:
+                        time.sleep(0.5)
+                        if any(name(e).endswith("Inc") for e in _idbd.describe_all(udid)):
+                            notes.append(f"[ok] pre-order — opened the menu from the booking's "
+                                         f"Wallet card ({label}; it opened late)")
+                            return True
+                    break
+            ok, how = press(target, els)
+            tries.append(how if ok else f"tap refused: {how}")
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                time.sleep(0.5)
+                if any(name(e).endswith("Inc") for e in _idbd.describe_all(udid)):
+                    notes.append(f"[ok] pre-order — opened the menu from the booking's Wallet "
+                                 f"card ({label}, {how}"
+                                 + (", second tap" if attempt > 1 else "") + ")")
+                    return True
+        notes.append(f"[FAIL] pre-order — the menu did not open from {label} "
+                     f"({'; '.join(tries)})")
         return False
 
     def _send_to_kitchen(self, notes: List[str], wait: float = 12.0) -> bool:
@@ -4801,9 +5127,26 @@ class FlowRunner:
                 notes.append(f"[FAIL] @pay:{method} — opened the diner's card but no "
                              f"payment methods appeared (payment not requested yet?)")
                 return False
-        bill = self._bill_total_idb(els)
+        self._payment_accepted = None                    # see the Confirm outcome below
+
+        def read_bill(es) -> Optional[float]:
+            b = self._payer_card_total(es, diner_card(es))
+            return b if b is not None and b >= 0.005 else self._bill_total_idb(es)
+
+        bill = read_bill(els)
+        if bill is not None and bill < 0.005:
+            # Right after Pay For -> Apply the panel re-renders and can print 0 for a
+            # moment (the footer prints 0 while totalCost is not > 0,
+            # PaymentDetails.js:4997-5002): read again before calling it 0.
+            els, _ = wait_for(lambda es: True if (read_bill(es) or 0) >= 0.005 else None, 6.0)
+            bill = read_bill(els)
         if bill is None:
             notes.append(f"[FAIL] @pay:{method} — could not read the bill total")
+            return False
+        if bill < 0.005:
+            # A 0.00 bill entered as a payment wipes nothing and pays nothing.
+            notes.append(f"[FAIL] @pay:{method} — the payer's card reads a bill of 0.00 € "
+                         f"(nothing to pay, or the wrong card is open)")
             return False
         # Cash is tendered over the bill so the change calculation gets checked.
         amount = round(bill + PAY_OVER_BY, 2) if method == "cash" else bill
@@ -4868,7 +5211,7 @@ class FlowRunner:
         # only when it has really folded (its payment methods are gone); and before
         # confirming, check the amount is on the method -- if it reads 0 € (lost
         # when the card folded), enter it again (as asked, 2026-10-01).
-        confirm = None
+        confirm, shown = None, None
         for round_ in (1, 2):
             els, confirm = wait_for(lambda es: find(("paymentConfirmBtn",), es), 6.0)
             if find(buttons, els) is None:              # the card folded: reopen it
@@ -4878,13 +5221,22 @@ class FlowRunner:
                     notes.append(f"    · {method}: the profile card folded — reopened it")
                 els, _ = wait_for(lambda es: find(buttons, es))
                 els, confirm = wait_for(lambda es: find(("paymentConfirmBtn",), es), 4.0)
+            # The amount under the method IS what Confirm will charge
+            # (payingWholeAmount, PaymentDetails.js:2265). Confirm is greyed until it
+            # covers the bill, and a greyed Confirm takes a tap silently (no
+            # accessibility state) -- so check it here, not by tapping.
             shown = on_method(els)
-            if shown is not None and shown < 0.01 and round_ == 1:
-                notes.append(f"    · {method}: the amount did not stay on the payment "
-                             f"(0 €) — entering it again")
-                if not enter_amount():
-                    return False
-                continue
+            if shown is not None and abs(shown - amount) > 0.005:
+                if round_ == 1:
+                    notes.append(f"    · {method}: the payment shows {shown:.2f} € after "
+                                 f"Input of {text} € — entering it again")
+                    if not enter_amount():
+                        return False
+                    continue
+                notes.append(f"[FAIL] @pay:{method} — entered {text} € twice but the payment "
+                             f"shows {shown:.2f} €: the app did not keep the amount; not "
+                             f"confirming")
+                return False
             break
         if confirm is None:
             notes.append(f"[FAIL] @pay:{method} — Confirm Payment not found after "
@@ -4894,19 +5246,34 @@ class FlowRunner:
         if not ok:
             notes.append(f"[FAIL] @pay:{method} — could not tap Confirm Payment ({why})")
             return False
-        # Paid: Confirm goes, the close-table control appears, or -- when the whole
-        # bill is settled (pay for all) -- the app shows the receipt ('TICKET
-        # CLIENT') and closes the booking itself. Measured 2026-10-01 on 4954:
-        # that took longer than 15s, so a payment that went through read as not
-        # accepted and the next step paid AGAIN.
-        els, done = wait_for(lambda es: True if (find(("closeTableBtn",), es) or
-                                                 self._settled_screen(es) or
-                                                 not find(("paymentConfirmBtn",), es))
-                             else None, 45.0)
+
+        # Settled: the close-table control appears, or -- when the whole bill is
+        # settled -- the app shows the receipt ('TICKET CLIENT') and closes the
+        # booking itself. ACCEPTED: the call returned 2xx -- onConfirmPay zeroes the
+        # entered amount (Screens/Event/index.js:1093-1095; MEASURED 2026-10-19 on
+        # 5237: 85.8 € -> 0 € within ~4s) or the card refreshes and folds. Accepted is
+        # NOT applied: when one profile pays for several, staging ignores an amount
+        # that equals the bill (see _close_table) and the booking stays PAYMENT.
+        def outcome(es):
+            if find(("closeTableBtn",), es) or self._settled_screen(es):
+                return "settled"
+            if not find(("paymentConfirmBtn",), es):
+                return "accepted"
+            now = on_method(es)
+            if shown is not None and shown >= 0.005 and now is not None and now < 0.005:
+                return "accepted"
+            return None
+
+        els, res = wait_for(outcome, 45.0)
+        if res:
+            self._payment_accepted = amount
         change = f", change {amount - bill:.2f} €" if method == "cash" else ""
         notes.append(f"[ok] Bill check: total €{bill:.2f}, paid €{amount:.2f} by "
                      f"{method}{change}; Confirm Payment "
-                     + ("accepted" if done else "tapped (result checked by close table)"))
+                     + ("accepted; the booking settled" if res == "settled" else
+                        "accepted (the app cleared the entered amount)" if res else
+                        "tapped, but the app did not react in 45s (result checked by "
+                        "close table)"))
         return True
 
     @staticmethod
@@ -4919,6 +5286,34 @@ class FlowRunner:
         if "My Bookings" in names and "paymentConfirmBtn" not in names:
             return "board"
         return ""
+
+    def _payer_card_total(self, els: List[dict], card: Optional[dict]) -> Optional[float]:
+        """The 'Total' printed INSIDE the payer's open card: their own share plus
+        everyone they pay for (PaymentDetails.js:1133-1141).
+
+        MEASURED 2026-10-19 (run 309869d5): the bottom-most 'Total' on screen was a
+        paid-for guest's card ('Total 0€', PaymentDetails.js:1147-1153), so the bill
+        read 0.00 and 0.00 was entered. The card's own Total is the first small
+        'Total' row below its header and above the next card's header; the panel's
+        footer Total (h~74) sits outside the cards."""
+        if card is None:
+            return None
+        name, frame = _idbd.name, _idbd.frame
+        top = frame(card)[1]
+        heads = sorted(frame(e)[1] for e in els
+                       if "accordionCard" in name(e) and frame(e)[1] > top + 1)
+        bottom = heads[0] if heads else float("inf")
+        rows = sorted((e for e in els if name(e).strip().lower() == "total"
+                       and top < frame(e)[1] < bottom and frame(e)[3] < 40),
+                      key=lambda e: frame(e)[1])
+        for t in rows:
+            ty = frame(t)[1] + frame(t)[3] / 2
+            for e in els:
+                m = self._MONEY_RE.match(name(e) or "")
+                if m and frame(e)[3] < 40 and frame(e)[0] > frame(t)[0] \
+                        and abs(frame(e)[1] + frame(e)[3] / 2 - ty) < 12:
+                    return float(m.group(1).replace(",", "."))
+        return None
 
     def _bill_total_idb(self, els: List[dict]) -> Optional[float]:
         """The order's Total: the '36.05  €' text on the row of a 'Total' label
@@ -5021,7 +5416,9 @@ class FlowRunner:
         for _ in range(4):                 # the panel refreshes a beat after completion
             els = _idbd.describe_all(udid)
             names = {_idbd.name(e) for e in els}
-            if names & {"ePaymentBtn", "cashPaymentBtn", "foodVoucherBtn",
+            # 'epaymentBtn' is the real id (PaymentDetails.js:2210); 'ePaymentBtn'
+            # is kept for an older build.
+            if names & {"epaymentBtn", "ePaymentBtn", "cashPaymentBtn", "foodVoucherBtn",
                         "E-Payment", "Cash", "Food Voucher"}:
                 return ""                  # a bill is open: there is something to pay
             # Close Table renders ONLY once the bill is paid:
@@ -5070,8 +5467,54 @@ class FlowRunner:
                            "RESERVED", "COMPLETED", "CANCELLED", "EXPIRED", "DECLINED",
                            "SERVE")
 
+    def _own_panel_card(self, cands: list, want_hhmm: str, notes: List[str],
+                        where: str = "My Orders panel") -> tuple:
+        """Of several panel bookings at the booked slot, the one THIS run made.
+
+        Each card prints when its booking last changed, right of its window
+        (OrderCard: moment(updatedAt).format('HH:mm')). This run changed its own
+        booking from its BOOK NOW / Save until this segment began, so the card that
+        changed inside that span is ours. MEASURED 2026-10-19 (Guests): 5232 --
+        another diner on the shared 'Roopa D' account, 1 person, 11x pre-orders --
+        sat RESERVED at 11:40 beside this run's booking and was opened instead.
+        cands: [(ticket, status, window_line, block_lines)], in panel order."""
+        if len(cands) == 1:
+            return cands[0]
+        tickets = ", ".join(c[0] for c in cands)
+        since = getattr(self, "_touched_since", None)
+        until = getattr(self, "_seg_started_at", None)
+        if since and until:
+            def minute(epoch: float) -> int:
+                t = time.localtime(epoch)
+                return t.tm_hour * 60 + t.tm_min
+
+            lo, hi = minute(since) - 1, minute(until) + 1
+
+            def changed(block) -> Optional[int]:
+                t = next((t for t in block
+                          if re.fullmatch(r"\d{1,2}[:.]\d{2}", t[0].strip())), None)
+                if t is None:
+                    return None
+                h, m = re.split(r"[:.]", t[0].strip())
+                return int(h) * 60 + int(m)
+
+            ours = [c for c in cands if (changed(c[3]) is not None
+                                         and lo <= changed(c[3]) <= hi)]
+            # Only a time that was READ can rule a card out: a missed or merged OCR
+            # time is "unknown", not "someone else's" (review 2026-10-19).
+            unread = [c for c in cands if changed(c[3]) is None]
+            if len(ours) == 1 and not unread:
+                at = changed(ours[0][3])
+                notes.append(f"    · {where}: {len(cands)} bookings at {want_hhmm} "
+                             f"({tickets}); took {ours[0][0]} — it last changed at "
+                             f"{at // 60:02d}:{at % 60:02d}, while this run was booking")
+                return ours[0]
+        notes.append(f"    · {where}: {len(cands)} bookings at {want_hhmm} "
+                     f"({tickets}) and none is clearly this run's — took the first")
+        return cands[0]
+
     def _open_from_panel(self, slot: str, statuses: tuple, what: str,
-                         notes: List[str], pages: int = 8) -> bool:
+                         notes: List[str], pages: int = 8, budget: float = 75.0) -> bool:
         """Open the booking straight from the right-hand My Orders panel.
 
         The panel lists today's bookings with ticket, status and time window --
@@ -5105,8 +5548,32 @@ class FlowRunner:
             notes.append(f"    · My Orders panel: {why} — trying the calendar")
             return False
 
+        def ticket_lines(lines) -> list:
+            """The cards' ticket numbers, top first. A card's SECOND row carries its
+            window, its table badge and its time ('11:20 - 12:20 | I16 | 11:18');
+            MEASURED 2026-10-17 (runs 30c434a6, e0685fc6, ...): OCR reads table 'I16'
+            as '116', which split card 5203 in two -- 5203 lost its window, '116'
+            got it with no status, and the booking "read ?" and was skipped. A
+            number on a window's row is that card's table, never a ticket."""
+            def mid(t):
+                return t[2] + t[4] / 2
+
+            rows = [t for t in (lines or [])
+                    if len(re.findall(r"(\d{1,2})[:.](\d{2})", t[0])) >= 2]
+            return sorted((t for t in (lines or []) if re.fullmatch(r"\d{3,6}", t[0].strip())
+                           and not any(abs(mid(t) - mid(w)) < max(t[4], w[4], 8.0)
+                                       for w in rows)),
+                          key=lambda t: t[2])
+
+        # A TIME budget, not just a page count. MEASURED 2026-10-22 (flow3, run
+        # 0aadbb00): on a busy iPad a page (read + OCR + swipe + settle) took 20-30s;
+        # the panel walked down and back up for the whole 240s step and the calendar
+        # route -- which found the same booking in segment 2 -- never ran.
+        give_up_at = time.time() + budget
         seen, direction, turned = None, "down", False
         for page in range(pages * 2):
+            if page and time.time() > give_up_at:
+                return skip(f"no {want_hhmm} booking found in {budget:.0f}s of searching")
             els = _idbd.describe_all(udid)
             if not els:
                 return skip("could not read the screen (idb)")
@@ -5117,21 +5584,28 @@ class FlowRunner:
             # The panel is the right third of the landscape screen (x~795 of 1210).
             x0 = (frame(head)[0] - 30) if head else w_app * 0.64
             lines = screen_text.read_text(udid, (x0, 0, w_app, h_app), els)
-            tickets = sorted((t for t in lines if re.fullmatch(r"\d{3,6}", t[0].strip())),
-                             key=lambda t: t[2])
+            tickets = ticket_lines(lines)
             if not tickets and lines is not None:
                 # Unreadable text usually means the screenshot was turned the wrong
                 # way: re-measure the rotation once and read again.
                 idb_coords.forget(udid)
                 lines = screen_text.read_text(udid, (x0, 0, w_app, h_app), els)
-                tickets = sorted((t for t in lines if re.fullmatch(r"\d{3,6}", t[0].strip())),
-                                 key=lambda t: t[2])
+                tickets = ticket_lines(lines)
             if not lines:
                 return skip("could not read its text")
             if head is None and not any("MY ORDERS" in t[0].upper() for t in lines):
                 return skip("not on this screen")
             if not tickets:
                 return skip("no bookings listed")
+            # This run's own booking, when it is known and on this page. Staging is
+            # shared and the earliest bookable slot is the same for everyone:
+            # MEASURED 2026-10-19 (flow2): 5230 RESERVED sat at 11:25 next to this
+            # run's 5229 -- another diner's. Status alone picked the right one only
+            # because 5230 was not served yet. (Only when the ticket is READ on this
+            # page: a misread number must not hide the booking.)
+            mine = getattr(self, "_booked_ticket", "")
+            mine = mine if any(t[0].strip() == mine for t in tickets) else ""
+            cands = []
             for i, tk in enumerate(tickets):
                 y_top = tk[2] - 15
                 y_end = tickets[i + 1][2] - 15 if i + 1 < len(tickets) else h_app
@@ -5147,12 +5621,19 @@ class FlowRunner:
                 status = next((w for w in self._PANEL_STATUS_WORDS
                                if re.search(rf"\b{w}\b", up)), "")
                 ticket = tk[0].strip()
+                if mine and ticket != mine:
+                    notes.append(f"    · My Orders panel: the {want_hhmm} booking {ticket} "
+                                 f"is not this run's ({mine}) — skipped")
+                    continue
                 st = _norm(status)
                 if not any(st == ok or st.startswith(ok) for ok in statuses):
                     notes.append(f"    · My Orders panel: the {want_hhmm} booking "
                                  f"{ticket} reads {status or '?'} — not "
                                  f"{'/'.join(statuses)}")
                     continue
+                cands.append((ticket, status, window, block))
+            if cands:
+                ticket, status, window, _block = self._own_panel_card(cands, want_hhmm, notes)
                 notes.append(f"    · found the {want_hhmm} booking in the My Orders "
                              f"panel: {ticket} {status}".rstrip())
                 wx, wy = window[1] + window[3] / 2, window[2] + window[4] / 2
@@ -5166,8 +5647,23 @@ class FlowRunner:
                     self._remember_ticket(ticket, notes)
                     self._remember_status(status)
                 return ok and self._reservation_opened(notes, what, slot, "My Orders panel")
-            # Not on this page. Has the list stopped moving? Then this end is done:
-            # turn round once and walk back up to the top.
+            # Not on this page. The header says how many the list holds ('In Queue
+            # 05'); when the page already shows them all there is nothing to scroll to.
+            # MEASURED 2026-10-22: five cards, all on screen, and the search still paged
+            # down and back up for minutes on a busy iPad.
+            queue = None
+            iq = next((t for t in lines if t[0].strip().lower().startswith("in queue")), None)
+            if iq is not None:
+                m = re.search(r"(\d{1,3})\s*$", iq[0])
+                num = m.group(1) if m else next(
+                    (t[0].strip() for t in lines if re.fullmatch(r"\d{1,3}", t[0].strip())
+                     and t[1] > iq[1] and abs(t[2] - iq[2]) < 14), None)
+                queue = int(num) if num else None
+            if queue is not None and len(tickets) >= queue:
+                return skip(f"no {'/'.join(statuses)} booking at {want_hhmm} among the "
+                            f"{queue} listed")
+            # Has the list stopped moving? Then this end is done: turn round once and
+            # walk back up to the top.
             sig = tuple(t[0].strip() for t in tickets)
             if sig == seen:
                 if turned:
@@ -5334,11 +5830,13 @@ class FlowRunner:
         # scan fired immediately reads an empty board. Keep this cheap: each
         # _idb_els() is a subprocess, and this step has a 150s ceiling that a
         # 20-iteration poll blows on its own.
+        board_empty = False
         for _ in range(5):
             if any("card" in (e.get("label") or "").lower() for e in self._idb_els()):
                 break
             time.sleep(2.0)
         else:
+            board_empty = True
             notes.append("[warn] booking board still empty — no cards rendered")
 
         name = CONSUMER_NAME.lower()
@@ -5416,10 +5914,7 @@ class FlowRunner:
             # below the fold. The previous version tapped that stale coordinate, hit
             # empty space, and the run then clicked a board card instead of a sidebar
             # row and sat in "no meaningful UI change" for 240s.
-            try:
-                _h = float(r.d.get_window_size()["height"])
-            except Exception:
-                _h = 0.0
+            _h = self._window_h(r)
             if _h and not (0.05 * _h <= b["cy"] <= 0.92 * _h):
                 notes.append(f"    · the {hour_lbl} events badge is off-screen "
                              f"(y={b['cy']:.0f} of {_h:.0f}) — scrolling it into view")
@@ -5519,9 +6014,8 @@ class FlowRunner:
                 els = self._idb_els()
                 y = hour_y(els)
                 if y is not None:
-                    try:
-                        h = float(r.d.get_window_size()["height"])
-                    except Exception:
+                    h = self._window_h(r)
+                    if not h:
                         return True
                     # Comfortably inside the visible area, not under the header/footer.
                     if 0.12 * h <= y <= 0.80 * h:
@@ -5540,9 +6034,8 @@ class FlowRunner:
             y_final = hour_y(self._idb_els())
             if y_final is None:
                 return False
-            try:
-                h2 = float(r.d.get_window_size()["height"])
-            except Exception:
+            h2 = self._window_h(r)
+            if not h2:
                 return True
             return 0.05 * h2 <= y_final <= 0.92 * h2
 
@@ -5671,6 +6164,10 @@ class FlowRunner:
                 if self._table_modal_up():
                     notes.append("    · table sheet was covering the board — dismissing it")
                     self._dismiss_table_modal(r, notes)
+                    if time.time() > _deadline:          # a slow dismissal (relaunch)
+                        notes.append("    · giving up the card search: dismissing the "
+                                     "table sheet used up its time")
+                        return None
                 # Bring the booked hour into view before choosing a card. Done once the
                 # board has actually rendered (scrolling an empty list does nothing) and
                 # only once, so a re-poll does not walk the calendar away from the row.
@@ -5743,7 +6240,15 @@ class FlowRunner:
         def _opened_from_sidebar() -> bool:
             return self._reservation_opened(notes, what, slot, "events list")
 
-        label = _select_today_and_find(stale_ok=True)
+        # Measured 2026-10-17 (new iPad Pro M5): after the login the board stayed
+        # empty and the panel read "Orders Not Found"; the calendar search below then
+        # polled the empty board for ~100s before relaunching, and the relaunch found
+        # booking 5206 at once. Still empty after the panel check = stale: relaunch now.
+        if board_empty and not any("card" in (e.get("label") or "").lower()
+                                   for e in self._idb_els()):
+            label = _BOARD_STALE
+        else:
+            label = _select_today_and_find(stale_ok=True)
         if label is _OPENED_VIA_SIDEBAR:
             if _opened_from_sidebar():
                 return True
@@ -5757,11 +6262,11 @@ class FlowRunner:
             notes.append("    · " + ("the board has not received the booking"
                                      if stale else "card not found")
                          + " — relaunching business app once and retrying")
-            try:
-                r.d.terminate_app(bundle); time.sleep(1.5)
-                r.d.activate_app(bundle); time.sleep(8)
-            except Exception as e:
-                notes.append(f"    · relaunch note: {type(e).__name__}")
+            if not self._relaunch_business(notes, what):
+                notes.append(f"[FAIL] {what} — could not relaunch the business app; not "
+                             f"continuing on a board that was never refreshed")
+                return False
+            time.sleep(8)
             # The fresh board: the My Orders panel first, as on the way in.
             if slot and self._open_from_panel(slot, statuses, what, notes):
                 return True
@@ -5840,10 +6345,7 @@ class FlowRunner:
             # really is still outside the viewport.
             _cards = self._cards_on_board()
             _tgt = self._find_target_card(_cards, label, name)
-            try:
-                _vw = float(r.d.get_window_size()["width"])
-            except Exception:
-                _vw = 0.0
+            _vw = self._window_w(r)              # bounded (see _window_size)
             _reachable = bool(_tgt) and (not _vw or self._target_in_viewport(_tgt, _vw))
             # NEVER swipe sideways while the hour's events list is open. The list is
             # a VERTICAL sidebar, so a horizontal swipe on it reaches nothing; worse,
@@ -6007,6 +6509,35 @@ class FlowRunner:
         before = labels()
         cards = invites(before)
         if not cards:
+            # MEASURED 2026-10-21 (flow5/flow6, runs 8b62a304, 61c5bf06): the Wallet
+            # opened with an OLD event expanded -- the previous flow's Completed one --
+            # and while an event is open the list's cards are not in the tree. One read
+            # then failed the step although the waiter had just saved the invitation.
+            # Close the open event, then give the invitation time to arrive (one pull
+            # to refresh half-way).
+            key = _norm(CONSUMER_NAME)
+            close = next((e for e in self._idb_els() if e["label"].endswith("Close")
+                          and " " not in e["label"] and _norm(e["label"]).startswith(key)),
+                         None)
+            if close is not None:
+                # The button's own text sits inside it, so a plain tap at its centre
+                # presses it (the verified tap would read that text as 'covered').
+                self._idb_tap(close["cx"], close["cy"])
+                notes.append("    · accept appointment — closed an open event to see the list")
+            for i in range(14):                          # ~20s
+                time.sleep(1.5)
+                els = self._idb_els()
+                before = [e["label"] for e in els if e["label"]]
+                cards = invites(before)
+                if cards:
+                    break
+                if i == 6:                               # pull to refresh, once
+                    app = next((e for e in els if e.get("type") == "Application"), None)
+                    if app is not None and app.get("w") and app.get("h"):
+                        udid = getattr(self, "_cur_udid", "") or DEFAULT_CONSUMER_UDID
+                        _idbd.swipe(udid, app["w"] / 2, app["h"] * 0.30,
+                                    app["w"] / 2, app["h"] * 0.75, 0.6)
+        if not cards:
             # Nothing pending. Distinguish "already accepted" from "never arrived":
             # an accepted invite is in the upcoming list as '<Restaurant>Card'.
             notes.append(
@@ -6015,27 +6546,89 @@ class FlowRunner:
                 f"never reached this account, or it was already accepted. "
                 f"On screen: {before[:18]}")
             return False
-        card = cards[0]
+        # Several invitations can be pending (MEASURED 2026-10-22: a dashboard run that
+        # stopped after creating one left it there), and they all carry the same
+        # '<Restaurant>InviteCard' label -- the card hides its own time. The dialog's
+        # header does show the booking (TimeLine), so open them in turn and accept the
+        # one for THIS run's slot.
+        slot = getattr(self, "_booked_slot", "") or ""
 
-        # 1. Open the invitation modal. The card is the only way in — its onPress sets
-        #    invVis. Retry the tap: a LogBox toast can eat it, exactly as it does for
-        #    BOOK NOW in @book_appointment.
-        opened = False
-        for attempt in range(1, 4):
-            el = next((e for e in self._idb_els() if e["label"] == card), None)
-            if el is None:
+        def invite_els() -> List[dict]:
+            return sorted((e for e in self._idb_els()
+                           if e["label"].endswith(self._INVITE_SUFFIX)), key=lambda e: e["cy"])
+
+        def open_invite(el) -> bool:
+            for attempt in range(1, 4):
+                self._idb_tap(el["cx"], el["cy"])
+                for _ in range(5):                   # ~7.5s for the modal to render
+                    time.sleep(1.5)
+                    if self._ACCEPT_ID in labels():
+                        if attempt > 1:
+                            notes.append(f"    · accept appointment — modal opened on "
+                                         f"attempt {attempt}")
+                        return True
+                self._clear_logbox()
+                same = [e for e in invite_els() if abs(e["cy"] - el["cy"]) < 20]
+                if not same:
+                    return False
+                el = same[0]
+            return False
+
+        def close_invite() -> None:
+            x = next((e for e in self._idb_els() if e["label"] == "inviteclose"), None)
+            if x is not None:
+                self._idb_tap(x["cx"], x["cy"])
+                for _ in range(4):
+                    time.sleep(1.0)
+                    if self._ACCEPT_ID not in labels():
+                        break
+
+        def already_accepted() -> bool:
+            """This run's slot is already an accepted reservation in the upcoming list:
+            its time on the same row as 'RESERVATION' (read from the screen -- the cards
+            hide their text from accessibility)."""
+            if not slot:
+                return False
+            from automation.scenarios import screen_text
+            udid = getattr(self, "_cur_udid", "") or DEFAULT_CONSUMER_UDID
+            lines = screen_text.read_text(udid) or []
+            return any(t[0].strip() == slot and any(
+                "RESERVATION" in u[0].upper() and abs(u[2] - t[2]) < 20 for u in lines)
+                for t in lines)
+
+        pending = invite_els()
+        n_before = len(pending)
+        card = pending[0]["label"] if pending else cards[0]
+        opened, openable = False, 0
+        for idx, el in enumerate(pending[:4]):
+            # A CANCELLED invitation is listed but disabled (Upcoming.js: disabled=
+            # {el?.canceled}); its tap does nothing. MEASURED 2026-10-22: the only card
+            # left was a cancelled 11:15 one. Try the next.
+            if not open_invite(el):
+                continue
+            openable += 1
+            if n_before == 1 or not slot or re.search(
+                    rf"(?<!\d){re.escape(slot)}(?!\d)", " ".join(labels())):
+                if n_before > 1:
+                    notes.append(f"    · accept appointment — {n_before} invitations pending; "
+                                 f"#{idx + 1} is this run's ({slot})")
+                opened = True
                 break
-            self._idb_tap(el["cx"], el["cy"])
-            for _ in range(5):                       # ~7.5s for the modal to render
-                time.sleep(1.5)
-                if self._ACCEPT_ID in labels():
+            close_invite()
+        if not opened and openable:
+            notes.append(f"    · accept appointment — {n_before} invitations pending and "
+                         f"none shows {slot}; accepting the first that opens")
+            for el in invite_els()[:4]:
+                if open_invite(el):
                     opened = True
                     break
-            if opened:
-                if attempt > 1:
-                    notes.append(f"    · accept appointment — modal opened on attempt {attempt}")
-                break
-            self._clear_logbox()
+        if not opened and already_accepted():
+            # MEASURED 2026-10-22 (flow6, 11:45): the waiter's booking was already an
+            # accepted reservation before this step ran -- on the shared account someone
+            # else (or the app) accepted it. The booking is RESERVED either way.
+            notes.append(f"[ok] accept appointment — the {slot} booking is already accepted "
+                         f"(it is a reservation in the upcoming list; not accepted by this run)")
+            return True
         if not opened:
             notes.append(
                 f"[FAIL] accept appointment — tapped the pending appointment {card!r} but the "
@@ -6059,7 +6652,8 @@ class FlowRunner:
             if any(i in now for i in self._POST_ACCEPT_IDS):
                 post_modal = accepted = True
                 break
-            if self._ACCEPT_ID not in now and (card not in now or self._ACCEPT_TOAST in now):
+            if self._ACCEPT_ID not in now and (len(invites(now)) < n_before
+                                               or self._ACCEPT_TOAST in now):
                 accepted = True
                 break
         if not accepted:
@@ -6082,11 +6676,12 @@ class FlowRunner:
         # 4. Final proof: the invitation is gone from the pending list.
         self._clear_logbox()
         after = labels()
-        if card in after:
+        # Count, not label: every pending invitation carries the same label.
+        if len(invites(after)) >= n_before:
             notes.append(
                 "[FAIL] accept appointment — pending appointment found, but acceptance action "
-                f"did not transition to the expected state: {card!r} is STILL in the pending "
-                f"list after ACCEPT. On screen: {after[:18]}")
+                f"did not transition to the expected state: still {len(invites(after))} "
+                f"pending invitation(s) after ACCEPT (was {n_before}). On screen: {after[:18]}")
             return False
         notes.append(f"[ok] accept appointment — {card!r} accepted; it left the pending list"
                      + (" (booking-confirmed modal dismissed via orderLater)" if post_modal else ""))
@@ -6163,6 +6758,23 @@ class FlowRunner:
         def ours(ev) -> bool:
             return bool(ev) and ev[0] == "TODAY" and (not slot or ev[1] == slot)
 
+        # The consumer account is SHARED on staging: MEASURED 2026-10-19 another
+        # diner's booking sat at this run's exact slot. A pre-ordered event prints
+        # its ticket ('TICKET: 5229', UpcomingCard.js:3668); when it is readable and
+        # this run knows its own (the waiter noted it), a different one is not ours.
+        mine = getattr(self, "_booked_ticket", "")
+
+        def ticket_of(es) -> str:
+            for e in es:
+                m = re.match(r"^TICKET:\s*(\d{3,6})$", name(e).strip())
+                if m:
+                    return m.group(1)
+            return ""
+
+        def someone_elses(es) -> str:
+            tk = ticket_of(es)
+            return tk if (mine and tk and tk != mine) else ""
+
         def close_open(es) -> None:
             btn = next((e for e in es if name(e).endswith("Close") and " " not in name(e)
                         and _norm(name(e)).startswith(key)), None)
@@ -6186,9 +6798,10 @@ class FlowRunner:
 
         seen_codes, seen = set(), []
         opened = self._event_open(els)
-        if opened and not ours(opened):
+        if opened and (not ours(opened) or someone_elses(els)):
             seen_codes.add(self._event_code(els))
-            seen.append(" ".join(opened))
+            other = someone_elses(els)
+            seen.append(" ".join(opened) + (f" (ticket {other})" if other else ""))
             close_open(els)
             opened = None
         opens = 0
@@ -6212,12 +6825,14 @@ class FlowRunner:
                 if not ev:
                     continue
                 code = self._event_code(els)
-                if ours(ev):
+                other = someone_elses(els)
+                if ours(ev) and not other:
                     opened = ev
                     break
                 if code not in seen_codes:
                     seen_codes.add(code)
-                    seen.append(" ".join(ev) + (f" ({status.lower()})" if status else ""))
+                    seen.append(" ".join(ev) + (f" (ticket {other})" if other else
+                                                f" ({status.lower()})" if status else ""))
                 close_open(els)
             if not opened:
                 _idbd.swipe(udid, 200, H * 0.70, 200, H * 0.35, 1.2)     # next page
@@ -6234,6 +6849,18 @@ class FlowRunner:
             (e for e in es if self._CHECKOUT_RE.search(name(e))
              and _norm(name(e)).startswith(key)), None), 8.0)
         if btn is None:
+            # MEASURED 2026-10-17 (flow2, run 56bf81f4): the pre-order was paid by card
+            # at booking, so after Notify Payment nothing was left; the event showed
+            # 'RoopaDorderCardCompleted' (the paid-in-full proof, see _consumer_epay)
+            # and no Checkout. That is the right outcome, not a missing button.
+            if any(name(e).endswith("orderCardCompleted") and _norm(name(e)).startswith(key)
+                   for e in els):
+                self._consumer_paid_in_full = True
+                tk = ticket_of(els)
+                notes.append(f"[ok] {tag} — {which} is already paid in full (the card reads "
+                             f"Completed; the pre-order covered the bill) — no Checkout needed"
+                             + (f" (ticket {tk}, this run's)" if tk and tk == mine else ""))
+                return True
             notes.append(f"[FAIL] {tag} — opened {which} but it has no Checkout (Checkout "
                          f"shows only after the waiter's Notify Payment)")
             return False
@@ -6273,6 +6900,10 @@ class FlowRunner:
         def pay_btn(es):
             return next((e for e in es if self._STRIPE_PAY_RE.match(name(e))), None)
 
+        if getattr(self, "_consumer_paid_in_full", False):
+            notes.append(f"[skip] {tag} — nothing left to pay: @consumer_checkout found the "
+                         f"booking already paid in full")
+            return True
         els = _idbd.describe_all(udid)
         # Older builds ask first: 'Re-Initiate Checkout?' and 'Me Only' / Proceed.
         for opt in ("YES, RE-CHECKOUT", "Mepay", "proceedPayment"):
@@ -6305,7 +6936,21 @@ class FlowRunner:
         card = next((name(e) for e in els if name(e).lower().startswith("visa ending")), "")
         if bill is not None and abs(float(amount) - bill) > 0.01:
             notes.append(f"    · {tag}: Stripe asks €{amount} for a bill of €{bill:.2f}")
+        # Let Stripe's sheet finish sliding up first: the same frame on two reads.
+        # MEASURED 2026-10-22 (flow6, run of 05:44Z): a tap ~1s after the sheet appeared
+        # was refused 'covered or scrolled out' with 'Pay €35.02' plainly on screen; on
+        # 2026-10-19 a tap that early landed and the sheet ignored it.
+        last = None
+        for _ in range(8):
+            if last is not None and _idbd.frame(btn) == _idbd.frame(last):
+                break
+            last = btn
+            time.sleep(0.5)
+            els = _idbd.describe_all(udid) or els
+            btn = pay_btn(els) or btn
         ok, how = _idbd.tap_el(udid, btn, els)
+        if not ok and self._tap_inside(udid, btn)[0]:
+            ok, how = True, "idb, inside its frame"         # its own text answers the probe
         if not ok:
             notes.append(f"[FAIL] {tag} — could not tap '{name(btn)}' ({how})")
             return False
@@ -6324,7 +6969,27 @@ class FlowRunner:
                 return "ok", "the payment sheets closed"
             return None
 
-        els, res = self._wait_els(udid, outcome, 45.0)
+        els, res = self._wait_els(udid, outcome, 10.0)
+        if not res and pay_btn(els) is not None:
+            # MEASURED 2026-10-17 (flow4, run 141bf152): the sheet listed 'Visa ending
+            # in 4 2 4 2' twice and sat for 45s with 'Pay €35.02' still showing -- the
+            # tap went in while the sheet was still settling, or with no saved card
+            # selected. The button still showing (not Stripe's spinner) means nothing
+            # is processing: select the saved card and tap Pay once more.
+            visa = next((e for e in els if name(e).lower().startswith("visa ending")), None)
+            if visa is not None:
+                _idbd.tap_el(udid, visa, els)
+                time.sleep(1.0)
+                els = _idbd.describe_all(udid) or els
+            again = pay_btn(els)
+            if again is not None:
+                ok2, how2 = _idbd.tap_el(udid, again, els)
+                notes.append(f"    · {tag}: the sheet did not react to Pay — "
+                             + ("selected the saved card, " if visa is not None else "")
+                             + f"tapped Pay again ({how2 if ok2 else 'tap failed: ' + how2})")
+            els, res = self._wait_els(udid, outcome, 35.0)
+        elif not res:
+            els, res = self._wait_els(udid, outcome, 35.0)
         if not res or res[0] != "ok":
             why = res[1] if res else "Stripe's sheet is still open after 45s"
             notes.append(f"[FAIL] {tag} — tapped 'Pay €{amount}' but the payment did not "
@@ -6430,6 +7095,18 @@ class FlowRunner:
             # The labels select the same way the slide does (durationIndexChange).
             ok, tap_how = _idbd.tap(udid, [f"duration{stop}"])
             els, ok2 = self._wait_els(udid, prompt_gone, 6.0) if ok else (els, False)
+            if not ok2 and needs_area(els):
+                # MEASURED 2026-10-17 (run fabc22b9): the form had no area prompt when
+                # this step began, then re-rendered as its data arrived and dropped
+                # 'Any' -- the slide and the label tap were both refused. Re-select
+                # the area now and set the stop again.
+                _idbd.tap(udid, ["Any"])
+                els, chosen = self._wait_els(udid, lambda es: not needs_area(es), 6.0)
+                if chosen:
+                    notes.append(f"    · {tag}: the form dropped the dining area after "
+                                 f"loading — tapped Any again")
+                    ok, tap_how = _idbd.tap(udid, [f"duration{stop}"])
+                    els, ok2 = self._wait_els(udid, prompt_gone, 6.0) if ok else (els, False)
             if not ok2:
                 toast = self._toast(els)
                 prompt = next((name(e) for e in els
@@ -6874,6 +7551,17 @@ class FlowRunner:
         """Select profiles on the open dialog: which='all' or 'one' (the first one
         not yet selected). Each tap is confirmed by the profile's X appearing.
         Returns (els, [pretty names now selected]) or (els, None) on failure."""
+        if which == "all":
+            # The dialog can still be laying out its avatars when it is first read.
+            # MEASURED 2026-10-19 (run 518bffc6): "all" picked only Guest 1 of three.
+            last = None
+            for _ in range(6):
+                now = tuple(_idbd.name(e) for e in self._profiles(els))
+                if now and now == last:
+                    break
+                last = now
+                time.sleep(0.5)
+                els = _idbd.describe_all(udid) or els
         profiles = self._profiles(els)
         if not profiles:
             notes.append(f"[FAIL] {tag} — the dialog shows no profiles to pick")
@@ -7019,9 +7707,25 @@ class FlowRunner:
             notes.append(f"[FAIL] {tag} — could not tap Assign ({how})")
             return False
         want = before + len(picked)
-        els, done = self._wait_els(
-            udid, lambda es: not any(name(e) in self._ADD_ITEM_SHEET for e in es) and
-            sum(1 for e in self._order_rows(es) if name(e) == dish + "card") >= want, 15.0)
+
+        def landed(es):
+            return not any(name(e) in self._ADD_ITEM_SHEET for e in es) and \
+                sum(1 for e in self._order_rows(es) if name(e) == dish + "card") >= want
+
+        els, done = self._wait_els(udid, landed, 15.0)
+        if not done:
+            # MEASURED 2026-10-17 (run 9b4b29bf, a slow-staging run): 0 rows after
+            # 15s, where eight earlier runs on this iPad saw all 4 in 14-22s. Still
+            # in the dialog = the Assign tap was lost: tap it again. Dialog gone =
+            # the order is late to refresh: give it longer.
+            again = sorted((e for e in els if name(e) == "assignProductsBtn"),
+                           key=lambda e: frame(e)[0])
+            if again:
+                ok2, how2 = _idbd.tap_el(udid, again[0], els, scroll=False)
+                notes.append(f"    · {tag}: the Assign dialog was still open after 15s — "
+                             + ("tapped Assign again" if ok2 else
+                                f"Assign again was refused ({how2}); waiting"))
+            els, done = self._wait_els(udid, landed, 20.0)
         got = sum(1 for e in self._order_rows(els) if name(e) == dish + "card")
         if not done:
             toast = self._toast(els)
@@ -7259,6 +7963,39 @@ class FlowRunner:
         # again and wait for Close Table again. Twice at most. If the card offers
         # nothing to pay, the payment did go through: just wait longer for Close
         # Table rather than paying twice.
+        #
+        # EXCEPT after a payment the app ACCEPTED (Confirm cleared the amount, see
+        # _pay_business) that still did not settle. MEASURED 2026-10-19: when one
+        # profile pays for others, staging IGNORES an amount equal to the bill -- the
+        # 'businessSidePay' event the C-App logs (logs/metro_8084.log) shows
+        # paidAmount 0 for all 13 such payments since 10-01, while every amount ABOVE
+        # the bill settled at once. It looks like an unrounded float comparison:
+        # 24.52+26.26+17.51+17.51 = 85.80000000000001 > 85.80 sent. Paying the same
+        # amount again is ignored again, so: wait once more, then report it.
+        accepted = getattr(self, "_payment_accepted", None)
+        if btn is None and not settled and accepted:
+            # At least ~45s after Confirm in all: a settle that went through once took
+            # longer than 15s (4954, 2026-10-01).
+            more = max(wait, 30.0)
+            els, btn = self._wait_els(
+                udid, lambda es: find(es) or (True if self._settled_screen(es) else None),
+                more)
+            settled = self._settled_screen(els)
+            if btn is True:
+                btn = None
+            if btn is None and not settled:
+                others = getattr(self, "_paid_for_others", None)
+                notes.append(
+                    f"[FAIL] {tag} — the app accepted the payment of {accepted:.2f} € "
+                    f"(Confirm Payment cleared it), but the booking did not settle: Close "
+                    f"Table never appeared in {wait + more:.0f}s."
+                    + (f" One profile paid for {len(others)} others: staging ignores a "
+                       f"payment equal to such a bill (server event: paidAmount 0; it "
+                       f"settles only above the bill — likely an unrounded float sum, "
+                       f"e.g. 85.80000000000001 > 85.80). Server bug, not the test; paying "
+                       f"the same amount again would be ignored again." if others else
+                       " Not paying the same amount again."))
+                return False
         for attempt in (1, 2):
             if btn is not None or settled:
                 break
@@ -7317,8 +8054,10 @@ class FlowRunner:
     def _payment_pending(self, udid: str, els: List[dict]) -> Tuple[str, str]:
         """(what to do, why): ('confirm' | 'pay' | '', reason).
 
-        STRICT, because re-paying a bill that did go through charges it twice
-        (measured: 91.00 against a 90.56 bill). The method buttons are NOT evidence:
+        STRICT, because re-paying a bill that did go through would charge it twice.
+        (The '91.00 against a 90.56 bill' once read as such a double charge was a
+        single 91.00 overpay -- the server event log shows the exact 90.56 payments
+        before it recorded nothing; see _close_table.) The method buttons are NOT evidence:
         on 4954 the card still showed E-Payment/Cash/Voucher for seconds after a
         payment that had registered. So:
           * Confirm Payment still up -> the payment did not complete: 'pay' (the
@@ -7385,6 +8124,10 @@ class FlowRunner:
             return False
         self._payer_card = self._CARD_ID_RE.search(name(c)).group(1)
         payer = self._pretty(self._payer_card[:-len("accordionCard")])
+        # Everyone on the order: one card per profile ('G Guest1accordionCard').
+        owners = list(dict.fromkeys(
+            self._pretty(m.group(1)[:-len("accordionCard")])
+            for e in els for m in [self._CARD_ID_RE.search(name(e))] if m))
         els, pf = self._wait_els(udid, lambda es: find(es, "payForBtn"), 2.0)
         if pf is None:
             _idbd.tap_el(udid, c, els)                   # expand the card
@@ -7452,6 +8195,23 @@ class FlowRunner:
         els, picked = self._select_profiles(udid, els, "all", tag, notes)
         if picked is None:
             return False
+        # "Pay for ALL": everyone on the order's payment panel must be covered.
+        # MEASURED 2026-10-19 (run 518bffc6): only Guest 1 got selected, Roopa then
+        # paid the whole 85.80 € for herself + Guest 1, staging settled THAT, and the
+        # flow passed without testing pay-for-all at all.
+        got = {p.replace(" ", "") for p in picked}
+        missing = [o for o in owners if o.replace(" ", "") not in got]
+        if missing:
+            shown = {_idbd.name(e) for e in self._profiles(els)}
+            off = [e for e in els if _idbd.name(e).endswith("select")
+                   and " " not in _idbd.name(e) and _idbd.name(e) not in self._NOT_PROFILES
+                   and _idbd.name(e) not in shown]
+            notes.append(f"[FAIL] {tag} — the Pay For dialog let {payer} pay only for "
+                         f"{', '.join(p for p in picked if p.replace(' ', '') != payer.replace(' ', '')) or 'nobody'}; "
+                         f"{', '.join(missing)} could not be selected"
+                         + (f" ({len(off)} more avatar(s) off-screen)" if off else
+                            " (not listed in the dialog)"))
+            return False
         ok, how = _idbd.tap(udid, ["applyPayment"], els)
         els, gone = self._wait_els(udid, lambda es: find(es, "applyPayment") is None, 10.0)
         if not ok or not gone:
@@ -7460,6 +8220,7 @@ class FlowRunner:
                          + (f" ({toast!r})" if toast else ""))
             return False
         others = [p for p in picked if p.replace(" ", "") != payer.replace(" ", "")]
+        self._paid_for_others = others                  # see _close_table's report
         notes.append(f"[ok] {tag} — {payer} pays for {', '.join(others) or 'nobody else'}")
         return True
 
@@ -7562,6 +8323,8 @@ class FlowRunner:
             return self._pay_for_all(notes)
         if step == "@waiter_close_table":
             return self._waiter_close_table(r, notes)
+        if step == "@waiter_board":
+            return self._waiter_board(notes)
         if step == "@close_table":
             return self._close_table(notes)
         if step.startswith("@wait_screen:"):
@@ -7902,12 +8665,28 @@ class FlowRunner:
             _ok_fill, _got = _idbd.fill(udid, _field, _val)
             if _ok_fill:
                 return True, f'typed "{_val}" into "{_field}" (idb, verified)', False
-            try:
-                if _fill_field(r.d, _field, _val):
-                    time.sleep(0.3)
-                    return True, f'typed "{_val}" into "{_field}" (direct id)', False
-            except Exception:
-                pass
+            # Bounded: MEASURED 2026-10-17 (flow6, run cf6a0379) the idb fill of
+            # mobileInputBtn did not verify, and this unbounded Appium fallback then
+            # sat until the 240s step watchdog killed the segment.
+            #
+            # A TIMEOUT is not a miss: the abandoned call keeps running (Appium queues
+            # it), so falling through to run_one would type into the field a second
+            # time while the first fill can still clear/send_keys it (review
+            # 2026-10-19). ~44s is a normal Appium fill here, hence 90s.
+            def _appium_fill() -> bool:
+                try:
+                    return bool(_fill_field(r.d, _field, _val))
+                except Exception:
+                    return False                     # a real miss: the resolver may find it
+            _late, _t_af = object(), time.time()
+            _res = _bounded_call(_appium_fill, 90.0, _late)
+            if _res is _late:
+                return False, (f'could not type "{_val}" into "{_field}": the idb fill did not '
+                               f'verify and Appium did not answer in {time.time() - _t_af:.0f}s '
+                               f'(WDA busy?) — not typing a second time'), False
+            if _res:
+                time.sleep(0.3)
+                return True, f'typed "{_val}" into "{_field}" (direct id)', False
         ms = re.match(r'^\s*(?:scroll|swipe)\s+(up|down|left|right)\s*$', step, re.I)
         if ms:
             # Same gesture as XCUITest's `mobile: swipe` on the app (finger travels
@@ -7948,6 +8727,7 @@ class FlowRunner:
         notes: List[str] = list(getattr(self, "_setup_notes", []))
         self._setup_notes = []
         started = time.time()
+        self._seg_started_at = started             # see _own_panel_card
         status = "PASS"
         flaky_steps = 0
         # WHERE + evidence: the first step that fails wins — we screenshot the screen at THAT

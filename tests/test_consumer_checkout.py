@@ -177,3 +177,109 @@ def test_a_completed_booking_needs_no_close(monkeypatch):
 
 def test_c_app_flows_close_through_the_booking():
     assert caf._W_CLOSE == ["@waiter_close_table"]
+
+
+# ── Paid in full: the pre-order covered the bill ─────────────────────────────
+def test_checkout_passes_when_the_booking_is_already_paid_in_full(monkeypatch):
+    """MEASURED 2026-10-17 (flow2, run 56bf81f4): the pre-order was paid by card, so
+    after Notify Payment this run's event read 'RoopaDorderCardCompleted' with no
+    Checkout. Nothing is left to pay -- that is a pass, and E-Payment skips."""
+    open_event = [el("Vya Consumer", 0, 0, 402, 874), el("walletUpcomingSearchInput", 67, 151),
+                  el("RoopaDClose", 300, 200), el("RoopaDorderCardCompleted", 20, 834)]
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: open_event)
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(time=lambda: 0.0, sleep=lambda s: None))
+    r = FlowRunner.__new__(FlowRunner)
+    r.devices = {"consumer": "IPHONE"}
+    r._booked_slot = "11:55"
+    monkeypatch.setattr(r, "_event_open", lambda es: ("TODAY", "11:55"), raising=False)
+    monkeypatch.setattr(r, "_wait_els", lambda udid, pred, secs: (open_event, pred(open_event)),
+                        raising=False)
+    notes = []
+    assert r._consumer_checkout(None, notes)
+    assert "already paid in full" in notes[-1]
+    notes = []
+    assert r._consumer_epay(notes) and notes[-1].startswith("[skip] @consumer_epay")
+
+
+def test_epay_taps_pay_again_when_the_sheet_ignored_the_first_tap(pay):
+    """MEASURED 2026-10-17 (flow4): 'Pay €35.02' stayed on screen for 45s after the
+    tap. With Pay still showing (not Stripe's spinner), select the card and retry."""
+    class Deaf(PaySheets):
+        ignored = False
+
+        def tap_el(self, udid, e, els=None, scroll=True):
+            n = caf._idbd.name(e)
+            if n.startswith("Pay €") and not self.ignored:
+                self.ignored = True
+                self.taps.append(n)
+                return True, "idb"
+            if n.startswith("Visa"):
+                self.taps.append(n)
+                return True, "idb"
+            return super().tap_el(udid, e, els, scroll)
+
+    s = Deaf()
+    ok, notes = pay(s)
+    assert ok, notes
+    assert s.taps == ["ePayment", "Pay €40.31", "Visa ending in 4 2 4 2", "Pay €40.31"]
+    assert any("tapped Pay again" in n for n in notes)
+
+
+def test_another_bookings_event_at_the_same_slot_is_not_taken_as_paid(monkeypatch):
+    """The consumer account is shared on staging (MEASURED 2026-10-19: another
+    diner's booking sat at this run's exact slot). A pre-ordered event prints its
+    ticket; when that is not this run's, it must be skipped -- never called "paid in
+    full" (and never paid)."""
+    state = {"closed": False}
+    theirs = [el("Vya Consumer", 0, 0, 402, 874), el("walletUpcomingSearchInput", 67, 151),
+              el("RoopaDClose", 300, 200), el("TICKET: 5232", 200, 420),
+              el("RoopaDorderCardCompleted", 20, 834)]
+    wallet = [el("Vya Consumer", 0, 0, 402, 874), el("walletUpcomingSearchInput", 67, 151)]
+    screen = lambda: wallet if state["closed"] else theirs                     # noqa: E731
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: screen())
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: None)
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(time=lambda: 0.0, sleep=lambda s: None))
+    r = FlowRunner.__new__(FlowRunner)
+    r.devices = {"consumer": "IPHONE"}
+    r._booked_slot, r._booked_ticket = "11:55", "5229"
+    monkeypatch.setattr(r, "_event_open", lambda es: None if state["closed"] else ("TODAY", "11:55"),
+                        raising=False)
+    monkeypatch.setattr(r, "_event_code", lambda es: "ABCDEF", raising=False)
+    monkeypatch.setattr(r, "_tap_inside",
+                        lambda udid, e: state.__setitem__("closed", True) or (True, "idb"), raising=False)
+    monkeypatch.setattr(r, "_wait_els", lambda udid, pred, secs: (screen(), pred(screen())),
+                        raising=False)
+    notes = []
+    assert not r._consumer_checkout(None, notes)
+    assert state["closed"], "their event must be closed, not used"
+    assert not getattr(r, "_consumer_paid_in_full", False)
+    assert "(ticket 5232)" in notes[-1]
+
+
+def test_epay_taps_inside_pay_when_its_text_answers_the_hit_test(monkeypatch, pay):
+    """MEASURED 2026-10-22 (flow6): 'Pay €35.02' was plainly on screen but the verified
+    tap refused it ('covered or scrolled out'); its own text answers the hit-test."""
+    s = PaySheets()
+    refuse = {"on": True}
+
+    def tap_el(udid, e, els=None, scroll=True):
+        if caf._idbd.name(e).startswith("Pay €") and refuse["on"]:
+            return False, "not reachable (covered or scrolled out)"
+        return PaySheets.tap_el(s, udid, e, els, scroll)
+
+    def tap_point(udid, x, y):
+        s.taps.append("Pay (inside)")
+        s.state = "done"
+        return True, "idb"
+
+    monkeypatch.setattr(caf._idbd, "_probe",
+                        lambda udid, e: el("Pay", caf._idbd.frame(e)[0] + 5, caf._idbd.frame(e)[1] + 2, 30, 14))
+    monkeypatch.setattr(caf._idbd, "tap_point", tap_point)
+    for fn in ("describe_all", "tap"):
+        monkeypatch.setattr(caf._idbd, fn, getattr(s, fn))
+    monkeypatch.setattr(caf._idbd, "tap_el", tap_el)
+    r = FlowRunner.__new__(FlowRunner)
+    r.devices = {"consumer": "IPHONE"}
+    notes = []
+    assert r._consumer_epay(notes), notes
+    assert s.taps == ["ePayment", "Pay (inside)"]
