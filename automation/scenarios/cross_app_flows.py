@@ -6506,6 +6506,27 @@ class FlowRunner:
             return [l for l in ls if l.endswith(self._INVITE_SUFFIX)]
 
         self._clear_logbox()
+
+        # MEASURED 2026-10-22 (flow5, run af87b74a): the Wallet opened on the
+        # COUPONS sub-tab, not Upcoming -- invites render only under Upcoming
+        # (vya-consumer Wallet/index.js), and nothing had asked for Coupon. Cause:
+        # Wallet unmounts on every blur (BottomNavigator.js, unmountOnBlur) but a
+        # stale route param from an earlier Coupon navigation survives and wins on
+        # remount (Wallet/index.js resolveWalletTabName). A bare tap of the Wallet
+        # icon can land back there. Force Upcoming before searching for the invite.
+        tab_labels = labels()
+        if ("walletUpcomingSearchInput" not in tab_labels
+                and "walletCouponSearchInput" in tab_labels):
+            tab = next((e for e in self._idb_els() if e["label"] == "upcomingBlock"), None)
+            if tab is not None:
+                self._idb_tap(tab["cx"], tab["cy"])
+                for _ in range(6):
+                    time.sleep(1.0)
+                    if "walletUpcomingSearchInput" in labels():
+                        break
+                notes.append("    · accept appointment — was on the Coupons sub-tab; "
+                             "switched to Upcoming")
+
         before = labels()
         cards = invites(before)
         if not cards:
@@ -6811,6 +6832,26 @@ class FlowRunner:
             tried_y = set()
             while opens < 12:
                 els = _idbd.describe_all(udid)
+                # MEASURED 2026-10-22 (run 5d85b999): a card tapped on the PRIOR
+                # iteration can take longer than the open-wait to render; the old
+                # code then saw no cards left (`todo` empty, the open event hides
+                # the list) and swiped over it without ever classifying it -- this
+                # run's own ticket 5348 was lost that way, in favour of the one
+                # decoy (ticket 5347) that happened to open fast. Classify any
+                # event already open before looking for more cards to tap.
+                ev = self._event_open(els)
+                if ev:
+                    opens += 1
+                    code = self._event_code(els)
+                    other = someone_elses(els)
+                    if ours(ev) and not other:
+                        opened = ev
+                        break
+                    if code not in seen_codes:
+                        seen_codes.add(code)
+                        seen.append(" ".join(ev) + (f" (ticket {other})" if other else ""))
+                    close_open(els)
+                    continue
                 todo = [(c, st) for c, st in visible_cards(els)
                         if round(frame(c)[1]) not in tried_y]
                 if not todo:
@@ -6821,7 +6862,7 @@ class FlowRunner:
                 if not ok:
                     continue
                 opens += 1
-                els, ev = self._wait_els(udid, self._event_open, 6.0)
+                els, ev = self._wait_els(udid, self._event_open, 15.0)
                 if not ev:
                     continue
                 code = self._event_code(els)
