@@ -143,7 +143,18 @@ def check_env_config() -> CheckResult:
     return CheckResult("Environment Config (.env)", "OK", ".env present")
 
 def check_db_file() -> CheckResult:
-    db_path = "test_automation_new.db"
+    # Report the CONFIGURED database, not a hardcoded filename. A fixed name here
+    # described a file the platform may not even use — and on a machine configured
+    # via .env it reported "OK" for a stale file while the real database was
+    # somewhere else entirely.
+    try:
+        from automation.config import database_url
+        url = database_url()
+        db_path = url.removeprefix("sqlite:///") if url.startswith("sqlite:") else url
+    except Exception:
+        db_path = "test_automation_new.db"
+    if not db_path.startswith("/") and "://" in str(db_path):
+        return CheckResult("Database", "OK", db_path)   # networked DB: nothing to stat
     if os.path.exists(db_path):
         size = os.path.getsize(db_path)
         return CheckResult("Database (SQLite)", "OK", f"{db_path} ({size} bytes)")

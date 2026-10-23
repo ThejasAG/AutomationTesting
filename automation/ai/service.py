@@ -1,6 +1,7 @@
 """Main RCA Service - Coordinates evidence collection and LLM analysis"""
 
-from typing import Any
+from typing import Any, Optional
+import os
 import json
 
 from .provider import create_provider, RCAAnalysis
@@ -8,11 +9,27 @@ from .prompts import RCA_SYSTEM_PROMPT, RCA_OUTPUT_SCHEMA, build_rca_prompt
 from automation.evidence.pii_scrub import PIIConfig
 
 
+def default_rca_config() -> dict[str, Any]:
+    """Provider config for RCA, sourced from the environment.
+
+    Defaults to a local Ollama server so RCA produces real analysis out of the
+    box instead of the mock provider.
+    """
+    return {
+        "provider": os.getenv("LLM_PROVIDER_TYPE", "ollama"),
+        "type": os.getenv("LLM_PROVIDER_TYPE", "ollama"),
+        "model": os.getenv("LLM_MODEL_NAME", "llama3.2"),
+        "model_name": os.getenv("LLM_MODEL_NAME", "llama3.2"),
+        "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    }
+
+
 class RCAService:
     """Root Cause Analysis Service"""
 
-    def __init__(self, provider_config: dict[str, Any], pii_config: PIIConfig = None):
-        self.provider = create_provider(provider_config)
+    def __init__(self, provider_config: Optional[dict[str, Any]] = None, pii_config: PIIConfig = None):
+        # Fall back to the env-driven Ollama config when none is supplied.
+        self.provider = create_provider(provider_config or default_rca_config())
         self.pii_config = pii_config or PIIConfig()
         self.prompt_version = "1.0.0"
 
@@ -33,9 +50,25 @@ class RCAService:
             max_tokens=2000,
         )
 
-        # Parse JSON response
+        # Parse JSON response. Local models (Ollama) routinely wrap the JSON in a
+        # ```json ... ``` markdown fence and add a preamble; strip both, and fall
+        # back to the first {...} block, before giving up.
+        def _extract_json(text: str) -> str:
+            t = text.strip()
+            if "```" in t:
+                seg = t.split("```", 2)
+                t = seg[1] if len(seg) > 1 else t
+                if t.lstrip().lower().startswith("json"):
+                    t = t.lstrip()[4:]
+            t = t.strip()
+            if not t.startswith("{"):
+                start, end = t.find("{"), t.rfind("}")
+                if start != -1 and end > start:
+                    t = t[start:end + 1]
+            return t
+
         try:
-            parsed = json.loads(response.content)
+            parsed = json.loads(_extract_json(response.content))
         except json.JSONDecodeError:
             # Fallback for non-JSON responses
             parsed = {

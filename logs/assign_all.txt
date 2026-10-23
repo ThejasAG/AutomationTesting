@@ -1,0 +1,8 @@
+P| role unknown
+P| cards: []
+P| open -> False
+P|    [warn] booking board still empty — no cards rendered
+P|        · booked slot '16:00' → target 16:00 row
+P|        · card not found — relaunching business app once and retrying
+P|    [FAIL] @open_reservation — no reserved/confirmationpending card for diner 'Roopa' on FRI 21 near 16:00 (already assigned, or backend not synced)
+P|        ↳ 0 card element(s) seen; rejected-for-width: none; labels: []

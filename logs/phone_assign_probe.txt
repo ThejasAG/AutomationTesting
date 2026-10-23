@@ -1,0 +1,20 @@
+IDB n=15
+  ELEM 'STG-VyaBusiness'                        id=''                 Application     (0,0,393,852)
+  ELEM 'closeModal'                             id=''                 GenericElement  (169,581,55,40)
+  ELEM 'Please assign a Table'                  id=''                 StaticText      (11,638,362,24)
+  ELEM 'T0AssignAnyBtn'                         id=''                 GenericElement  (19,684,51,30)
+  ELEM 'T1AssignAnyBtn'                         id=''                 GenericElement  (87,684,52,30)
+  ELEM 'T2AssignAnyBtn'                         id=''                 GenericElement  (154,684,52,30)
+  ELEM 'T3AssignAnyBtn'                         id=''                 GenericElement  (222,684,51,30)
+  ELEM 'T4AssignAnyBtn'                         id=''                 GenericElement  (289,684,52,30)
+  ELEM 'T5AssignAnyBtn'                         id=''                 GenericElement  (357,684,52,30)
+  ELEM 'T6AssignAnyBtn'                         id=''                 GenericElement  (424,684,54,30)
+  ELEM 'T7AssignAnyBtn'                         id=''                 GenericElement  (494,684,51,30)
+  ELEM 'T8AssignAnyBtn'                         id=''                 GenericElement  (561,684,53,30)
+  ELEM '29 Each child in a list should have a ' id=''                 GenericElement  (10,726,373,48)
+  ELEM 'AssignTableBtn'                         id=''                 GenericElement  (11,760,362,54)
+  ELEM '3 no valid “aps-environment” entitleme' id=''                 GenericElement  (10,780,373,48)
+  APPIUM T0AssignAnyBtn: 1 rect={'y': 684, 'x': 19, 'width': 52, 'height': 30} displayed=True selected=false enabled=True
+  APPIUM AssignTableBtn: 1 rect={'y': 760, 'x': 11, 'width': 362, 'height': 54} displayed=False selected=false enabled=False
+  APPIUM closeModal: 1 rect={'y': 581, 'x': 169, 'width': 55, 'height': 40} displayed=True selected=false enabled=True
+  APPIUM T*AssignAnyBtn count: 10

@@ -1,0 +1,117 @@
+{
+  "_comment": [
+    "Per-project, per-environment BUILD configuration.",
+    "",
+    "This file answers one question the platform could not previously answer:",
+    "'the user picked project X, branch Y, environment staging -- what makes the",
+    "artifact a *staging* artifact?'. Before this existed the answer lived only in",
+    "local, never-pushed git commits, so wiping repos/ silently produced production",
+    "artifacts from a staging branch and every staging scenario failed preflight.",
+    "",
+    "Versioned on purpose: a fresh Mac gets working staging builds from a clone of",
+    "this repo alone -- no pbxproj edits, no hand-made commits, no copied .app.",
+    "",
+    "MATCHING: an entry is matched by project 'match' (bundle_id and/or name), so",
+    "adding a project here never requires touching platform code. Environments list",
+    "ONLY the settings they override; anything absent keeps the project's own value.",
+    "An environment that is not listed is NOT SUPPORTED -- the platform says so",
+    "rather than guessing.",
+    "",
+    "iOS note: settings under 'build_settings' are passed to xcodebuild as",
+    "SETTING=VALUE overrides. That keeps the application checkout clean -- nothing",
+    "in the app repo is edited to produce a variant. It works because Info.plist",
+    "reads $(PRODUCT_BUNDLE_IDENTIFIER); a project that hardcodes the id in an",
+    ".xcconfig instead will fail the post-build identity check, loudly, by design.",
+    "",
+    "api_base_url is deliberately OPTIONAL and unset for Vya: staging and production",
+    "intentionally share one backend here. Do not invent a staging URL just because",
+    "an environment is named 'staging'."
+  ],
+  "version": 1,
+  "projects": [
+    {
+      "id": "vya-consumer",
+      "description": "Vya Consumer (iOS, React Native)",
+      "match": {
+        "bundle_ids": [
+          "org.vyapy.sarls.vyaconsumer",
+          "org.vyapy.sarls.vyaconsumerstaging"
+        ],
+        "name_contains": [
+          "consumer",
+          "connsumer"
+        ]
+      },
+      "environments": {
+        "production": {
+          "aliases": [
+            "prod"
+          ],
+          "bundle_id": "org.vyapy.sarls.vyaconsumer",
+          "configuration": "Debug",
+          "metro_port": 8081
+        },
+        "staging": {
+          "bundle_id": "org.vyapy.sarls.vyaconsumerstaging",
+          "configuration": "Debug",
+          "metro_port": 8084,
+          "api_base_url": "https://vya.xorstack.com",
+          "source_replacements": [
+            {
+              "file": "App/Config/Api.js",
+              "find": "export const API_URL = 'https://api.vyapy.com';",
+              "replace": "export const API_URL = 'https://vya.xorstack.com';"
+            },
+            {
+              "file": "ios/vyaconsumer.xcodeproj/project.pbxproj",
+              "find": "PRODUCT_BUNDLE_IDENTIFIER = org.vyapy.sarls.vyaconsumer;",
+              "replace": "PRODUCT_BUNDLE_IDENTIFIER = org.vyapy.sarls.vyaconsumerstaging;"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "vya-business",
+      "description": "Vya Business (iPad, React Native)",
+      "match": {
+        "bundle_ids": [
+          "org.vyapy.sarls.vyabusinessipad",
+          "org.vyapy.sarls.vyabusinessipadstaging"
+        ],
+        "name_contains": [
+          "business",
+          "buisness"
+        ]
+      },
+      "environments": {
+        "production": {
+          "aliases": [
+            "prod"
+          ],
+          "bundle_id": "org.vyapy.sarls.vyabusinessipad",
+          "configuration": "Debug",
+          "metro_port": 8082
+        },
+        "staging": {
+          "bundle_id": "org.vyapy.sarls.vyabusinessipadstaging",
+          "configuration": "Debug",
+          "metro_port": 8083,
+          "api_base_url": "https://vya.xorstack.com",
+          "source_replacements": [
+            {
+              "file": "App/Config/Api.js",
+              "find": "export const API_URL = 'https://api.vyapy.com';",
+              "replace": "export const API_URL = 'https://vya.xorstack.com';"
+            },
+            {
+              "file": "ios/VyaBusinessiPad.xcodeproj/project.pbxproj",
+              "find": "PRODUCT_BUNDLE_IDENTIFIER = org.vyapy.sarls.vyabusinessipad;",
+              "replace": "PRODUCT_BUNDLE_IDENTIFIER = org.vyapy.sarls.vyabusinessipadstaging;"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+A| sheet up: True
+A| chips: 10
+A| AssignTableBtn enabled BEFORE: True
+A| AssignTableBtn enabled AFTER chip: True
+A| + 2s sheet=False new_labels=['STG-VyaBusiness', 'Log 8 of 31', 'Console Error', 'no valid “aps-environment” entitlement string found for appl', 'Source', '2 |']

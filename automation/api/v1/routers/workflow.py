@@ -1,0 +1,259 @@
+"""Workflow / coverage: the app's spine + the full test-suite coverage matrix.
+
+Powers the Workflow view — a visual map of the whole application's flow, colored
+by what's automated / pending / manual-blocked.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from automation.auth.security import get_current_user
+from automation.database.config import get_db
+from automation.database.models import SavedScenario, TestProject
+from automation.workflow.catalog import (
+    SPINE, CONSUMER_FLOW, BUSINESS_FLOW, BRANCH_NODES, CROSS_APP_EDGES,
+    WF_EDGES, CATALOG, summary, plan_path, all_nodes,
+)
+
+router = APIRouter(prefix="/workflow", tags=["workflow"])
+
+# Which spine step each existing SavedScenario name satisfies (for "built" status).
+_SPINE_SCENARIO = {
+    "c_book":     "Book an event",
+    "b_login":    "Business: Login as waiter",
+    "b_assign":   "Business: Assign table + add item + send to kitchen",
+    "b_add":      "Business: Assign table + add item + send to kitchen",
+    "b_send":     "Business: Assign table + add item + send to kitchen",
+    "k_login":    "Business: Kitchen mark ready",
+    "k_ready":    "Business: Kitchen mark ready",
+    "b_serve":    "Business: Serve + pay + close (waiter)",
+    "b_notify":   "Business: Serve + pay + close (waiter)",
+    "b_close":    "Business: Serve + pay + close (waiter)",
+}
+
+
+def _built_spine_ids(db: Session) -> frozenset:
+    """Spine step ids that an existing SavedScenario actually covers."""
+    built = {s.name for s in db.query(SavedScenario).all()}
+    return frozenset(sid for sid, name in _SPINE_SCENARIO.items() if name in built)
+
+
+@router.get("/diagram")
+def get_diagram(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """The spine as an interactive Archify artifact (self-contained HTML).
+
+    Additive: /graph still serves the lane data the existing view renders. This is a
+    richer picture of the SAME catalog, so the two cannot drift. Degrades to
+    {"ok": false, "reason": ...} when node/archify is unavailable — the page keeps its
+    existing lanes rather than breaking.
+    """
+    from automation.workflow.archify_cli import render
+    from automation.workflow.archify_ir import build_ir
+    html, reason = render(build_ir(_built_spine_ids(db)))
+    if html is None:
+        return {"ok": False, "reason": reason}
+    return {"ok": True, "html": html}
+
+
+@router.get("/diagram/refs")
+def get_comparable_refs(current_user=Depends(get_current_user)):
+    """Platform refs the delta can actually be built from.
+
+    catalog.py was added later than `main`, so `main` cannot be compared — and the
+    branches of the apps under test are a different repository entirely. Both used
+    to fail here with a raw git error.
+    """
+    from automation.workflow.catalog_at_ref import comparable_refs
+    refs = comparable_refs()
+    return {"refs": refs, "default": refs[0] if refs else ""}
+
+
+@router.get("/diagram/delta")
+def get_diagram_delta(base_ref: str = "", head_ref: str = "",
+                      db: Session = Depends(get_db),
+                      current_user=Depends(get_current_user)):
+    """Before / Delta / After for the spine, comparing *base_ref* to *head_ref*.
+
+    The spine is defined in automation/workflow/catalog.py, so a change that edits the
+    catalog changes this diagram — which is exactly the review question "what did this
+    change about the app's flow?". Exact added/removed/changed counts come back
+    alongside the artifact so a PR comment can state facts, not impressions.
+
+    head_ref empty = the WORKING TREE, which is what you want while editing locally. A
+    PR passes its head sha instead: the working tree is not the PR, and diffing a
+    reviewer's uncommitted edits against someone else's base would report changes that
+    belong to neither.
+    """
+    from automation.workflow.archify_cli import compare
+    from automation.workflow.archify_ir import build_ir
+    from automation.workflow.catalog_at_ref import spine_ir_at_ref
+
+    from automation.workflow.catalog_at_ref import comparable_refs
+
+    built = _built_spine_ids(db)
+    usable = comparable_refs()
+    # Default to a ref that exists rather than to "main", which does not contain
+    # catalog.py and so always failed.
+    base_ref = (base_ref or "").strip() or (usable[0] if usable else "main")
+
+    base_ir, why = spine_ir_at_ref(base_ref, built)
+    if base_ir is None:
+        hint = (f" Comparable refs in this repository: {', '.join(usable[:6])}."
+                if usable else "")
+        return {"ok": False, "reason":
+                f"{why} — base refs must exist in the PLATFORM repository "
+                f"(where automation/workflow/catalog.py lives), not in the repo of "
+                f"the app under test.{hint}"}
+    if head_ref.strip():
+        head_ir, why = spine_ir_at_ref(head_ref.strip(), built)
+        if head_ir is None:
+            return {"ok": False, "reason": why}
+    else:
+        head_ir = build_ir(built)
+    summary, html, reason = compare(base_ir, head_ir)
+    if not summary or not summary.get("ok"):
+        return {"ok": False, "reason": reason, "summary": summary}
+    return {"ok": True, "base_ref": base_ref,
+            "head_ref": head_ref.strip() or "working tree",
+            "summary": summary.get("summary"), "html": html}
+
+
+@router.get("/coverage")
+def get_coverage(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """The full coverage matrix + which scenarios are actually built."""
+    built = {s.name for s in db.query(SavedScenario).all()}
+    categories = []
+    for cat, items in CATALOG.items():
+        rows = []
+        for it in items:
+            is_built = it["name"] in built
+            rows.append({
+                "name": it["name"],
+                "status": it["status"],                       # auto | manual
+                "built": is_built,
+            })
+        categories.append({
+            "category": cat,
+            "blocked": "BLOCKED" in cat,
+            "scenarios": rows,
+        })
+    return {"summary": summary(), "categories": categories}
+
+
+@router.get("/graph")
+def get_graph(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """The cross-app spine: two lanes (Consumer + Business) + handoff edges."""
+    built = {s.name for s in db.query(SavedScenario).all()}
+
+    def _mk(flow):
+        out = []
+        for i, step in enumerate(flow):
+            scen = _SPINE_SCENARIO.get(step["id"])
+            out.append({
+                "id": step["id"], "label": step["label"], "app": step["app"],
+                "order": i, "status": "built" if (scen and scen in built) else "pending",
+                "scenario": scen,
+            })
+        return out
+
+    consumer = _mk(CONSUMER_FLOW)
+    business = _mk(BUSINESS_FLOW)
+
+    # within-lane sequential edges
+    edges = []
+    for lane in (CONSUMER_FLOW, BUSINESS_FLOW):
+        for i in range(len(lane) - 1):
+            edges.append({"source": lane[i]["id"], "target": lane[i + 1]["id"], "kind": "flow"})
+    # cross-app handoff edges (the connection between the two apps)
+    for e in CROSS_APP_EDGES:
+        edges.append({**e, "kind": "handoff"})
+
+    # branch endpoints (pay methods, order-later) with build status
+    branches = _mk(BRANCH_NODES)
+
+    return {
+        "consumer": consumer, "business": business, "branches": branches,
+        "nodes": consumer + business + branches,
+        "edges": edges,                       # linear + handoff (for the lanes view)
+        "graph_edges": WF_EDGES,              # full interconnected graph (with branches)
+        "handoffs": CROSS_APP_EDGES, "summary": summary(),
+    }
+
+
+@router.get("/path")
+def get_path(goal: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Agent brain: given a GOAL node, read the graph and return the path +
+    the building-block scenarios to run, in order, to recreate that scenario."""
+    labels = {n["id"]: n["label"] for n in all_nodes()}
+    path = plan_path(goal)
+    if not path:
+        return {"goal": goal, "path": [], "steps": [], "scenarios": []}
+    # Map each node on the path to the building-block scenario that performs it.
+    scen_seen = []
+    for nid in path:
+        scen = _SPINE_SCENARIO.get(nid)
+        if scen and scen not in scen_seen:
+            scen_seen.append(scen)
+    return {
+        "goal": goal,
+        "goal_label": labels.get(goal, goal),
+        "path": [{"id": n, "label": labels.get(n, n)} for n in path],
+        "scenarios": scen_seen,   # the ordered building blocks to run to reach the goal
+    }
+
+
+@router.post("/recreate")
+def recreate(goal: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Read the workflow → compose the path's building blocks → RUN them.
+
+    This is the workflow driving execution: name a goal, the platform figures out
+    the flow (no hand-written steps) and recreates it. Runs in the background.
+    """
+    import threading
+    from automation.database.models import SavedScenario, TestProject
+
+    path = plan_path(goal)
+    if not path:
+        return {"started": False, "error": f"No path to goal '{goal}'."}
+    scen_names, seen = [], set()
+    for nid in path:
+        s = _SPINE_SCENARIO.get(nid)
+        if s and s not in seen:
+            seen.add(s); scen_names.append(s)
+    if not scen_names:
+        return {"started": False, "error": "No built scenarios cover this path yet.",
+                "path": [n for n in path]}
+
+    scenarios = db.query(SavedScenario).filter(SavedScenario.name.in_(scen_names)).all()
+    by_name = {s.name: s for s in scenarios}
+    ordered = [by_name[n] for n in scen_names if n in by_name]
+
+    # Resolve each scenario's fallback bundle id BEFORE the thread starts, while a
+    # session is cheap. Holding one open across the Appium runs left an
+    # idle-in-transaction connection for the whole execution on PostgreSQL.
+    fallback_bundles = {}
+    for sc in ordered:
+        if not sc.bundle_id and sc.project_id and sc.project_id not in fallback_bundles:
+            proj = db.query(TestProject).filter(TestProject.id == sc.project_id).first()
+            fallback_bundles[sc.project_id] = proj.app_bundle_id if proj else None
+
+    def _run():
+        from automation.scenarios import run_records  # noqa: F401 — backend run bookkeeping
+        from automation.scenarios.service import run_scenario_headless, ScenarioRequest
+        for sc in ordered:
+            try:
+                req = ScenarioRequest(
+                    project_id=sc.project_id or "", device_id=sc.device_id or "",
+                    bundle_id=sc.bundle_id or fallback_bundles.get(sc.project_id),
+                    steps=sc.steps or [],
+                    name=f"[workflow] {sc.name}", save=False, prepare=False)
+                run_scenario_headless(req)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"started": True, "goal": goal,
+            "composed_from_workflow": scen_names,
+            "message": "Platform read the workflow, composed the path, and is running it."}

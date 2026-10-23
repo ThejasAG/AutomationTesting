@@ -1,0 +1,7 @@
+RUN_ID 129f4648-207c-499a-9b69-090fc0581392
+[114s] «Kitchen: mark the order ready» [ok] already logged in as kitchen (detected kitchen screen)
+[114s] «Kitchen: mark the order ready» ▶ @kitchen_ready
+[132s] «Kitchen: mark the order ready» [FAIL] @kitchen_ready — no order to Ready or Close (kitchen queue empty)
+[132s] «Kitchen: mark the order ready»     ↳ on screen: ['homeBtn', 'kitchenAllBtn', 'kitchenTableBtn', 'kitchenPickupBtn', 'preOrderBtn', 'historyBtn', 'menuBtn']
+[132s] «Kitchen: mark the order ready» [where] failed at step: '@kitchen_ready (step 1/1)'
+DONE status=failed after 132s

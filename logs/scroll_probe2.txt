@@ -1,0 +1,5 @@
+WINDOW {'width': 393, 'height': 852}
+START rect {'y': 1216, 'x': 80, 'width': 281, 'height': 101}
+  swipe 1: dy=883 from=613 to=193 -> rect={'y': 806, 'x': 80, 'width': 281, 'height': 101}
+  swipe 2: dy=473 from=613 to=193 -> rect={'y': 396, 'x': 80, 'width': 281, 'height': 101}
+VISIBLE after 2 swipe(s): {'y': 396, 'x': 80, 'width': 281, 'height': 101}

@@ -106,7 +106,22 @@ class SecretFilter:
 
 
 def install_secret_filter(logger_name: str = ""):
-    """Install SecretFilter on a specific logger (or root logger if empty)."""
+    """Redact secrets from logs, including those from named child loggers.
+
+    A filter on a Logger only sees records logged through THAT logger — records
+    propagating up from children (logging.getLogger("builds"), "api", "deploy",
+    which is how every module here logs) bypass it entirely. Handlers see every
+    propagated record, so the filter has to go on the handlers to be worth
+    anything.
+
+    ponytail: covers handlers present at install time. install_secret_filter()
+    again if a later component (e.g. a new log file) adds its own handler.
+    """
     import logging
+    f = SecretFilter()
     log = logging.getLogger(logger_name)
-    log.addFilter(SecretFilter())
+    log.addFilter(f)                       # direct records to this logger
+    for h in log.handlers:                 # everything propagated from children
+        if not any(isinstance(x, SecretFilter) for x in h.filters):
+            h.addFilter(f)
+    return f

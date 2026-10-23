@@ -1,0 +1,15 @@
+P| role_before unknown
+P| screen ['STG-VyaBusiness', 'My Orders', 'In Queue 00', 'ALL', 'TABLE', 'PICKUP', 'Orders Not Found !!', '5 Possible unhandled pro', 'Orders', 'Pre-Orders']
+P| login -> False
+P|        · app is on an unrecognised screen — relaunching once
+P|        · [FAIL] the Business app never rendered a known screen (role='unknown' after ~16s + one recovery) — it is not a credentials problem
+P|        ↳ bundle source: RCT_jsLocation=localhost:8083 (expected localhost:8083, metro 8083 is up) -> OK
+P|        ↳ on screen: ['STG-VyaBusiness', 'My Orders', 'In Queue 00', 'ALL', 'TABLE', 'PICKUP', 'Orders Not Found !!', '5 Possible unhandled promise rejection (id: 0
+P| role_now unknown
+P| cards: []
+P| open -> False
+P|    [warn] booking board still empty — no cards rendered
+P|        · booked slot '16:00' → target 16:00 row
+P|        · card not found — relaunching business app once and retrying
+P|    [FAIL] @open_reservation — no reserved/confirmationpending card for diner 'Roopa' on FRI 21 near 16:00 (already assigned, or backend not synced)
+P|        ↳ 0 card element(s) seen; rejected-for-width: none; labels: []

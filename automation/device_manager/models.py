@@ -31,6 +31,12 @@ class Device(BaseModel):
     appium_ready: bool = False
     last_seen: Optional[datetime] = None
     provider: str
+    # Machine that owns this device. `provider` already distinguishes agents from
+    # the backend's own simulators, but it holds an opaque agent id — this is the
+    # human-readable machine name, so a device list makes ownership obvious once
+    # more than one machine reports devices. Additive and optional: nothing that
+    # builds a Device today has to change.
+    hostname: Optional[str] = None
 
 class DeviceHealth(BaseModel):
     device_id: str

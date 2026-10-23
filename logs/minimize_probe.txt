@@ -1,0 +1,20 @@
+M| viewer up: True
+M| tapping Minimize at (294, 828)
+M| after n= 15  viewer still up: False
+M| ORDER SUMMARY NOW:
+M|   'STG-VyaBusiness'                           (0,0,393,852)
+M|   'closeModal'                                (169,581,55,40)
+M|   'Please assign a Table'                     (11,638,362,24)
+M|   'T0AssignAnyBtn'                            (19,684,52,30)
+M|   'T1AssignAnyBtn'                            (88,684,52,30)
+M|   'T2AssignAnyBtn'                            (155,684,52,30)
+M|   'T3AssignAnyBtn'                            (223,684,51,30)
+M|   'T4AssignAnyBtn'                            (290,684,52,30)
+M|   'T5AssignAnyBtn'                            (358,684,52,30)
+M|   'T6AssignAnyBtn'                            (425,684,54,30)
+M|   'T7AssignAnyBtn'                            (495,684,51,30)
+M|   'T8AssignAnyBtn'                            (562,684,53,30)
+M|   '26 Each child in a list should have a un'  (10,726,373,48)
+M|   'AssignTableBtn'                            (11,760,362,54)
+M|   '2 ViewPropTypes will be removed from Rea'  (10,780,373,48)
+M| sendItemsBtn: False  serveItemsBtn: False  selectAllItemsBtn: False
