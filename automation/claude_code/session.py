@@ -340,8 +340,10 @@ def restart_backend_if_idle() -> Dict[str, Any]:
     if busy:
         raise Busy(f"run {busy[0].id[:8]} '{busy[0].test_name}' is {busy[0].status} — "
                    "restart when it has finished")
-    if active():
-        raise Busy("an AI Agent session is in progress — restart when it has finished")
+    # An AI Agent session is NOT a reason to wait: its runner and its flows run in
+    # their own processes (from its worktree's code), and the startup reaper leaves
+    # its runs alone. MEASURED 2026-10-26: the button refused a restart after an
+    # approval just because a read-only analysis was running.
     try:
         from automation.api.v1.routers.jobs import run_all_in_progress
         if run_all_in_progress():

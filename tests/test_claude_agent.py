@@ -685,3 +685,23 @@ def test_the_clock_stays_off_in_tests_even_when_app_env_says_dev(monkeypatch):
     schedule.start()
     assert called == [] and schedule._state["thread"] is None
     assert schedule.sync({"nightly_enabled": True})["skipped"] == "test environment"
+
+
+def test_a_running_agent_session_does_not_block_the_backend_restart(monkeypatch, tmp_path):
+    """MEASURED 2026-10-26: after approving a change, 'Restart backend' refused only
+    because a read-only analysis session was running."""
+    import signal as _signal
+    monkeypatch.setattr(runner, "active_runs", lambda: [])
+    monkeypatch.setattr(session, "active", lambda: {"id": "x", "kind": "analyze", "status": "running"})
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "supervisor.pid").write_text(str(os.getpid()))
+    monkeypatch.setattr(paths, "MAIN_ROOT", str(tmp_path))
+    fired = []
+    import threading as _threading
+    monkeypatch.setattr(_threading, "Timer", lambda s, fn: type("T", (), {"start": lambda self: fired.append(fn)})())
+    assert session.restart_backend_if_idle() == {"restarting": True}
+    assert len(fired) == 1                                   # scheduled, not run
+    monkeypatch.setattr(runner, "active_runs", lambda: [type("R", (), {"id": "abcdef12", "test_name": "flow1",
+                                                                         "status": "running"})()])
+    with pytest.raises(session.Busy, match="is running"):
+        session.restart_backend_if_idle()
