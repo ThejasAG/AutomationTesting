@@ -148,6 +148,13 @@ _C_PAY_FINAL = [
     "@consumer_epay",                 # E-Payment → Stripe 'Pay € X' (saved test card) → confirmed
 ]
 
+# Consumer: rate + review a finished order from the Wallet's Finished tab.
+_C_LEAVE_REVIEW = [
+    "open app",
+    "click walletTab",                # bottom tab (confirmed id)
+    "@leave_review",                  # Finished tab → star prompt → Review screen → Submit
+]
+
 # Waiter: create the appointment for the diner (flows 5/6). Mirrors the verified
 # 'Business: Book event (waiter)' block, with roopa's details.
 _W_CREATE_APPT = [
@@ -549,6 +556,21 @@ FLOWS: Dict[str, Dict[str, Any]] = {
             _seg("1", "Kitchen: mark the order ready", "kitchen", _K_READY),
         ],
     },
+    # ── AI Agent drafts ──
+    "cc_leave_review": {
+        "id": "cc_leave_review",
+        "name": "[Draft] Consumer leaves a review (stars, feedback, submit)",
+        "description": "Consumer app, Wallet → Finished tab → Screens/Wallet/Review.js: "
+                       "opens a finished order that has not been reviewed yet, picks a "
+                       "rating (star2, the screen's own real id), writes feedback text "
+                       "and taps Submit. Proves Submit works for a low star count — "
+                       "Review.js gates submitReview only on submitting/success, never "
+                       "on the rating, so this is documented app behaviour (no minimum "
+                       "star rating is enforced), not something to fix.",
+        "segments": [
+            _seg("1", "C-App: rate + review a finished order", "consumer", _C_LEAVE_REVIEW),
+        ],
+    },
 }
 
 
@@ -579,6 +601,7 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@pre_order", "help": "After booking: open the menu to pre-order"},
         {"step": "@consumer_epay", "help": "After Checkout: E-Payment → Stripe 'Pay €' → confirmed"},
         {"step": "@consumer_checkout", "help": "Wallet: this booking's card → scroll → Checkout"},
+        {"step": "@leave_review", "help": "Wallet Finished tab: rate + review a finished order"},
         {"step": "@duration:not_sure", "help": "Slide the duration bar to Not Sure (or @duration:1/2/3)"},
         {"step": "@invite_guests:3", "help": "Reservation form: Persons + → add N guests → Invite"},
         {"step": "@void_item", "help": "Swipe an order row → VOID → Entry Error → Apply"},
@@ -6924,6 +6947,123 @@ class FlowRunner:
                      + (f"the app said {toast!r}" if toast else f"opened: {', '.join(new)}"))
         return True
 
+    # ── Consumer: leave a review on a finished order ───────────────────────
+    # AI Agent draft (2026-10-26) — no flow touched this screen before (only
+    # `screenBackBtn`, generically, as a stuck-screen fallback). vya-consumer
+    # Screens/Wallet/Finished.js: an unreviewed finished card shows a star-rating
+    # prompt labelled 'Restuarantrating' (sic); tapping it calls handleRating and
+    # navigates straight into Screens/Wallet/Review.js, pre-seeded with whichever
+    # star the tap landed on. Review.js's own controls are real, individual ids:
+    # `star1`..`star5`, `writeFeedback` (accessibilityLabel only, no testID),
+    # `addUploadPhoto`, `submitReview`. Submit is gated ONLY by
+    # `disabled={submitting || success}` (Review.js:1228) — there is no check on
+    # the star count anywhere in `confirmRating` or the server payload. That is
+    # documented app behaviour, not a bug: a low (2-star) review submits exactly
+    # like any other, with no extra validation step.
+    def _leave_review(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Wallet → Finished tab → the first order still needing a review →
+        pick a low rating on the Review screen → write feedback → Submit."""
+        tag = "@leave_review"
+        WALLET_MARKERS = {"upcomingBlock", "finishedBlock", "walletUpcomingSearchInput"}
+
+        def labels(els) -> set:
+            return ({(e.get("label") or "").strip() for e in els}
+                    | {(e.get("id") or "").strip() for e in els})
+
+        def find(els, want):
+            return next((e for e in els if (e.get("label") or "").strip() == want), None)
+
+        els = self._idb_els()
+        if not (labels(els) & WALLET_MARKERS):
+            tab = find(els, "walletTab")
+            if tab is None:
+                notes.append(f"[FAIL] {tag} — not on the Wallet and no walletTab to open it")
+                return False
+            self._idb_tap(tab["cx"], tab["cy"])
+            time.sleep(1.5)
+            els = self._idb_els()
+            if not (labels(els) & WALLET_MARKERS):
+                notes.append(f"[FAIL] {tag} — tapped walletTab but the Wallet did not open")
+                return False
+
+        fin = find(els, "finishedBlock")
+        if fin is None:
+            notes.append(f"[FAIL] {tag} — the Wallet's Finished tab is not on screen")
+            return False
+        self._idb_tap(fin["cx"], fin["cy"])
+        time.sleep(1.2)
+
+        # The star-rating prompt is hidden once a card has been reviewed or
+        # skipped (Finished.js), so the first finished card is not necessarily
+        # an actionable one — scroll a few pages looking for one that still is.
+        prompt = None
+        for _scroll in range(6):
+            els = self._idb_els()
+            prompt = find(els, "Restuarantrating")
+            if prompt is not None:
+                break
+            try:
+                r.run_one("scroll down", 0)
+            except Exception:
+                break
+            time.sleep(0.8)
+        if prompt is None:
+            notes.append(f"[FAIL] {tag} — no finished order on the Wallet still needs a "
+                         f"review (every card is already reviewed/skipped, or the Finished "
+                         f"list is empty)")
+            return False
+
+        self._idb_tap(prompt["cx"], prompt["cy"])
+        opened = False
+        for _ in range(10):
+            time.sleep(0.8)
+            if "submitReview" in labels(self._idb_els()):
+                opened = True
+                break
+        if not opened:
+            notes.append(f"[FAIL] {tag} — tapped the star-rating prompt but the Review "
+                         f"screen did not open")
+            return False
+
+        # Pick the rating EXPLICITLY, by the screen's own real id, rather than
+        # trusting whatever the entry tap happened to preset.
+        els = self._idb_els()
+        star2 = find(els, "star2")
+        if star2 is None:
+            notes.append(f"[FAIL] {tag} — on the Review screen but 'star2' is not on screen")
+            return False
+        self._idb_tap(star2["cx"], star2["cy"])
+        time.sleep(0.4)
+
+        try:
+            fields = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "writeFeedback")
+            if fields:
+                fields[0].click()
+                fields[0].send_keys("Automated regression check.")
+            r.d.hide_keyboard()
+        except Exception:
+            pass
+
+        els = self._idb_els()
+        submit = find(els, "submitReview")
+        if submit is None:
+            notes.append(f"[FAIL] {tag} — submitReview is no longer on screen before "
+                         f"tapping it")
+            return False
+        self._idb_tap(submit["cx"], submit["cy"])
+
+        for _ in range(18):
+            time.sleep(1.0)
+            if "submitReview" not in labels(self._idb_els()):
+                notes.append(f"[ok] {tag} — submitted a 2-star review with feedback; "
+                             f"Submit was never blocked by the star count (documented "
+                             f"behaviour: no minimum rating is enforced before Submit is "
+                             f"enabled)")
+                return True
+        notes.append(f"[FAIL] {tag} — tapped Submit Review but the Review screen never "
+                     f"closed (still shows submitReview after ~18s)")
+        return False
+
     # ── Consumer: pay the bill by E-Payment (Stripe) ───────────────────────
     # After Checkout the Wallet shows 'Payment / Select Payment Method' (ePayment,
     # eCash, eFoodVoucher, Total, ePaymentConfirm). ePayment (Payment/
@@ -8342,6 +8482,8 @@ class FlowRunner:
             return self._consumer_epay(notes)
         if step == "@consumer_checkout":
             return self._consumer_checkout(r, notes)
+        if step == "@leave_review":
+            return self._leave_review(r, notes)
         if step.startswith("@duration:"):
             return self._set_duration(step.split(":", 1)[1].strip(), notes)
         if step == "@invite_guests" or step.startswith("@invite_guests:"):
