@@ -26,6 +26,12 @@ Tools: `.venv/bin/python scripts/agent_tools.py <subcommand>`.
    - **missing** — no flow touches it.
    Risk: **high** = money, bookings, orders, payments, table/booking status;
    **medium** = lists, search, filters, settings, profile; **low** = cosmetic.
+   **Keep the map comparable between runs:** one feature = one thing a tester
+   checks (one user action and its outcome — "void a line item", "comp a line item"
+   and "split a line item" are three features). Start from the previous analysis's
+   feature list (your task gives it): keep each name; add only for a new screen or
+   capability; drop only when its screens are gone; split a bundled one ("X / Y / Z")
+   once; never merge or rename for style. Report what was added, split or dropped.
 4. **Write `feature_map.json`** in the session folder (format below) and a short
    summary + a table of high-risk gaps in `report.md`.
 

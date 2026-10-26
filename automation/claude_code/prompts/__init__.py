@@ -86,13 +86,33 @@ def _focus(options: Dict[str, Any]) -> str:
             "(payments, bookings, orders first).")
 
 
+def previous_features() -> Dict[str, Any]:
+    """The latest feature map's feature names per app — the baseline the next analysis
+    keeps (MEASURED 2026-10-26: two analyses grouped the same screens into 44 and 24
+    features, so the map could not be compared from one run to the next)."""
+    try:
+        from automation.claude_code import session
+        fmap = session.latest_feature_map()
+    except Exception:
+        fmap = None
+    lines, n = [], 0
+    for app, feats in ((fmap or {}).get("apps") or {}).items():
+        for f in feats or []:
+            n += 1
+            lines.append(f"   - [{app}/{f.get('role') or app}] {f.get('feature')}")
+    return {"count": str(n), "text": "\n".join(lines) or "   (none yet — this is the first analysis)"}
+
+
 def build(kind: str, options: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, Any]) -> str:
     mode = resolve_mode(options.get("mode") or s.get("nightly_mode") or "auto")
     max_new = int(options.get("max_new") or s.get("max_new_scenarios") or 3)
     if kind == "nightly" and mode == "full":
         max_new *= 2
+    prev = previous_features() if kind in ("analyze", "nightly") else {"count": "0", "text": ""}
     values = {
         **ctx,
+        "previous_count": prev["count"],
+        "previous_features": prev["text"],
         "title": TITLES.get(kind, kind),
         "max_fix_attempts": str(s.get("max_fix_attempts") or 2),
         "max_new": str(max_new),

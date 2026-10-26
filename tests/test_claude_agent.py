@@ -658,3 +658,19 @@ def test_the_clock_never_touches_launchd_from_tests(monkeypatch):
     monkeypatch.setattr(schedule, "remove_legacy_launchd", lambda: called.append(1))
     schedule.start()
     assert called == [] and schedule._state["thread"] is None
+
+
+def test_an_analysis_starts_from_the_previous_feature_list(monkeypatch):
+    """MEASURED 2026-10-26: two analyses grouped the same screens into 44 and 24
+    features; the map could not be compared from one run to the next."""
+    from automation.agentic import settings
+    from automation.claude_code import prompts
+    monkeypatch.setattr(session, "latest_feature_map", lambda: {"apps": {
+        "business": [{"feature": "Waiter voids a line item", "role": "waiter"}],
+        "consumer": [{"feature": "Diner books a table", "role": "consumer"}]}})
+    text = prompts.build("analyze", {"mode": "full"}, _ctx(), settings.get())
+    assert "Previous analysis (2 features)" in text
+    assert "[business/waiter] Waiter voids a line item" in text
+    assert "one feature = one thing a tester checks" in text
+    nightly = prompts.build("nightly", {"mode": "full"}, _ctx(), settings.get())
+    assert "Waiter voids a line item" in nightly
