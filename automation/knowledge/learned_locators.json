@@ -105,6 +105,30 @@
 "method": "aid",
 "value": "homeCouponIcon",
 "ts": 1787201643
+},
+"search": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "Search",
+"ts": 1792733110
+},
+"1 hr": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "1",
+"ts": 1792736504
+},
+"nylai kitchen 2": {
+"hits": 1,
+"heals": 0,
+"drifts": 0,
+"method": "aid",
+"value": "NylaiKitchen2",
+"ts": 1792752546
 }
 }
 }

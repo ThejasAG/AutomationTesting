@@ -28,11 +28,67 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from appium.webdriver.common.appiumby import AppiumBy
 
 logger = logging.getLogger("scenario_runner")
+
+# Written by app_knowledge_agent's Perceiver/Synthesizer. Optional: a run must
+# not depend on the AI knowledge pack existing, only benefit from it when it
+# does (see _pack_label_aliases below).
+_PACK_PATH = (Path(__file__).resolve().parents[2] / "app_knowledge_agent"
+              / "knowledge_pack" / "app_knowledge_pack.json")
+_pack_alias_cache: Dict[str, List[str]] = {}
+_pack_alias_mtime: float = -1.0
+
+
+def _pack_label_aliases() -> Dict[str, List[str]]:
+    """painted label (lowercased) -> every REAL accessibility id the
+    knowledge pack has recorded for an element that was painted with that
+    label, across every screen it has seen.
+
+    Why this exists: a scenario step naturally names what a person SEES
+    ("tap Coupons"), but a RN component with an explicit accessibilityLabel
+    hides that painted text from the live accessibility tree entirely, so
+    the real tappable name can be something else -- and a DIFFERENT
+    something else per screen (confirmed on this app: the home screen's
+    Coupon chip is 'homeCouponIcon', the Wallet tab's is 'couponBlock', both
+    painted "Coupons"). A scenario author/tester has no way to know that.
+
+    Multiple real ids for one label is fine here: every caller only taps a
+    candidate after idb VERIFIES it is actually on screen right now (same
+    rule as every other tap in this file) -- so trying several candidates
+    can never mis-tap, it can only fail to find one and move on.
+
+    Returns {} if the pack is missing/unreadable -- this is an optional
+    enrichment on top of the AI knowledge agent's output, never a hard
+    dependency for the core runner.
+    """
+    global _pack_alias_cache, _pack_alias_mtime
+    try:
+        mtime = _PACK_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if mtime == _pack_alias_mtime:
+        return _pack_alias_cache
+    aliases: Dict[str, set] = {}
+    try:
+        pack = json.loads(_PACK_PATH.read_text(encoding="utf-8"))
+        for screen in pack.get("screens", []):
+            for el in (screen.get("elements") or []):
+                label = str(el.get("label") or "").strip().lower()
+                aid = el.get("accessibility_id")
+                if label and aid:
+                    aliases.setdefault(label, set()).add(str(aid))
+    except Exception:
+        logger.warning("Could not read knowledge pack for label aliases: %s",
+                        _PACK_PATH, exc_info=True)
+        return _pack_alias_cache or {}
+    _pack_alias_cache = {k: sorted(v) for k, v in aliases.items()}
+    _pack_alias_mtime = mtime
+    return _pack_alias_cache
 
 from automation.intelligence.element_catalog import (
     AutoIdCatalog, METHOD_CONTAINER, METHOD_EXACT_ID, METHOD_HIERARCHY,
@@ -484,6 +540,16 @@ class ScenarioRunner:
         # The words rejoined are the label as a person would write it ("1 hr"),
         # which is often the exact accessibility id — tried before any squashing.
         phrase = " ".join(words)
+
+        # Cleared on every call, not just on a successful read (see _tap_step's
+        # `getattr(self, "_last_ambiguous", "")`): a call that finds NO candidates
+        # at all (hits stays empty, the assignment below never runs) would
+        # otherwise leave a PREVIOUS unrelated step's partial-match message on
+        # self, and the next failing step reports that stale text as its own —
+        # measured: step 4 ("book now") set it, step 5 ("preorder") found no
+        # hits and silently inherited step 4's "'book now' only partially
+        # matches 'bookAppoitment'" message verbatim.
+        self._last_ambiguous = ""
 
         # ── Self-heal fast path ────────────────────────────────────────────────
         # Try the locator that last worked for this (app, target): one direct find
@@ -1576,6 +1642,20 @@ class ScenarioRunner:
                 self._wait_settle()
                 return StepResult(step=s, ok=True,
                                   action=f'tapped "{phrase}" (idb — Appium could not see it)')
+
+        # LAST RESORT: the phrase is painted text (what the step's author saw),
+        # not the real id -- try every real id the knowledge pack has ever
+        # recorded under that painted label. See _pack_label_aliases.
+        if not m and phrase and not inferred:
+            for alias in _pack_label_aliases().get(phrase.strip().lower(), ()):
+                if alias.strip().lower() == phrase.strip().lower():
+                    continue
+                if self._idb_tap_name(alias):
+                    self._wait_settle()
+                    self._used_ids.add(alias)
+                    return StepResult(
+                        step=s, ok=True,
+                        action=f'tapped "{alias}" (knowledge-pack alias for "{phrase}")')
 
         if not m:
             return StepResult(

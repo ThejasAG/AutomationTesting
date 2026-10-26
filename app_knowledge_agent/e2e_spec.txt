@@ -1,0 +1,203 @@
+End-to-End Automation Test Flow (Consumer App → Business App → Kitchen App → Payment)
+
+Test Setup
+Launch the Consumer App.
+Create an event with:
+1 Host
+1 Participant
+5 Guests
+Participant accepts the event invitation.
+
+Phase 1 – Pre-Order (Consumer App)
+Host Pre-Order
+Add items containing:
+Products without options.
+Products with options/variants.
+Products with modifiers having different VAT rates (3%, 14%, and 17% where applicable).
+Include:
+Single quantity items.
+Multiple quantity items (2x and 3x).
+Participant Pre-Order
+Repeat the same:
+Items without options.
+Items with options.
+Modifiers with different VAT combinations.
+Multiple quantities.
+Complete the pre-order.
+
+Phase 2 – Table Assignment (Business App)
+Open the created event.
+Assign a table.
+For all seven people (Host + Participant + 5 Guests):
+Add products manually.
+Use a combination of:
+Products without options
+Example:
+Coca-Cola
+Add quantity 5.
+Assign to different guests.
+Split the quantity among different guests.
+Products with options
+Examples:
+Pizza with variants.
+Products with modifiers.
+Modifiers having different VAT rates.
+Use:
+Quantity 2.
+Quantity 3.
+Quantity 5.
+Perform:
+Assign.
+Split.
+Mixed assignments.
+Do not simply add one product per guest.
+
+Phase 3 – Modify Orders (Business App)
+Go to the Payment/Order section.
+Perform all of the following:
+Increase quantity of selected items.
+Decrease quantity of selected items.
+Remove one product completely.
+Split one product using swipe gesture.
+Void one already split item.
+Example:
+Void the entire quantity "2" if 2/3 is the item
+Send all items to Kitchen.
+
+Phase 4 – Assign & Split After Sending to Kitchen
+Navigate to the Assign/Split page.
+Perform:
+Assign selected items to different guests.
+Split additional items.
+Return to the Order page.
+Now:
+Void another item.
+This time choose a split item.
+Example:
+Void only one item instead of the entire split.
+
+Phase 5 – Kitchen App
+Open Kitchen App. Get all items ready
+Before serving:
+Perform another split operation.
+Use a different scenario than previous splits.
+If previous split used an item with options, this split should use an item without options (or vice versa).
+Serve all items.
+
+Phase 6 – Comp Items
+After serving:
+Perform multiple Comp operations.
+Scenario 1
+Comp 2 split item that contains options completely
+Scenario 2
+Comp one non-split item with options.
+Quantity = 2 or 3.
+Comp only one quantity.
+Scenario 3
+Comp another split item.
+Example:
+Quantity = 3 split between 2
+Comp only one quantity.
+Scenario 4
+Comp one item without options.
+
+Phase 7 – Additional Consumer Orders
+Before notifying payment:
+Using Consumer App:
+Host places additional orders.
+Participant places additional orders.
+These new orders should contain:
+Products with options.
+Products without options.
+Multiple quantities.
+Back in Business App:
+Assign some of these newly ordered products to other guests.
+Send these new items to Kitchen.
+After sending:
+Reassign one Host-ordered product to another guest.
+Split another Consumer App product.
+Go to Kitchen App.
+Serve all newly ordered items.
+After serving:
+Perform one additional split on a Consumer App ordered item.
+
+Phase 8 – Notify Payment
+Notify payment for all seven people.
+
+Phase 9 – Consumer App Payment
+Host selects Pay for Others.
+Pay for:
+Two guests.
+Apply:
+Coupon.
+Tip.
+Payment Mode:
+E-Payment.
+Verify:
+Coupon applied correctly.
+Tip calculated correctly.
+Final payable amount is correct.
+
+Phase 10 – Business App Payment
+Participant pays for two other guests.
+Apply:
+Discount.
+Tip.
+Complete payments using all three payment methods:
+Cash.
+Card/E-Payment.
+Food Voucher (or configured third payment mode).
+Validate:
+Discount is applied to the overall payable amount for the selected payment, not just an individual item/person.
+Tips are calculated correctly.
+Payment totals are correct.
+Complete all remaining payments.
+
+Phase 11 – Invoice Validation
+Verify invoices for:
+Host.
+Participant.
+All guests.
+Validate:
+Assigned items.
+Split items.
+Void items.
+Comp items.
+Discounts.
+Coupons.
+Tips.
+VAT calculations.
+Payment methods.
+Final totals.
+Close the table.
+
+Phase 12 – Review & Invoice (Consumer App)
+Host:
+Submit a restaurant rating/review.
+Open and verify invoice.
+Participant:
+Skip rating.
+Open and verify invoice.
+Validate that invoices match the Business App invoices and all calculations remain consistent.
+
+Overall Validation Checklist
+Verify throughout the flow:
+Assign functionality.
+Split functionality.
+Void (full and partial).
+Comp (full and partial).
+Quantity increase/decrease.
+Product removal.
+Kitchen workflow.
+Consumer App ordering after table creation.
+Business App reassignment after Kitchen submission.
+Payment notification.
+Pay for Others.
+Coupon application.
+Discount calculation.
+Tip calculation.
+Multiple payment methods.
+VAT calculations across mixed VAT items.
+Invoice accuracy.
+Table closure.
+Review submission and skip flow.

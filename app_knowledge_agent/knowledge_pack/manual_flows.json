@@ -1,0 +1,38 @@
+{
+  "flows": [
+    {
+      "name": "Consumer: pre-order with table booking",
+      "role": "consumer",
+      "steps": [
+        "After booking a table, the app offers a 'Preorder' option.",
+        "Tap Preorder to browse the menu and select items.",
+        "After selecting an item, tap 'Add to Cart'.",
+        "Open the cart and proceed to place the order.",
+        "Payment MUST be completed at this step -- a preorder cannot be placed without paying for it then and there.",
+        "If only a table booking is wanted (no preorder), ordering can instead be done from the Waiter side during the appointment itself."
+      ]
+    },
+    {
+      "name": "Waiter: handling an incoming order through to payment",
+      "role": "waiter",
+      "steps": [
+        "When an order comes in, the waiter assigns a table to the reservation.",
+        "The waiter sends the consumer's preorder to the kitchen.",
+        "The waiter can also add further items to the order and send those to the kitchen too.",
+        "Once a dish is ready, the waiter serves it and marks it Served in the app.",
+        "After every dish on the order has been served, the waiter can notify that payment is due.",
+        "Payment can be completed from either the Waiter side or the Consumer side."
+      ]
+    },
+    {
+      "name": "Kitchen: preparing an order through pickup",
+      "role": "kitchen",
+      "steps": [
+        "Once an order comes in, the kitchen begins preparing it.",
+        "When a dish is ready, the kitchen marks it Ready.",
+        "The waiter then comes to the kitchen to pick up the order.",
+        "An order only becomes visible on the kitchen dashboard once there are 15 minutes or less remaining until its pickup time."
+      ]
+    }
+  ]
+}

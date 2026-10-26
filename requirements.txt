@@ -64,3 +64,7 @@ pytest>=9.1
 #                   it with a try/except. Without it the Module (files) graph is off.
 #   redis           the service is used, but nothing imports the Python client
 #   python-dateutil declared historically, zero usages
+
+# ── App Knowledge Agent ──────────────────────────────────────────────────────
+google-genai>=0.8          # Gemini Vision API for the Perceiver
+scikit-learn>=1.5                 # k-means colour extraction in the Synthesizer
