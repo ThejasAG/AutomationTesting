@@ -517,14 +517,13 @@ async def startup_event():
     # Keep RN Metro packagers alive so the app never shows "No bundle URL present".
     from automation.projects.builder import start_metro_watchdog
     start_metro_watchdog()
-    # AI Agent (Claude Code): close sessions whose process died, and keep the
-    # nightly launchd job in step with the settings.
+    # AI Agent (Claude Code): close sessions whose process died, and start the
+    # nightly clock (the backend starts the nightly session; launchd cannot read ~/Desktop).
     try:
-        from automation.agentic import settings as agent_settings
         from automation.claude_code import schedule as agent_schedule
         from automation.claude_code import session as agent_session
         agent_session.reap_orphans()
-        agent_schedule.sync(agent_settings.get())
+        agent_schedule.start()
     except Exception as e:
         _log.warning("AI Agent startup checks skipped: %s", e)
 

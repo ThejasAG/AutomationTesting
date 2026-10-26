@@ -28,7 +28,8 @@ def get_status():
     except Exception as e:  # noqa: BLE001 — launchctl missing on a non-Mac
         sched = {"installed": False, "error": str(e)}
     return {"claude": session.claude_status(), "active": session.active(), "settings": s,
-            "schedule": sched, "secrets": settings.secrets_status(), "apps": sources.apps_available()}
+            "schedule": sched, "secrets": settings.secrets_status(), "apps": sources.apps_available(),
+            "hooks": session.recent_hooks(5)}
 
 
 class SettingsIn(BaseModel):

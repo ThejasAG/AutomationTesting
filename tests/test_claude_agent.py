@@ -583,3 +583,78 @@ def test_a_usage_limit_is_not_retried_in_a_loop(monkeypatch):
     info = runner.run_claude("s", "/s", "/wt", "t", {"model": "sonnet", "effort": "high"},
                              datetime.now() + timedelta(hours=1), "n")
     assert calls == [1] and "resumed_after" not in info
+
+
+# ── automatic triggers leave a trace; the nightly clock ──────────────────────
+
+@pytest.fixture(autouse=True)
+def _private_sessions_dir(tmp_path, monkeypatch):
+    """No test writes into the real logs/agent_sessions (hooks.jsonl, baselines…)."""
+    monkeypatch.setattr(paths, "SESSIONS_DIR", str(tmp_path / "agent_sessions"))
+
+
+def test_every_run_all_hook_outcome_is_recorded(monkeypatch):
+    """MEASURED 2026-10-26: a Run all ended with 9 failures, no heal session started,
+    and nothing anywhere said why."""
+    from automation.api.v1.routers import jobs
+    monkeypatch.setattr(session, "create", lambda kind, **kw: "sid-12345678")
+    jobs.heal_after_run_all([("flow1", "r1", "passed")])
+    jobs.heal_after_run_all([("flow1", "r1", "failed")])
+
+    def busy(kind, **kw):
+        raise session.Busy("an AI Agent session is already running (heal, abcd1234)")
+
+    monkeypatch.setattr(session, "create", busy)
+    jobs.heal_after_run_all([("flow1", "r1", "failed")])
+    got = [(h["outcome"], h["detail"]) for h in session.recent_hooks()]
+    assert got == [("refused", "an AI Agent session is already running (heal, abcd1234)"),
+                   ("started", "heal session sid-1234"),
+                   ("skipped", "every flow passed")]
+
+
+def _nightly_settings(**kw):
+    from automation.agentic import settings
+    settings.update({"nightly_enabled": True, "nightly_time": "13:15", **kw})
+
+
+def test_the_nightly_is_due_once_inside_its_window():
+    from datetime import datetime
+    from automation.claude_code import schedule
+    from automation.agentic import settings
+    _nightly_settings()
+    s = settings.get()
+    day = datetime(2026, 10, 26)
+    assert schedule.due(s, day.replace(hour=13, minute=10)) is None          # too early
+    assert schedule.due(s, day.replace(hour=13, minute=20)) is not None
+    assert schedule.due(s, day.replace(hour=16, minute=20)) is None          # window over
+    settings.update({"nightly_enabled": False})
+    assert schedule.due(settings.get(), day.replace(hour=13, minute=20)) is None
+
+
+def test_the_clock_starts_one_nightly_and_waits_while_busy(monkeypatch):
+    from datetime import datetime
+    from automation.claude_code import schedule
+    _nightly_settings(nightly_time=datetime.now().strftime("%H:%M"))
+    monkeypatch.setitem(schedule._state, "last_try", 0.0)
+    monkeypatch.setitem(schedule._state, "last_error", "")
+
+    def busy(kind, **kw):
+        raise session.Busy("an AI Agent session is already running")
+
+    monkeypatch.setattr(session, "create", busy)
+    assert schedule.tick() is None
+    assert session.recent_hooks()[0]["outcome"] == "waiting"
+    assert schedule.tick() is None                     # retried only after RETRY_S
+    started = []
+    monkeypatch.setitem(schedule._state, "last_try", 0.0)
+    monkeypatch.setattr(session, "create", lambda kind, **kw: started.append((kind, kw)) or "sid-nightly1")
+    assert schedule.tick() == "sid-nightly1"
+    assert started[0][0] == "nightly" and started[0][1]["trigger"] == "nightly"
+
+
+def test_the_clock_never_touches_launchd_from_tests(monkeypatch):
+    from automation.claude_code import schedule
+    called = []
+    monkeypatch.setattr(schedule, "remove_legacy_launchd", lambda: called.append(1))
+    schedule.start()
+    assert called == [] and schedule._state["thread"] is None

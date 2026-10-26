@@ -1,8 +1,8 @@
 #!/bin/bash
-# The nightly AI Agent run (launchd job com.vyapy.ai-agent.nightly, see
-# automation/claude_code/schedule.py). Claude Code on the logged-in Claude plan —
-# no API key. Starts the platform first if it is down (the Mac reboots between days).
-# By hand: scripts/claude_nightly.sh --force
+# Start the nightly AI Agent session by hand, from a terminal. (The scheduled one is
+# started by the backend itself — automation/claude_code/schedule.py: macOS keeps
+# launchd jobs out of ~/Desktop.) Claude Code on the logged-in Claude plan — no API
+# key. Starts the platform first if it is down.  Usage: scripts/claude_nightly.sh --force
 cd "$(dirname "$0")/.." || exit 1
 export PATH="/usr/local/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 export PYTHONPATH="$PWD"

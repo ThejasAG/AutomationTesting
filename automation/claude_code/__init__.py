@@ -10,7 +10,7 @@ analyzing the Vyapy apps, writing scenarios, and fixing the automation when it f
     baselines.py  unit-test failures per commit (so a session is blamed only for new ones)
     events.py     the transcript as short lines for the AI Agent page
     report.py     email + Slack when a session ends
-    schedule.py   the nightly launchd job
+    schedule.py   the nightly clock (a thread in the backend)
     cli.py        the same from a terminal
 
 Kinds of session:
@@ -18,7 +18,7 @@ Kinds of session:
     fix_run   one failed run, from its Run Details page
     analyze   map both apps' features against the flows: covered / partial / missing, with risk
     generate  write new flows for the gaps; keep only the ones that pass on the simulators
-    nightly   heal + analyze + generate, unattended
+    nightly   heal + analyze + generate, unattended, at the configured time
 
 Ground rules (enforced in code, not only in the prompt):
   * a session works in its own git worktree; nothing reaches the person's checkout until

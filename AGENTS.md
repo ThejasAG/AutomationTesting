@@ -60,7 +60,8 @@ So "cross-app" = **three roles**: **consumer** (iPhone), **waiter** + **kitchen*
   had, and fix what the automation got wrong), `fix_run` (one failed run — "Fix with Claude
   Code" on Run Details), `analyze` (map both apps' features: covered/partial/missing + risk →
   feature map), `generate` (new `cc_` flows for gaps, kept only if they pass on the sims),
-  `nightly` (all three; launchd job `com.vyapy.ai-agent.nightly`, `scripts/claude_nightly.sh`).
+  `nightly` (all three; started by the backend at the configured time — not launchd: macOS
+  blocks background jobs from ~/Desktop; `scripts/claude_nightly.sh` starts one by hand).
   Each session runs in its own process (`runner.py`) and **its own git worktree** under
   `~/.vya-platform/agent-worktrees/` on branch `agent/<stamp>-<kind>`; it may edit only
   `automation/`, `tests/`, `scripts/` (not `automation/claude_code/`, `.claude/`,

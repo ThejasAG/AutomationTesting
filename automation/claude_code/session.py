@@ -193,6 +193,37 @@ def stop(sid: str) -> bool:
     return True
 
 
+# ── what the automatic triggers did ──────────────────────────────────────────
+
+def _hooks_file() -> str:
+    return os.path.join(paths.SESSIONS_DIR, "hooks.jsonl")
+
+
+def note_hook(trigger: str, outcome: str, detail: str, **facts: Any) -> None:
+    """Record what an automatic trigger (Run all, the nightly clock) did and why —
+    shown on the AI Agent page, so a session that did not start is never a mystery."""
+    os.makedirs(paths.SESSIONS_DIR, exist_ok=True)
+    rec = {"at": datetime.now().isoformat(timespec="seconds"), "trigger": trigger,
+           "outcome": outcome, "detail": str(detail)[:500], **facts}
+    with open(_hooks_file(), "a") as f:
+        f.write(json.dumps(rec, default=str) + "\n")
+
+
+def recent_hooks(n: int = 10) -> List[Dict[str, Any]]:
+    try:
+        with open(_hooks_file()) as f:
+            lines = f.readlines()[-n:]
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
 # ── follow ───────────────────────────────────────────────────────────────────
 
 def session_events(sid: str, after: int = 0) -> Dict[str, Any]:
