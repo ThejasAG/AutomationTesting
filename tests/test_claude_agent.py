@@ -674,3 +674,14 @@ def test_an_analysis_starts_from_the_previous_feature_list(monkeypatch):
     assert "one feature = one thing a tester checks" in text
     nightly = prompts.build("nightly", {"mode": "full"}, _ctx(), settings.get())
     assert "Waiter voids a line item" in nightly
+
+
+def test_the_clock_stays_off_in_tests_even_when_app_env_says_dev(monkeypatch):
+    """MEASURED 2026-10-26: .env's APP_ENV=dev leaked into an agent session's pytest."""
+    from automation.claude_code import schedule
+    monkeypatch.setenv("APP_ENV", "dev")
+    called = []
+    monkeypatch.setattr(schedule, "remove_legacy_launchd", lambda: called.append(1))
+    schedule.start()
+    assert called == [] and schedule._state["thread"] is None
+    assert schedule.sync({"nightly_enabled": True})["skipped"] == "test environment"

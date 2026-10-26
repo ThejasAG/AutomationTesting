@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -35,6 +36,13 @@ LEGACY_LABEL = "com.vyapy.ai-agent.nightly"
 LEGACY_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LEGACY_LABEL}.plist")
 
 _state: Dict[str, Any] = {"thread": None, "last_try": 0.0, "last_error": "", "last_started": ""}
+
+
+def _in_tests() -> bool:
+    """Under pytest, whatever APP_ENV says. MEASURED 2026-10-26: .env sets APP_ENV=dev,
+    an agent session's pytest inherited it, conftest's setdefault kept it, and the
+    APP_ENV-only guard let a test start the real nightly clock."""
+    return os.getenv("APP_ENV") == "test" or "pytest" in sys.modules
 
 
 def _at(day: datetime, hhmm: str) -> datetime:
@@ -110,7 +118,7 @@ def _loop() -> None:
 
 def start() -> None:
     """Start the clock (once per process) and remove the dead launchd job."""
-    if os.getenv("APP_ENV") == "test":
+    if _in_tests():
         return
     remove_legacy_launchd()
     if _state["thread"] is None:
@@ -149,7 +157,7 @@ def installed() -> Dict[str, Any]:
 
 def sync(s: Dict[str, Any]) -> Dict[str, Any]:
     """Settings changed: the clock reads them on every tick, so just report."""
-    if os.getenv("APP_ENV") == "test":
+    if _in_tests():
         return {"installed": False, "skipped": "test environment"}
     return installed()
 
