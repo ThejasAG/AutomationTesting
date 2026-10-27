@@ -28,6 +28,6 @@ call). Flows run with the code of the checkout you are in.
    (`--label final`). Only a pass after your last edit counts.
 7. **Report** as the task says (report.md + summary.json in the session folder).
 
-Remember `known_issues.md`: the Guests pay-for-all failure is a server bug,
-`flow_kitchen_demo` needs a queued order, and a "Waiting: …" stop is the 30-minute
-booking window, not a failure.
+Remember `known_issues.md`: the Guests flow pays 1 cent over the bill on purpose
+(staging ignores an exact pay-for-all payment), the kitchen demo creates its own
+order, and a "Waiting: …" stop is the 30-minute booking window, not a failure.

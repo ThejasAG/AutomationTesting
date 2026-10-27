@@ -22,5 +22,3 @@ first), write at most **$max_new** new scenarios following
 `.claude/skills/write-scenario/SKILL.md`. Keep only scenarios that pass on the
 simulators.
 
-`flow_kitchen_demo` needs an order already waiting in the kitchen; "no order"
-there is an unmet precondition, not a bug.

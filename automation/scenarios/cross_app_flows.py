@@ -102,6 +102,12 @@ SCREENSHOT_KEEP_RUNS = 25
 _IDB_CLICK_IDS = {"preOrderBooking", "orderLater"}
 # When paying "more than the bill", how much over the bill to tender (to verify change).
 PAY_OVER_BY = 10.0
+# When one profile pays for the others (@pay_for_all), staging ignores a non-cash
+# payment that EQUALS the bill (server bug: paidAmount 0, likely an unrounded float
+# sum; see known_issues.md) but settles any amount above it. The user decided
+# 2026-10-27 to pay 1 cent over so the flow can pass; the exact-amount bug stays
+# reported to the server team.
+PAY_FOR_OTHERS_OVER_BY = 0.01
 
 
 # ── Reusable segment step blocks ───────────────────────────────────────────
@@ -544,16 +550,15 @@ FLOWS: Dict[str, Dict[str, Any]] = {
     "flow_kitchen_demo": {
         "id": "flow_kitchen_demo",
         "name": "Quick demo — Kitchen marks an order ready",
-        "description": "The kitchen logs into the Business iPad, opens an in-progress order in the "
-                       "queue, selects its items, marks them Ready and closes the ticket. Acts on "
-                       "an order already in the kitchen queue — the kitchen's real job. (A "
-                       "self-contained 'waiter creates + sends' setup isn't possible from the "
-                       "B-app alone: a waiter-created booking stays ConfirmationPending until the "
-                       "consumer accepts it in the C-app, so use a full cross-app flow to produce "
-                       "a fresh order end-to-end.) REQUIRES a queued order: with an empty kitchen "
-                       "queue this demo FAILS — that is an unmet precondition, not a broken app.",
+        "description": "Self-contained: the diner books with ORDER LATER, the waiter assigns a "
+                       "table, adds the items and sends them to the kitchen, then the kitchen "
+                       "selects THIS run's ticket, marks it Ready and closes it. (It used to act "
+                       "only on an order already queued, and failed in every Run all where the "
+                       "kitchen was empty; made self-contained at the user's request, 2026-10-27.)",
         "segments": [
-            _seg("1", "Kitchen: mark the order ready", "kitchen", _K_READY),
+            _seg("1", "C-App: book + order later", "consumer", _C_ORDER_LATER),
+            _seg("2", "Waiter: assign + add items + send to kitchen", "waiter", _W_ASSIGN_SEND),
+            _seg("3", "Kitchen: mark the order ready", "kitchen", _K_READY),
         ],
     },
     # ── AI Agent drafts ──
@@ -5172,7 +5177,15 @@ class FlowRunner:
                          f"(nothing to pay, or the wrong card is open)")
             return False
         # Cash is tendered over the bill so the change calculation gets checked.
-        amount = round(bill + PAY_OVER_BY, 2) if method == "cash" else bill
+        if method == "cash":
+            amount = round(bill + PAY_OVER_BY, 2)
+        elif getattr(self, "_paid_for_others", None):
+            amount = round(bill + PAY_FOR_OTHERS_OVER_BY, 2)
+            notes.append(f"    · {method}: paying for others — {amount:.2f} € for a bill of "
+                         f"{bill:.2f} € (staging ignores an exact pay-for-all payment; "
+                         f"see known_issues.md)")
+        else:
+            amount = bill
 
         text = f"{amount:.2f}"
 
@@ -5290,7 +5303,7 @@ class FlowRunner:
         els, res = wait_for(outcome, 45.0)
         if res:
             self._payment_accepted = amount
-        change = f", change {amount - bill:.2f} €" if method == "cash" else ""
+        change = f", change {amount - bill:.2f} €" if amount - bill >= 0.005 else ""
         notes.append(f"[ok] Bill check: total €{bill:.2f}, paid €{amount:.2f} by "
                      f"{method}{change}; Confirm Payment "
                      + ("accepted; the booking settled" if res == "settled" else

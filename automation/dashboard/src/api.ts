@@ -412,8 +412,8 @@ export async function getEvidence(id: string): Promise<Evidence | null> {
     return data.evidence;
 }
 
-export async function getTrends(): Promise<Trends> {
-    const res = await fetch(`${API_BASE}/trends`, { headers: getHeaders() });
+export async function getTrends(days = 30): Promise<Trends> {
+    const res = await fetch(`${API_BASE}/trends?days=${days}`, { headers: getHeaders() });
     return await handleResponse(res);
 }
 

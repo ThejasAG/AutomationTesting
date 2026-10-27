@@ -22,6 +22,8 @@ function statusIcon(status: string) {
 export default function DashboardHome() {
   const [runs, setRuns] = useState<TestRun[]>([]);
   const [trends, setTrends] = useState<Trends | null>(null);
+  // The headline rate is the last 7 days, so progress shows; 30 days for context.
+  const [trendsWeek, setTrendsWeek] = useState<Trends | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(true);
   const [runsError, setRunsError] = useState<string | null>(null);
@@ -52,7 +54,11 @@ export default function DashboardHome() {
   useEffect(() => {
     async function loadData() {
       await refreshRuns();
-      try { setTrends(await getTrends()); } catch (e) { setTrendsError("Failed to load Trends."); }
+      try {
+        const [month, week] = await Promise.all([getTrends(30), getTrends(7)]);
+        setTrends(month);
+        setTrendsWeek(week);
+      } catch (e) { setTrendsError("Failed to load Trends."); }
       setLoading(false);
     }
     loadData();
@@ -174,11 +180,12 @@ export default function DashboardHome() {
         <div className="grid-3" style={{ marginBottom: '40px' }}>
           <div className="card">
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
-              <Activity size={18} /> Total Failure Rate
+              <Activity size={18} /> Failure Rate — last 7 days
             </div>
-            <div className="stat-value">{Number(trends.failure_rate).toFixed(1)}%</div>
+            <div className="stat-value">{Number((trendsWeek ?? trends).failure_rate).toFixed(1)}%</div>
             <div style={{ marginTop: '8px', fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-              Out of {trends.total_executions} total executions
+              {(trendsWeek ?? trends).failed_executions} of {(trendsWeek ?? trends).total_executions} runs failed
+              · last 30 days: {Number(trends.failure_rate).toFixed(1)}% of {trends.total_executions}
             </div>
           </div>
           
