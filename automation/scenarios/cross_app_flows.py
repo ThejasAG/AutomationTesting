@@ -598,6 +598,74 @@ FLOWS: Dict[str, Dict[str, Any]] = {
             ]),
         ],
     },
+    "cc_decline_invite": {
+        "id": "cc_decline_invite",
+        "name": "[Draft] Consumer declines a waiter-created invitation (Wallet)",
+        "description": "The waiter creates an appointment for roopa D (the flow5 block). In "
+                       "the C-App Wallet → Upcoming (Screens/Wallet/Upcoming.js) the "
+                       "consumer opens THIS run's invitation (the modal header shows the "
+                       "booked slot) and taps DECLINE (eventDecline, Components/Modal/"
+                       "index.js). Proves the invitation stops being pending: it leaves "
+                       "the list, or stays only as a row without ACCEPT/DECLINE. Never "
+                       "declines an invitation for another slot (shared account).",
+        "segments": [
+            _seg("1", "Waiter: create appointment (roopa D)", "waiter", _W_CREATE_APPT),
+            _seg("2", "C-App: decline the invitation (wallet)", "consumer", [
+                "open app",
+                "click walletTab",
+                "@wait_screen:wallet",
+                "@decline_appointment",
+            ]),
+        ],
+    },
+    "cc_book_two_hours": {
+        "id": "cc_book_two_hours",
+        "name": "[Draft] Consumer books a table for 2 hours (duration slider)",
+        "description": "Every other flow books 'Not Sure'. Consumer Reservation screen "
+                       "(Screens/StoreView/Reservation.js): Any dining area, the duration "
+                       "slider set to '2 hr' (duration2), the first slot that fits two "
+                       "hours, book, Order later. Then the Wallet event for this run's "
+                       "slot (Wallet/UpcomingCard.js) must print '2 hr' — the duration "
+                       "the server stored, not just the one tapped.",
+        "segments": [
+            _seg("1", "C-App: book Any · 2 hr + order later, check the Wallet", "consumer", [
+                "open app",
+                "@consumer_home",
+                "click NylaiKitchen2",
+                "select Any",
+                "@duration:2",
+                "@first_time_slot",
+                "@book_appointment",
+                "@order_later",
+                "click walletTab",
+                "@wallet_event_shows:2 hr",
+            ]),
+        ],
+    },
+    "cc_book_indoor_one_hour": {
+        "id": "cc_book_indoor_one_hour",
+        "name": "[Draft] Consumer books an Indoor table for 1 hour",
+        "description": "Every other flow books the 'Any' dining area. Consumer Reservation "
+                       "screen (Screens/StoreView/Reservation.js): the 'Indoor' dining "
+                       "area, the duration slider at '1 hr' (duration1), the first slot, "
+                       "book, Order later if asked. Then the Wallet event for this run's "
+                       "slot (Wallet/UpcomingCard.js) must print 'Indoor .1 hr' — the area "
+                       "and duration the server stored.",
+        "segments": [
+            _seg("1", "C-App: book Indoor · 1 hr, check the Wallet", "consumer", [
+                "open app",
+                "@consumer_home",
+                "click NylaiKitchen2",
+                "select Indoor",
+                "@duration:1",
+                "@first_time_slot",
+                "@book_appointment",
+                "@order_later",
+                "click walletTab",
+                "@wallet_event_shows:Indoor .1 hr",
+            ]),
+        ],
+    },
 }
 
 
@@ -629,6 +697,8 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@consumer_epay", "help": "After Checkout: E-Payment → Stripe 'Pay €' → confirmed"},
         {"step": "@consumer_checkout", "help": "Wallet: this booking's card → scroll → Checkout"},
         {"step": "@leave_review", "help": "Wallet Finished tab: rate + review a finished order"},
+        {"step": "@decline_appointment", "help": "Wallet: DECLINE this run's pending invitation (by slot)"},
+        {"step": "@wallet_event_shows:2 hr", "help": "Wallet: this run's event (TODAY, booked slot) prints the text"},
         {"step": "@duration:not_sure", "help": "Slide the duration bar to Not Sure (or @duration:1/2/3)"},
         {"step": "@invite_guests:3", "help": "Reservation form: Persons + → add N guests → Invite"},
         {"step": "@void_item", "help": "Swipe an order row → VOID → Entry Error → Apply"},
@@ -6854,6 +6924,197 @@ class FlowRunner:
                      + (" (booking-confirmed modal dismissed via orderLater)" if post_modal else ""))
         return True
 
+    # vya-consumer Components/Modal/index.js (InvitaionScreenModal): next to ACCEPT is
+    # 'eventDecline' -> Wallet/Upcoming.js decline() POSTs
+    # /usersapi/api?query=declineInvitation, closes the modal (invVis false) and reloads.
+    _DECLINE_ID = "eventDecline"
+
+    def _decline_appointment(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Open THIS run's pending wallet invitation and DECLINE it, then verify it is no
+        longer pending. Unlike accept, it never falls back to "the first that opens":
+        the consumer account is shared, and declining someone else's invitation would
+        destroy their booking -- so the invitation must show this run's slot."""
+        tag = "@decline_appointment"
+        slot = getattr(self, "_booked_slot", "") or ""
+
+        def labels() -> List[str]:
+            return [e["label"] for e in self._idb_els() if e["label"]]
+
+        def invite_els() -> List[dict]:
+            return sorted((e for e in self._idb_els()
+                           if e["label"].endswith(self._INVITE_SUFFIX)), key=lambda e: e["cy"])
+
+        def modal_up(ls: List[str]) -> bool:
+            return any(i in ls for i in ("inviteclose", self._ACCEPT_ID, self._DECLINE_ID))
+
+        def ours(ls: List[str]) -> bool:
+            return bool(re.search(rf"(?<!\d){re.escape(slot)}(?!\d)", " ".join(ls)))
+
+        def open_invite(el) -> bool:
+            # A cancelled invitation is listed but disabled; its tap opens nothing.
+            for _ in range(2):
+                self._idb_tap(el["cx"], el["cy"])
+                for _ in range(5):
+                    time.sleep(1.5)
+                    if modal_up(labels()):
+                        return True
+                self._clear_logbox()
+            return False
+
+        def close_invite() -> None:
+            x = next((e for e in self._idb_els() if e["label"] == "inviteclose"), None)
+            if x is not None:
+                self._idb_tap(x["cx"], x["cy"])
+                for _ in range(4):
+                    time.sleep(1.0)
+                    if not modal_up(labels()):
+                        break
+
+        if not slot:
+            notes.append(f"[FAIL] {tag} — this run booked no slot, so its invitation cannot "
+                         f"be told from others on the shared account; refusing to decline")
+            return False
+        self._clear_logbox()
+        ls = labels()
+        if "walletUpcomingSearchInput" not in ls and "walletCouponSearchInput" in ls:
+            tab = next((e for e in self._idb_els() if e["label"] == "upcomingBlock"), None)
+            if tab is not None:
+                self._idb_tap(tab["cx"], tab["cy"])
+                time.sleep(2.0)
+        pending = invite_els()
+        for i in range(14):                              # ~20s for the invitation to arrive
+            if pending:
+                break
+            time.sleep(1.5)
+            pending = invite_els()
+            if i == 6:                                   # pull to refresh, once
+                els = self._idb_els()
+                app = next((e for e in els if e.get("type") == "Application"), None)
+                if app is not None and app.get("w") and app.get("h"):
+                    udid = getattr(self, "_cur_udid", "") or DEFAULT_CONSUMER_UDID
+                    _idbd.swipe(udid, app["w"] / 2, app["h"] * 0.30,
+                                app["w"] / 2, app["h"] * 0.75, 0.6)
+        if not pending:
+            notes.append(f"[FAIL] {tag} — no pending invitation on the wallet (no "
+                         f"'<name>{self._INVITE_SUFFIX}'). On screen: {labels()[:18]}")
+            return False
+        n_before = len(pending)
+        found = False
+        for el in pending[:6]:
+            if not open_invite(el):
+                continue
+            now = labels()
+            if ours(now) and self._DECLINE_ID in now:
+                found = True
+                break
+            close_invite()
+        if not found:
+            notes.append(f"[FAIL] {tag} — none of the {n_before} pending invitation(s) is for "
+                         f"this run's slot {slot} with DECLINE offered; nothing declined. "
+                         f"On screen: {labels()[:18]}")
+            return False
+        btn = next((e for e in self._idb_els() if e["label"] == self._DECLINE_ID), None)
+        if btn is None:
+            notes.append(f"[FAIL] {tag} — {self._DECLINE_ID!r} vanished before it could be "
+                         f"tapped. On screen: {labels()[:18]}")
+            return False
+        self._idb_tap(btn["cx"], btn["cy"])
+        closed = False
+        for _ in range(12):                              # ~24s: a network round-trip
+            time.sleep(2)
+            if not modal_up(labels()):
+                closed = True
+                break
+        if not closed:
+            notes.append(f"[FAIL] {tag} — tapped DECLINE on the {slot} invitation but the "
+                         f"modal stayed up (declineInvitation did not land). "
+                         f"On screen: {labels()[:18]}")
+            return False
+        self._clear_logbox()
+        n_after = len(invite_els())
+        if n_after < n_before:
+            notes.append(f"[ok] {tag} — the {slot} invitation was declined; it left the "
+                         f"pending list ({n_before} → {n_after})")
+            return True
+        # Still listed: a declined invitation may stay as a disabled (cancelled) row.
+        # Then it must no longer offer ACCEPT/DECLINE for this slot.
+        for el in invite_els()[:6]:
+            if not open_invite(el):
+                continue
+            now = labels()
+            if ours(now) and (self._DECLINE_ID in now or self._ACCEPT_ID in now):
+                notes.append(f"[FAIL] {tag} — tapped DECLINE and the modal closed, but the "
+                             f"{slot} invitation still offers ACCEPT/DECLINE. "
+                             f"On screen: {now[:18]}")
+                return False
+            close_invite()
+        notes.append(f"[ok] {tag} — the {slot} invitation was declined; it is still listed "
+                     f"but no longer offers ACCEPT/DECLINE")
+        return True
+
+    def _wallet_event_shows(self, want: str, notes: List[str]) -> bool:
+        """Wallet -> open THIS run's event (TODAY at the booked slot) and check that it
+        prints *want*. An open event prints '<dining area> .<duration>', e.g. 'Any .2 hr'
+        (vya-consumer Wallet/UpcomingCard.js:3363-3365), so a booking's stored duration
+        can be checked here. Other diners book the same slot on the shared account, so
+        an event at the slot that lacks *want* is closed and the next one tried."""
+        udid = self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
+        name, frame = _idbd.name, _idbd.frame
+        tag = f"@wallet_event_shows:{want}"
+        slot = getattr(self, "_booked_slot", "") or ""
+        if not want or not slot:
+            notes.append(f"[FAIL] {tag} — needs a text to look for and this run's booked "
+                         f"slot (slot: {slot or 'none'})")
+            return False
+        pat = re.compile(rf"(?<![\w]){re.escape(want)}(?![\w])", re.I)
+        key = _norm(CONSUMER_NAME)
+        els = _idbd.describe_all(udid)
+        if not any(name(e) == "walletUpcomingSearchInput" for e in els):
+            _idbd.tap(udid, ["walletTab", "Wallet"], els)
+            els, _ = self._wait_els(udid, lambda es: any(
+                name(e) == "walletUpcomingSearchInput" for e in es), 10.0)
+        _w, H = _idbd.app_size(els)
+
+        def close_open(es) -> None:
+            btn = next((e for e in es if name(e).endswith("Close") and " " not in name(e)
+                        and _norm(name(e)).startswith(key)), None)
+            if btn is not None:
+                self._tap_inside(udid, btn)
+                self._wait_els(udid, lambda x: self._event_open(x) is None, 6.0)
+
+        seen: List[str] = []
+        for _page in range(4):
+            tried_y: set = set()
+            for _ in range(10):
+                els = _idbd.describe_all(udid)
+                ev = self._event_open(els)
+                if ev:
+                    if ev == ("TODAY", slot):
+                        hit = next((name(e) for e in els if pat.search(name(e))), "")
+                        if hit:
+                            notes.append(f"[ok] {tag} — this run's event (TODAY {slot}) "
+                                         f"reads {hit!r}")
+                            close_open(els)
+                            return True
+                        seen.append(f"TODAY {slot} without {want!r}")
+                    close_open(els)
+                    continue
+                cards = [c for c in els if name(c) == self._RESTAURANT_CARD
+                         and 190 <= frame(c)[1] + frame(c)[3] / 2 <= H - 110
+                         and round(frame(c)[1]) not in tried_y]
+                if not cards:
+                    break
+                card = min(cards, key=lambda c: frame(c)[1])
+                tried_y.add(round(frame(card)[1]))
+                ok, _how = self._tap_inside(udid, card)
+                if ok:
+                    self._wait_els(udid, self._event_open, 15.0)
+            _idbd.swipe(udid, 200, H * 0.70, 200, H * 0.35, 1.2)     # next page
+            time.sleep(1.0)
+        notes.append(f"[FAIL] {tag} — no Wallet event TODAY {slot} reads {want!r}; "
+                     f"opened at the slot: {', '.join(seen) or 'none'}")
+        return False
+
     # ── Consumer: Checkout on THIS booking's Wallet card ───────────────────
     # vya-consumer Screens/Wallet/UpcomingCard.js: once the waiter has notified
     # payment, the booking's card shows Checkout as `${username}finishedCard`
@@ -8649,6 +8910,10 @@ class FlowRunner:
             return self._tap_text_contains(r, "logout")
         if step == "@accept_appointment":
             return self._accept_appointment(r, notes)
+        if step == "@decline_appointment":
+            return self._decline_appointment(r, notes)
+        if step.startswith("@wallet_event_shows:"):
+            return self._wallet_event_shows(step.split(":", 1)[1].strip(), notes)
         if step == "@consumer_epay":
             return self._consumer_epay(notes)
         if step == "@consumer_checkout":
