@@ -576,6 +576,28 @@ FLOWS: Dict[str, Dict[str, Any]] = {
             _seg("1", "C-App: rate + review a finished order", "consumer", _C_LEAVE_REVIEW),
         ],
     },
+    "cc_orders_filter_status": {
+        "id": "cc_orders_filter_status",
+        "name": "[Draft] Waiter filters My Orders by status (Reserved)",
+        "description": "Consumer books with ORDER LATER (no pre-order). On the "
+                       "waiter's Home board, the My Orders panel "
+                       "(Screens/Orders/index.js) is filtered to 'Reserved' via the "
+                       "status Filter sheet — a magnus Overlay whose options carry "
+                       "no accessibility id (locator_map.md's Overlay trap), so they "
+                       "are picked by OCR text, the same machinery @void_item/"
+                       "@comp_item/@split_item already use — then Apply, and the "
+                       "narrowed list's 'N result(s) shown for' line is checked to "
+                       "prove the filter actually took effect, not just that the "
+                       "sheet closed.",
+        "segments": [
+            _seg("1", "C-App: book + order later", "consumer", _C_ORDER_LATER),
+            _seg("2", "Waiter: filter My Orders by status", "waiter", [
+                "@waiter_board",
+                "click orderFilterBtn",
+                "@filter_orders:Reserved",
+            ]),
+        ],
+    },
 }
 
 
@@ -620,6 +642,7 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@pay:epay", "help": "Settle by E-Payment"},
         {"step": "@pay:cash", "help": "Settle by cash"},
         {"step": "@pay:voucher", "help": "Settle by food voucher"},
+        {"step": "@filter_orders:Reserved", "help": "My Orders: filter by status (OCR-tap, e.g. Reserved/Order/Serve)"},
         {"step": "@logout_business", "help": "Sign out of the Business app"},
         {"step": "@logout_consumer", "help": "Sign out of the Consumer app"},
     ],
@@ -8505,6 +8528,54 @@ class FlowRunner:
         notes.append(f"[ok] {tag} — {payer} pays for {', '.join(others) or 'nobody else'}")
         return True
 
+    def _filter_orders(self, r: ScenarioRunner, notes: List[str], status: str = "Reserved") -> bool:
+        """Apply the My Orders status filter (Screens/Orders/index.js's `Filter`,
+        rendered via Components/Modal/index.js). It is a magnus Overlay — its
+        options (Reserved/In Progress/Order/Serve/Payment Notified/Payment
+        Completed) and Apply carry no accessibility id, the same trap
+        locator_map.md documents for VOID/COMP/SPLIT — so they are picked by
+        OCR text with the same `_ocr_tap` those tokens already use. The 'N
+        result(s) shown for « status »' line (Orders/index.js:425) renders
+        OUTSIDE the overlay in the normal tree, so it proves the filter
+        actually took effect, not just that the sheet closed."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        tag = f"@filter_orders:{status}"
+        ok, how = self._ocr_tap(udid, None, status)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — {how}")
+            return False
+        time.sleep(0.6)
+        ok2, how2 = self._ocr_tap(udid, None, "Apply")
+        if not ok2:
+            notes.append(f"[FAIL] {tag} — picked {status!r} ({how}) but {how2}")
+            return False
+
+        def _narrowed(es) -> bool:
+            return any("result" in _idbd.name(e).lower() and "shown" in _idbd.name(e).lower()
+                       for e in es)
+
+        els, done = self._wait_els(udid, _narrowed, 8.0)
+        line = ""
+        if done:
+            line = next((_idbd.name(e) for e in els if "result" in _idbd.name(e).lower()
+                        and "shown" in _idbd.name(e).lower()), "")
+        else:
+            # The info line can render without reaching the accessibility tree on
+            # some builds (see idb_coords/_choose_card's 'content vs. screen' notes
+            # elsewhere in this file) — OCR reads the pixels regardless, the same
+            # fallback @void_item/@notify_payment rely on.
+            for _ in range(6):
+                if self._ocr_sees(udid, "result"):
+                    done = True
+                    break
+                time.sleep(1.0)
+        if not done:
+            notes.append(f"[FAIL] {tag} — tapped {status!r} and Apply but the narrowed-list "
+                         f"'result(s) shown for' line never appeared")
+            return False
+        notes.append(f"[ok] {tag} — {how}; {how2}" + (f"; {line!r}" if line else "; confirmed by OCR"))
+        return True
+
     def _handle_special(self, r, step: str, notes: List[str]) -> bool:
         if (step in self._DONE_BY_PAYMENT
                 and (getattr(self, "_booking_status", "") or "").startswith("payment")):
@@ -8610,6 +8681,8 @@ class FlowRunner:
             return self._waiter_close_table(r, notes)
         if step == "@waiter_board":
             return self._waiter_board(notes)
+        if step.startswith("@filter_orders:"):
+            return self._filter_orders(r, notes, step.split(":", 1)[1].strip())
         if step == "@close_table":
             return self._close_table(notes)
         if step.startswith("@wait_screen:"):
