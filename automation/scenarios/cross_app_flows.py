@@ -9016,6 +9016,7 @@ class FlowRunner:
         self._setup_notes = []
         started = time.time()
         self._seg_started_at = started             # see _own_panel_card
+        self._metro_marks = self._metro_log_sizes()  # see _collect_evidence
         status = "PASS"
         flaky_steps = 0
         # WHERE + evidence: the first step that fails wins — we screenshot the screen at THAT
@@ -9206,6 +9207,28 @@ class FlowRunner:
                 notes[i] = f"{notes[i]} ({secs:.1f}s)"
                 return
 
+    @staticmethod
+    def _metro_log_for(bundle: str) -> str:
+        """The Metro log of the bundler serving this app ('' if there is none)."""
+        try:
+            from automation.projects.builder import AppBuilder, metro_log_path
+            path = metro_log_path(AppBuilder.metro_port_for(bundle))
+            return path if os.path.isfile(path) else ""
+        except Exception:
+            return ""
+
+    def _metro_log_sizes(self) -> Dict[str, int]:
+        """Each app's Metro log size now — where this segment's lines will start."""
+        marks: Dict[str, int] = {}
+        for bundle in (getattr(self, "consumer_bundle", ""), getattr(self, "business_bundle", "")):
+            path = self._metro_log_for(bundle or "")
+            if path:
+                try:
+                    marks[path] = os.path.getsize(path)
+                except OSError:
+                    pass
+        return marks
+
     def _collect_evidence(self, role: str) -> List[str]:
         """Why the app failed, in its own words — gathered ONCE at the failing step.
 
@@ -9236,18 +9259,20 @@ class FlowRunner:
         proc = bundle.rsplit(".", 1)[-1] if bundle else "Vya"
 
         try:
-            # METRO_LOG_PATH if set, else the most recently written bundler log —
-            # each app repo runs its own on its own port.
-            path = os.getenv("METRO_LOG_PATH") or ""
+            # The failing app's OWN Metro log (each app runs its bundler on its own
+            # port), from where it stood when this segment began — so only what the
+            # app logged during the failure. MEASURED 2026-10-27: the newest log of
+            # any app, tail-read with no time bound, attached an old "JavaScript heap
+            # out of memory" line to three unrelated failures, and the AI Agent
+            # diagnosed a Metro crash that never happened.
+            path = os.getenv("METRO_LOG_PATH") or self._metro_log_for(bundle)
             if not path:
-                # The platform's own Metro logs (builder.metro_log_path), plus the
-                # older /tmp location.
                 from automation.projects.builder import METRO_LOG_DIR
-                logs = sorted(glob.glob(os.path.join(METRO_LOG_DIR, "metro_*.log"))
-                              + glob.glob("/tmp/metro*.log"),
+                logs = sorted(glob.glob(os.path.join(METRO_LOG_DIR, "metro_*.log")),
                               key=os.path.getmtime, reverse=True)
                 path = logs[0] if logs else ""
-            for line in read_js_console(path, max_lines=12):
+            since = (getattr(self, "_metro_marks", None) or {}).get(path)
+            for line in read_js_console(path, max_lines=12, since=since):
                 out.append(f"    [evidence] js: {line[:220]}")
         except Exception:
             pass
