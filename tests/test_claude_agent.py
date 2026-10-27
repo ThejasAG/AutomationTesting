@@ -518,7 +518,7 @@ def test_an_old_claude_code_falls_back_to_a_model_it_supports(monkeypatch):
     model; version 2.1.280 or newer is required') — the session must not die of it."""
     calls = []
 
-    def once(sid, sdir, wt, prompt, model, s, deadline, name, mode):
+    def once(sid, sdir, wt, prompt, model, s, deadline, name, mode, resume=None):
         calls.append((model, mode))
         if model == "opus":
             return {"is_error": True, "turns": 1, "result": "API Error: 400 Claude Code 2.1.205 does not "
@@ -531,7 +531,7 @@ def test_an_old_claude_code_falls_back_to_a_model_it_supports(monkeypatch):
     assert calls == [("opus", "w"), ("sonnet", "a")]
     assert info["turns"] == 30 and info["model_fallback"]["used"] == "sonnet"
     monkeypatch.setattr(runner, "_run_claude_once",
-                        lambda *a: {"is_error": True, "turns": 40, "result": "does not support this model"})
+                        lambda *a, **k: {"is_error": True, "turns": 40, "result": "does not support this model"})
     assert "model_fallback" not in runner.run_claude("s", "/s", "/wt", "p", {"model": "opus", "effort": "high"},
                                                      None, "n")
 

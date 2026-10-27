@@ -653,6 +653,7 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "select <text>", "help": "Tap by visible text, e.g. select Any"},
         {"step": "scroll down", "help": "Swipe down to reveal lower controls"},
         {"step": "verify <text>", "help": "Assert text is on screen"},
+        {"step": "@see:Invoice", "help": "Assert text is on screen NOW (idb, then OCR; ~1-12s) — catches toasts"},
     ],
 }
 
@@ -7801,6 +7802,48 @@ class FlowRunner:
             pass
         return ""
 
+    SEE_SECS = 12.0
+
+    def _see_text(self, text: str, notes: List[str]) -> bool:
+        """`@see:<text>` — the outcome a scenario checks, read off the live screen.
+
+        `verify <text>` goes through ScenarioRunner's fuzzy resolver: MEASURED
+        2026-10-27 (cc_seat_capacity_guard, run cbc65fce) it answered after 49s, long
+        after a toast is gone. This polls the idb tree (~1s a read) for a label that
+        CONTAINS the text (case, spacing and punctuation ignored), then reads the
+        pixels once: a magnus Overlay hides its text from idb."""
+        tag = f"@see:{text}"
+        want = _norm(text)
+        if not want:
+            notes.append(f"[FAIL] {tag} — no text to look for")
+            return False
+        udid = (getattr(self, "_cur_udid", "") or self.devices.get("consumer")
+                or DEFAULT_CONSUMER_UDID)
+
+        def seen(es) -> str:
+            for e in es:
+                for label in (e.get("AXLabel") or "", e.get("AXIdentifier") or ""):
+                    if want in _norm(label):
+                        return label.strip()
+            return ""
+
+        _els, hit = self._wait_els(udid, seen, self.SEE_SECS)
+        if hit:
+            notes.append(f"[ok] {tag} — on screen: {hit[:80]!r}")
+            return True
+        try:
+            from automation.scenarios import screen_text
+            hit = next((t for t, *_ in screen_text.read_text(udid, accurate=True)
+                        if want in _norm(t)), "")
+        except Exception:
+            hit = ""
+        if hit:
+            notes.append(f"[ok] {tag} — on screen (read by OCR): {hit[:80]!r}")
+            return True
+        notes.append(f"[FAIL] {tag} — not on screen after {self.SEE_SECS:.0f}s "
+                     f"(idb, then OCR)")
+        return False
+
     def _overlay_taps(self, udid: str, els: List[dict], kind: str, texts: List[str],
                       marker: str, tag: str, notes: List[str]) -> Optional[List[dict]]:
         """Tap *texts* in order on the open Overlay, then wait for it to close
@@ -8687,6 +8730,8 @@ class FlowRunner:
             return self._close_table(notes)
         if step.startswith("@wait_screen:"):
             return self._await_screen(step.split(":", 1)[1].strip(), notes)
+        if step.startswith("@see:"):
+            return self._see_text(step.split(":", 1)[1].strip(), notes)
         if step.startswith("@pay:") and self._skip_if_settled(step, notes):
             return True
         if step.startswith("@pay:"):

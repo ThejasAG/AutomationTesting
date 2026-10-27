@@ -8,6 +8,7 @@ project folder. Output is plain text.
   preflight [--wait MIN]            Appium, simulators, staging; waits up to MIN for the rig
   flows                             every flow with its last results
   show-flow FLOW                    the flow's segments and steps as they run now
+  steps                             every step form, @token (+ its handler) and shared block
   history FLOW                      the flow's last runs and where each failed
   run FLOW [--resume RUN] [--label L] [--max SEC]
                                     run one flow on the simulators, with THIS checkout's
@@ -133,6 +134,78 @@ def cmd_flows(_a) -> int:
 def cmd_show_flow(a) -> int:
     from automation.agentic import runinfo
     print(runinfo.flow_text(a.flow))
+    return 0
+
+
+_BLOCK_ROLE = {"_C_": "consumer", "_W_": "waiter", "_K_": "kitchen"}
+
+
+def _token_methods(src: str) -> Dict[str, str]:
+    """{'@token' or '@prefix:': the FlowRunner method(s) its branch returns}, read
+    from _handle_special's source; '(inline)' when the branch does the work itself."""
+    lines = src.splitlines()
+    found: Dict[str, List[str]] = {}
+    for i, line in enumerate(lines):
+        toks = re.findall(r'"(@[a-z_]+:?)"', line)
+        if not toks:
+            continue
+        body = []
+        for nxt in lines[i + 1:]:
+            if nxt.strip().startswith("if step"):
+                break
+            body.append(nxt)
+        names = re.findall(r"return self\.(_\w+)\(", "\n".join(body))
+        for tok in toks:
+            found.setdefault(tok, [])
+            found[tok] += [n for n in names if n not in found[tok]]
+    return {tok: " / ".join(names) or "(inline)" for tok, names in found.items()}
+
+
+def _block_users(block: List[str], flows: Dict[str, Any]) -> List[str]:
+    n = len(block)
+    return [fid for fid, f in flows.items()
+            if any(s["steps"][i:i + n] == block for s in f.get("segments") or []
+                   for i in range(len(s["steps"]) - n + 1))]
+
+
+def cmd_steps(_a) -> int:
+    """What a flow step can be — read from the engine itself, so it is never stale:
+    the step forms, every @token with the handler method behind it, the plain steps
+    that are rewritten to a token, and the shared step blocks with the flows using
+    them. MEASURED 2026-10-27: a 'Create scenarios' session spent 23 of its 57
+    minutes in helper agents rediscovering exactly this from the 10k-line file."""
+    import inspect
+    from automation.agentic.runinfo import known_tokens
+    from automation.scenarios import cross_app_flows as caf
+    print("STEP FORMS — one string per step, run in order; a failing step ends the segment")
+    for row in caf.STEP_CATALOG.get("Common", []):
+        print(f"  {row['step']:<34} {row['help']}")
+    print(f"  {'?<step>':<34} optional: done when its target shows within ~6s, else skipped")
+    exact, prefixes = known_tokens()
+    methods = _token_methods(inspect.getsource(caf.FlowRunner._handle_special))
+    helps = {}
+    for rows in caf.STEP_CATALOG.values():
+        for row in rows:
+            tok = row["step"].split(":", 1)[0] + (":" if ":" in row["step"] else "")
+            helps.setdefault(tok, (row["step"], row["help"]))
+    print("\n@TOKENS — `_handle_special` dispatches these (method = the FlowRunner handler)")
+    for tok in sorted(exact | prefixes):
+        shown, help_ = helps.get(tok, (tok + ("<arg>" if tok.endswith(":") else ""), ""))
+        print(f"  {shown:<34} {methods.get(tok, '?'):<26} {help_}")
+    print("\nPLAIN STEPS rewritten to a token before they run")
+    for plain, tok in caf.FlowRunner._PLAIN_STEP_TOKENS.items():
+        print(f"  {plain:<34} -> {tok}")
+    print("\nSHARED STEP BLOCKS — reuse them (`_C_BOOK_PREFIX + [...]`); never edit one for a new flow")
+    flows = caf.FLOWS
+    for name, block in vars(caf).items():
+        role = next((r for p, r in _BLOCK_ROLE.items() if name.startswith(p)), None)
+        if not role or not isinstance(block, list) or not block or \
+                not all(isinstance(s, str) for s in block):
+            continue
+        users = _block_users(block, flows)
+        print(f"\n  {name}  ({role}; used by {len(users)} flow(s): {', '.join(users[:8]) or '-'})")
+        for st in block:
+            print(f"      {st}")
     return 0
 
 
@@ -295,7 +368,20 @@ def _child(a) -> int:
                 plan["from_run"] = a.resume
         except ValueError:
             plan = None
+    try:        # what this run executes, for the session's on-device gate
+        from automation.claude_code import fingerprint
+        from automation.scenarios.cross_app_flows import resolve_flow
+        fp = fingerprint.take(CODE_ROOT, (resolve_flow(a.flow) or {}).get("segments") or [],
+                              start=(plan or {}).get("start_at") or 0,
+                              resumed_from=a.resume if plan else None)
+    except Exception:
+        fp = None
     rid = start_flow_run(a.flow, env=ENV, resume=plan)
+    if fp is not None:
+        try:
+            fingerprint.record(rid, fp)
+        except OSError:
+            pass
     tag = "claude-agent:" + (os.environ.get("AGENT_SESSION_ID") or "manual")[:36]
     with SessionLocal() as db:
         r = db.get(TestRun, rid)
@@ -613,6 +699,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--wait", type=float, default=0)
     s.set_defaults(fn=cmd_preflight)
     sub.add_parser("flows").set_defaults(fn=cmd_flows)
+    sub.add_parser("steps").set_defaults(fn=cmd_steps)
     for name, fn in (("show-flow", cmd_show_flow), ("history", cmd_history), ("check-ids", cmd_check_ids)):
         s = sub.add_parser(name)
         s.add_argument("flow")

@@ -85,7 +85,9 @@ So "cross-app" = **three roles**: **consumer** (iPhone), **waiter** + **kitchen*
 - **`automation/integrations/`** — `github.py` (list PRs), `jira.py` (`get_issue(key)` reads
   ticket descriptions; configured via `.env` JIRA_URL/EMAIL/TOKEN).
 - **`automation/knowledge/`** — grounded facts: `locator_map.md` (REAL element ids per screen,
-  extracted from app source — use this instead of guessing), `default.md`, `vya_scenario_library.md`.
+  extracted from app source — use this instead of guessing), `scenario_authoring.md` (how to
+  write a flow fast: steps, handler + test templates, drafting traps), `default.md`,
+  `vya_scenario_library.md`.
 - **`automation/database/`** — SQLAlchemy models + SQLite (`test_automation_new.db`). Key
   models: `TestRun`, `ScenarioResult`, `SavedScenario`, `Ticket`, `TestProject`.
 - **`repos/<uuid>/`** — cloned app source checkouts (vya-consumer, vya-business, vya_web_app).
@@ -161,6 +163,8 @@ So "cross-app" = **three roles**: **consumer** (iPhone), **waiter** + **kitchen*
 
 - **Add a flow**: add an entry to `FLOWS` (id, name, description, `segments=[_seg(...)]`). Every
   `@token` used must be dispatched in `_handle_special` (there's a token-validation check).
+  `scripts/agent_tools.py steps` lists every step form, token (+ handler) and shared block;
+  check outcomes with `@see:<text>` (fast), not `verify <text>` (~50s, misses toasts).
 - **Fix a broken selector**: find the REAL id in `knowledge/locator_map.md` or grep the app
   source in `repos/<uuid>/App/`. Don't invent ids.
 - **Reload after a code change**: `./stop.sh && ./start.sh`.

@@ -5,6 +5,7 @@
   python -m automation.claude_code.cli nightly [--force]   the scheduled run (honours the setting)
   python -m automation.claude_code.cli status              the last sessions
   python -m automation.claude_code.cli stop ID
+  python -m automation.claude_code.cli continue ID   an interrupted session, where it stopped
   python -m automation.claude_code.cli approve ID | reject ID
   python -m automation.claude_code.cli schedule            install/remove the launchd job per settings
 
@@ -91,6 +92,16 @@ def cmd_stop(a) -> int:
     return 0
 
 
+def cmd_continue(a) -> int:
+    from automation.claude_code import session
+    try:
+        print(f"continuing session {session.continue_session(a.id, 'cli')}")
+    except (session.Refused, session.Busy, ValueError) as e:
+        print(f"refused: {e}")
+        return 1
+    return 0
+
+
 def cmd_decide(a) -> int:
     from automation.claude_code import session
     try:
@@ -131,6 +142,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sub.add_parser("stop")
     s.add_argument("id")
     s.set_defaults(fn=cmd_stop)
+    s = sub.add_parser("continue")
+    s.add_argument("id")
+    s.set_defaults(fn=cmd_continue)
     for name in ("approve", "reject"):
         s = sub.add_parser(name)
         s.add_argument("id")

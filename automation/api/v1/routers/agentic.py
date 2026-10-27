@@ -157,6 +157,18 @@ def stop_session(sid: str):
     return {"stopping": session.stop(sid)}
 
 
+@router.post("/sessions/{sid}/continue", dependencies=[_admin])
+def continue_session(sid: str, current_user=Depends(get_current_user)):
+    try:
+        return {"id": session.continue_session(sid, _who(current_user))}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except session.Busy as e:
+        raise HTTPException(409, str(e))
+    except session.Refused as e:
+        raise HTTPException(400, str(e))
+
+
 @router.post("/sessions/{sid}/approve", dependencies=[_admin])
 def approve_session(sid: str, current_user=Depends(get_current_user)):
     try:

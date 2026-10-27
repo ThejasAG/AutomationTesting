@@ -144,6 +144,7 @@ export const agentApi = {
     diff: (id: string) => call<{ diff: string }>(`${sid(id)}/diff`),
     start: (body: StartSession) => post<{ started: boolean; id: string }>('/sessions', body),
     stop: (id: string) => post<{ stopping: boolean }>(`${sid(id)}/stop`),
+    continueSession: (id: string) => post<{ id: string }>(`${sid(id)}/continue`),
     approve: (id: string) => post<ApproveResult>(`${sid(id)}/approve`),
     reject: (id: string) => post<{ rejected: boolean }>(`${sid(id)}/reject`),
     restartBackend: () => post<{ restarting: boolean }>('/restart-backend'),

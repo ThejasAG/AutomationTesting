@@ -22,7 +22,7 @@ import py_compile
 import re
 import subprocess
 import sys
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from automation.agentic.runinfo import CHECK_STEP
 from automation.claude_code import impact
@@ -77,6 +77,8 @@ _DUMP = (
     "from automation.scenarios.cross_app_flows import FLOWS, FlowRunner\n"
     "print(json.dumps({'flows': {k: [s for seg in (f.get('segments') or [])"
     " for s in (seg.get('steps') or [])] for k, f in FLOWS.items()},"
+    " 'segments': {k: [list(seg.get('steps') or []) for seg in (f.get('segments') or [])]"
+    " for k, f in FLOWS.items()},"
     " 'aliases': dict(getattr(FlowRunner, '_PLAIN_STEP_TOKENS', {}))}))\n"
 )
 
@@ -208,12 +210,22 @@ def confirm_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def device_gate(runs: List[Dict[str, Any]], last_edit: float, must_pass: Iterable[str],
-                any_of: Optional[List[str]]) -> Dict[str, Any]:
-    """`must_pass`: each needs a passing run started after `last_edit`.
-    `any_of`: at least one of these must have one ([impact.ALL] = any flow)."""
-    passed_after = {r["flow_id"] for r in runs
-                    if r.get("status") == "passed" and float(r.get("t0") or 0) >= last_edit}
-    problems = [f"{f}: no passing run after the last edit" for f in sorted(set(must_pass))
+                any_of: Optional[List[str]],
+                current: Optional[Callable[[Dict[str, Any]], Optional[bool]]] = None) -> Dict[str, Any]:
+    """`must_pass`: each needs a passing run of the code it has now.
+    `any_of`: at least one of these must have one ([impact.ALL] = any flow).
+
+    `current(run)` says whether a run executed the code its flow has now (from the
+    run's fingerprint, see fingerprint.py); a run it cannot judge (None) counts only
+    when it started after `last_edit`, the last change to any file."""
+    def counts(r: Dict[str, Any]) -> bool:
+        if r.get("status") != "passed":
+            return False
+        verdict = current(r) if current is not None else None
+        return verdict if verdict is not None else float(r.get("t0") or 0) >= last_edit
+
+    passed_after = {r["flow_id"] for r in runs if counts(r)}
+    problems = [f"{f}: no passing run after the last edit that reaches it" for f in sorted(set(must_pass))
                 if f not in passed_after]
     if any_of:
         ok_any = bool(passed_after) if impact.ALL in any_of else bool(passed_after & set(any_of))

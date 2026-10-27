@@ -84,6 +84,21 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
     }
   };
 
+  const resume = async () => {
+    if (!window.confirm('Continue this session where it stopped (same worktree, same Claude conversation)?')) return;
+    setBusy('continue');
+    setActErr('');
+    try {
+      await agentApi.continueSession(s.id);
+      setReload(n => n + 1);
+      onChanged();
+    } catch (e) {
+      setActErr((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
   return (
     <div style={section}>
       <h3 style={h3}><FileText size={18} /> {KIND[s.kind] ?? s.kind}
@@ -118,6 +133,23 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
           </p>
         )}
       </div>
+
+      {/* ── interrupted: pick it up again ── */}
+      {s.status === 'interrupted' && (
+        <div className="card" style={{ ...card, borderColor: `${AMBER}66` }}>
+          <div style={{ fontWeight: 600, display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+            <AlertTriangle size={18} color={AMBER} /> This session was interrupted
+          </div>
+          <p style={{ ...muted, marginBottom: 12 }}>
+            Its process ended (the Mac restarted or the platform was stopped). Continue picks it up where
+            it stopped: same worktree, same edits and runs, same Claude conversation.
+          </p>
+          <button className="btn" disabled={!!busy} onClick={resume}>
+            {busy === 'continue' ? <Loader2 size={16} className="spin" /> : <RotateCw size={16} />} Continue where it stopped
+          </button>
+          {actErr && <div style={{ color: RED, fontSize: '0.85rem', marginTop: 10, ...wrapText }}>{actErr}</div>}
+        </div>
+      )}
 
       {/* ── review ── */}
       {inReview && (

@@ -19,6 +19,7 @@ $previous_features
 ### 3. New scenarios
 For the highest-risk **missing** features from part 2 (payments, bookings, orders
 first), write at most **$max_new** new scenarios following
-`.claude/skills/write-scenario/SKILL.md`. Keep only scenarios that pass on the
-simulators.
+`.claude/skills/write-scenario/SKILL.md` and `automation/knowledge/scenario_authoring.md`
+(`steps` lists every step, token and shared block; your part-2 map already holds each
+feature's screens and ids). Keep only scenarios that pass on the simulators.
 

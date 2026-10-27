@@ -179,6 +179,47 @@ def spawn_runner(sid: str) -> int:
     return proc.pid
 
 
+def continue_session(sid: str, by: str = "") -> str:
+    """Pick an interrupted session up where it stopped: same worktree and branch, same
+    Claude conversation. MEASURED 2026-10-27: the Mac was force-restarted at 17:58 in
+    the middle of a 'New scenarios' session (78c05dec) with two drafts already passing
+    on the simulators; without this, that work could only be thrown away."""
+    from automation.database.config import SessionLocal
+    from automation.database.models import AgentSession
+    s = get(sid)
+    if s is None:
+        raise ValueError("no such session")
+    if s["status"] != "interrupted":
+        raise Refused(f"only an interrupted session can be continued (this one is '{s['status']}')")
+    with SessionLocal() as db:
+        wt = db.get(AgentSession, sid).worktree or ""
+    branch = s.get("branch") or ""
+    if not (wt and os.path.isdir(wt) and branch and _git("branch", "--list", branch, check=False).strip()):
+        raise Refused("its worktree or branch is gone — start a new session instead")
+    cur = active()
+    if cur:
+        raise Busy(f"an AI Agent session is already {cur['status']} ({cur['kind']}, {cur['id'][:8]})")
+    st = claude_status()
+    if not (st["installed"] and st["logged_in"]):
+        raise Refused("Claude Code is not installed or not logged in on this Mac")
+    with SessionLocal() as db:
+        r = db.get(AgentSession, sid)
+        opts = dict(r.options or {})
+        opts["continued"] = int(opts.get("continued") or 0) + 1
+        if by:
+            opts["continued_by"] = by
+        r.options, r.stop_requested, r.error, r.finished_at = opts, False, None, None
+        r.phase = "continuing after the interruption"
+        db.commit()
+    spawn_runner(sid)          # sets the live pid first, so active() keeps the row
+    with SessionLocal() as db:
+        r = db.get(AgentSession, sid)
+        if r is not None and r.status == "interrupted":
+            r.status = "queued"
+            db.commit()
+    return sid
+
+
 def stop(sid: str) -> bool:
     from automation.database.config import SessionLocal
     from automation.database.models import AgentSession

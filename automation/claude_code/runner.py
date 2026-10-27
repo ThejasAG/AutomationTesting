@@ -148,6 +148,28 @@ def make_worktree(sid: str, kind: str) -> Dict[str, str]:
     return {"worktree": wt, "branch": branch, "base": base}
 
 
+def flows_at(commit: str) -> Optional[Dict[str, Any]]:
+    """The flows as `commit` defines them — a continued session's worktree already holds
+    its edits, so the 'before' side is read from a clean worktree of the base."""
+    from automation.claude_code import gates
+    tmp = os.path.join(paths.WORKTREES_DIR, f"flows-{commit[:10]}")
+    if os.path.exists(tmp):
+        remove_worktree(tmp)
+    git(paths.MAIN_ROOT, "worktree", "add", "-q", "--detach", tmp, commit)
+    try:
+        link_runtime(tmp)
+        return gates.dump_flows(tmp)
+    finally:
+        remove_worktree(tmp)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def continuing(row: Dict[str, Any]) -> bool:
+    """A session being continued after its process ended (session.continue_session)."""
+    return bool((row.get("options") or {}).get("continued")) and bool(row.get("worktree")) \
+        and os.path.isdir(row["worktree"]) and bool(row.get("branch"))
+
+
 def link_runtime(wt: str) -> None:
     for name in paths.WORKTREE_LINKS:
         src = os.path.join(paths.MAIN_ROOT, name)
@@ -216,9 +238,49 @@ def _known_failures() -> str:
     return ", ".join(latest["failed"])
 
 
+def session_hours(kind: str, options: Dict[str, Any], s: Dict[str, Any]) -> float:
+    """How long the session may run. A generate session asked for many scenarios gets
+    ~12 minutes each (a draft, one device run, maybe one fix) — the default 3 hours
+    is for the default 3."""
+    hours = float((s.get("hours") or {}).get(kind) or 3.0)
+    if kind == "generate":
+        n = int(options.get("max_new") or len(options.get("features") or []) or 0)
+        hours = max(hours, min(8.0, 0.5 + 0.2 * n))
+    return hours
+
+
 def build_prompt(row: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, Any]) -> str:
     from automation.claude_code import prompts
     return prompts.build(row["kind"], row.get("options") or {}, ctx, s)
+
+
+def continue_prompt(ctx: Dict[str, str], wt: str) -> str:
+    """What a continued session is told when its conversation picks up again."""
+    lines = [
+        "Your session was interrupted: its process ended (the Mac was restarted or the "
+        "platform was stopped), and it is now being continued in the same worktree. The "
+        "simulators, Appium and the backend were restarted too.",
+        "",
+        "- The last command you started may not have finished: run it again if you still "
+        "need its result.",
+        "- Run `preflight --wait 15` before your next run on the simulators.",
+        "- `git status` and `git diff` show your edits so far; `runs.jsonl` in your session "
+        "folder lists the runs you made.",
+        f"- New time limits: stop starting new work at **{ctx['stop_by']}**; the report must "
+        f"be written before **{ctx['deadline']}**.",
+    ]
+    try:
+        with open(os.path.join(wt, "scripts", "agent_tools.py"), encoding="utf-8") as f:
+            fingerprints = "fingerprint" in f.read()
+    except OSError:
+        fingerprints = False
+    if not fingerprints:
+        lines.append(
+            "- The checks after this session compare each run with your LAST edit to any file: "
+            "every flow you keep must pass on the simulators after that edit. Finish all edits "
+            "first, then run each kept flow once more with `--label final`.")
+    lines += ["", "Everything else — the task, the rules, the report — is unchanged."]
+    return "\n".join(lines)
 
 
 FALLBACK_MODEL = "sonnet"
@@ -250,16 +312,30 @@ def transient_error(info: Dict[str, Any]) -> bool:
     return bool(info.get("is_error")) and any(t in str(info.get("result") or "") for t in _TRANSIENT)
 
 
+def conversation_missing(info: Dict[str, Any]) -> bool:
+    return bool(info.get("is_error")) and "No conversation found" in str(info.get("result") or "") \
+        and int(info.get("turns") or 0) <= 1
+
+
 def run_claude(sid: str, sdir: str, wt: str, prompt: str, s: Dict[str, Any],
-               deadline: datetime, name: str) -> Dict[str, Any]:
+               deadline: datetime, name: str, resume: Optional[str] = None,
+               fresh_prompt: str = "") -> Dict[str, Any]:
+    """`resume`: continue that Claude conversation with `prompt`; when it cannot be
+    found, start a new one with `fresh_prompt` instead."""
     model = s["model"]
-    info = _run_claude_once(sid, sdir, wt, prompt, model, s, deadline, name, "w")
+    info = _run_claude_once(sid, sdir, wt, prompt, model, s, deadline, name,
+                            "a" if resume else "w", resume=resume)
+    if resume and conversation_missing(info) and fresh_prompt:
+        phase(sid, sdir, "the earlier Claude conversation is gone — starting a new one on the "
+                         "same worktree")
+        prompt, resume = fresh_prompt, None
+        info = _run_claude_once(sid, sdir, wt, prompt, model, s, deadline, name, "a")
     if model_unsupported(info) and model != FALLBACK_MODEL:
         phase(sid, sdir, f"this Claude Code is too old for '{model}' — continuing with "
                          f"'{FALLBACK_MODEL}' (run `claude update` on the Mac to use {model})")
         first = info
         model = FALLBACK_MODEL
-        info = _run_claude_once(sid, sdir, wt, prompt, model, s, deadline, name, "a")
+        info = _run_claude_once(sid, sdir, wt, prompt, model, s, deadline, name, "a", resume=resume)
         info["model_fallback"] = {"wanted": s["model"], "used": model,
                                   "why": str(first.get("result") or "")[:300]}
     resumes = []
@@ -433,6 +509,29 @@ def device_requirements(wt: str, base: str, keep: List[str], before: Dict[str, A
     return {"must": must, "any_of": any_of, "why": "; ".join(why)}
 
 
+def current_code_check(wt: str, after: Dict[str, Any]):
+    """run -> did it execute the code its flow has now in `wt`? (None: no fingerprint,
+    or the final code cannot be read — the gate then falls back to the last edit.)"""
+    from automation.claude_code import fingerprint, gates
+    try:
+        with open(os.path.join(wt, gates.FLOWS_FILE), encoding="utf-8") as f:
+            src = f.read()
+        units_now, other_now = fingerprint.units(src), fingerprint.other_code(wt)
+    except (OSError, SyntaxError):
+        return None
+    segs = after.get("segments") or {}
+    aliases = after.get("aliases") or {}
+
+    def check(run: Dict[str, Any]) -> Optional[bool]:
+        fid = run.get("flow_id")
+        if fid not in segs:
+            return None
+        return fingerprint.run_is_current(run.get("run_id") or "", fingerprint.segment_hashes(segs[fid]),
+                                          units_now, other_now, after["flows"].get(fid) or [],
+                                          src, aliases)
+    return check
+
+
 def harvest(sid: str, sdir: str, wt: str, base: str, branch: str, before: Optional[Dict[str, Any]],
             s: Dict[str, Any]) -> Dict[str, Any]:
     from automation.claude_code import baselines, gates
@@ -470,7 +569,8 @@ def harvest(sid: str, sdir: str, wt: str, base: str, branch: str, before: Option
     base_line = None
     if unit.get("failed"):
         phase(sid, sdir, "unit tests failed — measuring the base commit's failures to compare")
-        base_line = baselines.get_or_measure(base, lambda m: phase(sid, sdir, m))
+        base_line = baselines.get_or_measure(base, lambda m: phase(sid, sdir, m),
+                                             tests=unit["failed"])
     gl.append(gates.unit_gate(unit, base_line))
 
     if before is not None and after is not None:
@@ -479,7 +579,8 @@ def harvest(sid: str, sdir: str, wt: str, base: str, branch: str, before: Option
                          if os.path.exists(os.path.join(wt, p))), default=0.0)
         runs = gates.confirm_runs(gates.read_runs(sdir))
         if req["must"] or req["any_of"]:
-            g = gates.device_gate(runs, last_edit, req["must"], req["any_of"])
+            g = gates.device_gate(runs, last_edit, req["must"], req["any_of"],
+                                  current=current_code_check(wt, after))
             if req["why"]:
                 g["detail"] = req["why"] + "\n" + g["detail"]
             gl.append(g)
@@ -535,7 +636,9 @@ def main(sid: str) -> int:
     row = _row(sid)
     s = agent_settings.get()
     kind = row["kind"]
-    _set(sid, status="preparing", started_at=datetime.utcnow(), pid=os.getpid())
+    cont = continuing(row)
+    _set(sid, status="preparing", pid=os.getpid(),
+         **({} if cont and row.get("started_at") else {"started_at": datetime.utcnow()}))
     wt = ""
     result: Dict[str, Any] = {}
     final = "failed"
@@ -550,26 +653,40 @@ def main(sid: str) -> int:
                     return 0
                 raise RuntimeError(f"a run was still on the simulators after {BUSY_WAIT_MIN} minutes")
 
-        phase(sid, sdir, "creating the session's worktree")
-        w = make_worktree(sid, kind)
-        wt = w["worktree"]
-        _set(sid, worktree=wt, branch=w["branch"], base_commit=w["base"])
         from automation.claude_code import gates
-        before = gates.dump_flows(wt)
+        if cont:
+            phase(sid, sdir, "continuing in the session's worktree after the interruption")
+            wt, base, branch = row["worktree"], row["base_commit"], row["branch"]
+            link_runtime(wt)
+            before = flows_at(base)
+        else:
+            phase(sid, sdir, "creating the session's worktree")
+            w = make_worktree(sid, kind)
+            wt, base, branch = w["worktree"], w["base"], w["branch"]
+            _set(sid, worktree=wt, branch=branch, base_commit=base)
+            before = gates.dump_flows(wt)
 
-        hours = float((s.get("hours") or {}).get(kind) or 3.0)
+        hours = session_hours(kind, row.get("options") or {}, s)
         deadline = datetime.now() + timedelta(hours=hours)
-        ctx = {"session_dir": sdir, "worktree": wt, "branch": w["branch"],
+        ctx = {"session_dir": sdir, "worktree": wt, "branch": branch,
                "date": f"{datetime.now():%Y-%m-%d}",
                "stop_by": f"{deadline - timedelta(minutes=20):%H:%M}",
                "deadline": f"{deadline:%H:%M}", "known_failing_tests": _known_failures()}
         prompt = build_prompt(row, ctx, s)
-        with open(os.path.join(sdir, "prompt.md"), "w", encoding="utf-8") as f:
+        resume, fresh = None, ""
+        if cont:
+            resume = row.get("claude_session_id")
+            note = continue_prompt(ctx, wt)
+            fresh = prompt + "\n\n## You are continuing an interrupted session\n\n" + note
+            prompt = note
+        with open(os.path.join(sdir, "prompt_continue.md" if cont else "prompt.md"), "w",
+                  encoding="utf-8") as f:
             f.write(prompt)
 
         _set(sid, status="running")
         phase(sid, sdir, f"Claude Code is working (until {deadline:%H:%M})")
-        result = run_claude(sid, sdir, wt, prompt, s, deadline, f"agent {kind} {sid[:8]}")
+        result = run_claude(sid, sdir, wt, prompt, s, deadline, f"agent {kind} {sid[:8]}",
+                            resume=resume, fresh_prompt=fresh)
         _set(sid, result=result)
         if result.get("stopped"):
             stop_flow_children(sdir)
@@ -581,7 +698,7 @@ def main(sid: str) -> int:
             return 0
 
         _set(sid, status="checking")
-        h = harvest(sid, sdir, wt, w["base"], w["branch"], before, s)
+        h = harvest(sid, sdir, wt, base, branch, before, s)
         summary = _read_json(os.path.join(sdir, "summary.json"))
         if kind in ("analyze", "nightly"):
             fmap = _read_json(os.path.join(sdir, "feature_map.json"))

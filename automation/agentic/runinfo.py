@@ -28,7 +28,7 @@ TERMINAL = ("passed", "failed", "error", "stopped", "cancelled", "canceled")
 
 # A step that checks a value is the test's purpose; removing or editing it to get a
 # pass would hide the bug it exists to catch. Used by the session gates.
-CHECK_STEP = re.compile(r"verify|assert|expect|check|total|vat|amount|€|bill|change\b", re.I)
+CHECK_STEP = re.compile(r"verify|assert|expect|check|total|vat|amount|€|bill|change\b|^\s*@see:", re.I)
 
 
 # ── runs ─────────────────────────────────────────────────────────────────────

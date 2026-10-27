@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from string import Template
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -65,21 +65,59 @@ def _run_scope(options: Dict[str, Any], s: Dict[str, Any]) -> str:
     return f"Run every flow from `flows`, one by one, in that order ({demos})."
 
 
-def _focus(options: Dict[str, Any]) -> str:
-    if options.get("features"):
-        return "\n".join(f"- {f}" for f in options["features"])
-    if (options.get("focus") or "").strip():
-        return options["focus"].strip()
+def _latest_map() -> Optional[Dict[str, Any]]:
     try:
         from automation.claude_code import session
-        fmap = session.latest_feature_map()
+        return session.latest_feature_map()
     except Exception:
-        fmap = None
+        return None
+
+
+def _feature_entry(line: str, fmap: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The feature-map entry a picked line names. The Feature map sends
+    '[app] <feature>: <gap>', and a feature name can itself contain ': '."""
+    best, best_len = None, 0
+    for app, feats in ((fmap or {}).get("apps") or {}).items():
+        for f in feats or []:
+            key = f"[{app}] {f.get('feature')}"
+            if (line == key or line.startswith(key + ":")) and len(key) > best_len:
+                best, best_len = f, len(key)
+    return best
+
+
+def _feature_block(line: str, f: Optional[Dict[str, Any]]) -> str:
+    """One feature to cover, with what the analysis already found about it.
+    MEASURED 2026-10-27: given only the line, a session spent 12 minutes in helper
+    agents finding the screens and ids the feature map already listed."""
+    out = [f"- {line}"]
+    if f:
+        if f.get("role"):
+            out.append(f"  role: {f['role']}")
+        if f.get("screens"):
+            out.append("  screens: " + ", ".join(f["screens"]))
+        if f.get("ids"):
+            out.append("  ids: " + ", ".join(f["ids"]))
+        if f.get("covered_by"):
+            out.append("  closest flows: " + ", ".join(f["covered_by"][:4]))
+        if f.get("scenario"):
+            out.append(f"  scenario idea: {f['scenario']}")
+    return "\n".join(out)
+
+
+def _focus(options: Dict[str, Any]) -> str:
+    if options.get("features"):
+        fmap = _latest_map()
+        return "\n".join(_feature_block(line, _feature_entry(line, fmap))
+                         for line in options["features"])
+    if (options.get("focus") or "").strip():
+        return options["focus"].strip()
+    fmap = _latest_map()
     gaps = []
     for app, feats in ((fmap or {}).get("apps") or {}).items():
         for f in feats or []:
             if f.get("status") in ("missing", "partial") and f.get("risk") == "high":
-                gaps.append(f"- [{app}] {f.get('feature')}: {f.get('gap') or f.get('scenario') or ''}")
+                line = f"[{app}] {f.get('feature')}: {f.get('gap') or f.get('scenario') or ''}"
+                gaps.append(_feature_block(line, f))
     if gaps:
         return "The high-risk gaps from the latest analysis:\n" + "\n".join(gaps[:15])
     return ("No analysis yet: run `coverage`, and pick the highest-risk screens no flow drives "
@@ -108,6 +146,9 @@ def build(kind: str, options: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, 
     max_new = int(options.get("max_new") or s.get("max_new_scenarios") or 3)
     if kind == "nightly" and mode == "full":
         max_new *= 2
+    if kind == "generate" and not options.get("max_new"):
+        # Ticking 10 gaps in the Feature map means 10 scenarios, not the default 3.
+        max_new = max(max_new, len(options.get("features") or []))
     prev = previous_features() if kind in ("analyze", "nightly") else {"count": "0", "text": ""}
     values = {
         **ctx,
