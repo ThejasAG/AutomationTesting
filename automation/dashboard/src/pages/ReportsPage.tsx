@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useLivePoll } from '../useLivePoll';
 import ReactMarkdown from 'react-markdown';
 import {
   FileText, X, Loader2, Download, Sparkles, CheckCircle2, AlertTriangle, Clock, Smartphone, Bug, FileDown,
@@ -57,10 +58,18 @@ export default function ReportsPage() {
   const [open, setOpen] = useState<string | null>(null);
   const [trends, setTrends] = useState<ReportTrends | null>(null);
 
-  useEffect(() => {
-    getReports().then(setRows).catch(() => {}).finally(() => setLoading(false));
-    getReportTrends(30).then(setTrends).catch(() => {});
+  const refresh = useCallback(async () => {
+    await Promise.all([
+      getReports().then(setRows).catch(() => {}),
+      getReportTrends(30).then(setTrends).catch(() => {}),
+    ]);
+    setLoading(false);
   }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  // New reports appear by themselves: every 5 s while a run is going, 20 s otherwise
+  // (the report list takes ~0.4 s to build, so it is not polled faster).
+  const live = rows.some(r => r.status === 'running' || r.status === 'queued');
+  useLivePoll(refresh, { live, liveMs: 5000, idleMs: 20000 });
 
   return (
     <div className="animate-fade-in">

@@ -301,6 +301,11 @@ tr:hover td {
 .table-scroll { max-height: 62vh; overflow-y: auto; }
 .table-scroll thead th { position: sticky; top: 0; z-index: 2; }
 
+/* A short list: about six rows show, the rest scroll inside the box, and the
+   header row stays pinned (it needs a solid background to cover rows beneath). */
+.scroll-box { max-height: 330px; overflow: auto; }
+.scroll-box thead th { position: sticky; top: 0; z-index: 2; background: var(--bg-secondary); }
+
 /* Markdown styling */
 .markdown-body {
   font-size: 1rem;

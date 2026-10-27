@@ -4,6 +4,7 @@ import {
   AlertTriangle, Bot, CheckCircle2, History, Loader2, RefreshCw, Settings, ShieldCheck, Square, X, XCircle,
 } from 'lucide-react';
 import ModalPortal from '../components/ModalPortal';
+import { useLivePoll } from '../useLivePoll';
 import { agentApi, isActiveStatus } from '../agentApi';
 import type { AgentStatus, Coverage, FeatureMap, PreflightCheck, Session, StartSession } from '../agentApi';
 import {
@@ -81,12 +82,10 @@ export default function AgentPage() {
 
   useEffect(() => { load(); loadFmap(); loadCoverage(); }, [load, loadFmap, loadCoverage]);
 
-  // Poll the status: every 5 s while a session works, every 30 s otherwise.
+  // Poll the status: every 3 s while a session works, every 10 s otherwise (so a
+  // session started by the nightly job or another tab shows up by itself).
   const activeId = st?.active?.id ?? '';
-  useEffect(() => {
-    const t = setInterval(load, activeId ? 5000 : 30000);
-    return () => clearInterval(t);
-  }, [activeId, load]);
+  useLivePoll(load, { live: !!activeId, liveMs: 3000, idleMs: 10000 });
 
   // A session just ended: it may have written a new feature map.
   const prevActive = useRef('');
@@ -240,8 +239,8 @@ export default function AgentPage() {
 
       {/* ── sessions ── */}
       <div style={section}>
-        <h3 style={h3}><History size={18} /> Sessions</h3>
-        <div className="card" style={{ padding: 0, transform: 'none', overflowX: 'auto', maxWidth: '100%' }}>
+        <h3 style={h3}><History size={18} /> Sessions{sessions.length > 0 && ` (${sessions.length})`}</h3>
+        <div className="card scroll-box" style={{ padding: 0, transform: 'none', maxWidth: '100%' }}>
           {sessions.length === 0 ? (
             <p style={{ ...muted, padding: 20 }}>{st ? 'No sessions yet — start one above.' : 'Loading…'}</p>
           ) : (

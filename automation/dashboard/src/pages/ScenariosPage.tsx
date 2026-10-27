@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLivePoll } from '../useLivePoll';
 import {
   Plus, Play, Pencil, Trash2, X, Loader2,
   Smartphone, CheckCircle2, AlertTriangle, ListChecks, PlayCircle,
@@ -53,12 +54,9 @@ export default function ScenariosPage() {
   const [recording, setRecording] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
 
-  useEffect(() => {
-    const tick = () => getEngineStatus().then(setEngine).catch(() => {});
-    tick();
-    const t = setInterval(tick, 8000);
-    return () => clearInterval(t);
-  }, []);
+  const engineTick = useCallback(() => getEngineStatus().then(setEngine).catch(() => {}), []);
+  useEffect(() => { engineTick(); }, [engineTick]);
+  useLivePoll(engineTick, { idleMs: 8000 });
 
   // Scenarios that are fully configured and therefore runnable.
   const runnable = scenarios.filter(s => s.project_id && s.device_id && s.steps.length > 0);

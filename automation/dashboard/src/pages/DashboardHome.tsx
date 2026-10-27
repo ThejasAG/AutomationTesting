@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useLivePoll } from '../useLivePoll';
 import { getRuns, getTrends, getDevices, getRCA, stopRun, cancelAllQueued, getTrendSummary } from '../api';
 import CrossAppRunModal from '../components/CrossAppRunModal';
 import type { TestRun, Trends, Device } from '../api';
@@ -36,20 +37,33 @@ export default function DashboardHome() {
   const [trendSummary, setTrendSummary] = useState<string>('');
 
   const flakyCount = runs.filter(r => r.flaky_detected || r.is_flaky).length;
+  // The list refreshes every few seconds; these keys change only when what the AI
+  // calls below depend on changes, so a refresh never re-asks the AI.
+  const projectId = runs.find(r => r.project_id)?.project_id;
+  const latestFailedId = runs.slice(0, 10).find(r => r.status === 'failed')?.id;
+  const hasRuns = runs.length > 0;
 
   useEffect(() => {
-    const projectId = runs.find(r => r.project_id)?.project_id;
     if (!projectId) return;
     let cancelled = false;
     getTrendSummary(projectId, 7)
       .then(r => { if (!cancelled) setTrendSummary(r.summary); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [runs]);
+  }, [projectId]);
 
-  async function refreshRuns() {
-    try { setRuns(await getRuns()); setRunsError(null); } catch { setRunsError("Failed to load Runs."); }
-  }
+  const lastRunsJson = useRef('');
+  const refreshRuns = useCallback(async () => {
+    try {
+      const next = await getRuns();
+      const json = JSON.stringify(next);
+      if (json !== lastRunsJson.current) {   // unchanged → no re-render
+        lastRunsJson.current = json;
+        setRuns(next);
+      }
+      setRunsError(null);
+    } catch { setRunsError("Failed to load Runs."); }
+  }, []);
 
   useEffect(() => {
     async function loadData() {
@@ -81,13 +95,12 @@ export default function DashboardHome() {
   // Top AI Root Cause: find the latest failed run and pull its RCA root_cause.
   useEffect(() => {
     async function loadTopRootCause() {
-      const latestFailed = runs.slice(0, 10).find(r => r.status === 'failed');
-      if (!latestFailed) {
+      if (!latestFailedId) {
         setTopRootCause("No failures yet ✓");
         return;
       }
       try {
-        const rca = await getRCA(latestFailed.id);
+        const rca = await getRCA(latestFailedId);
         if (!rca) {
           // Failed run exists but RCA has not been generated at all.
           setTopRootCause("No failures yet ✓");
@@ -101,28 +114,28 @@ export default function DashboardHome() {
         setTopRootCause("Analysis pending");
       }
     }
-    if (runs.length > 0) loadTopRootCause();
-  }, [runs]);
+    if (hasRuns) loadTopRootCause();
+  }, [latestFailedId, hasRuns]);
 
+  // Live: the run list every 2.5 s while anything is queued or running, every 8 s
+  // otherwise (so a run started elsewhere appears). The pass-rate cards refresh when
+  // a run finishes. Device discovery is slow (~0.4 s) and rarely changes: 15 s.
+  const activeCount = runs.filter(r => STOPPABLE.has(r.status)).length;
+  useLivePoll(refreshRuns, { live: activeCount > 0, liveMs: 2500, idleMs: 8000 });
+  const finishedKey = `${runs.length - activeCount}|${runs.find(r => !STOPPABLE.has(r.status))?.id ?? ''}`;
   useEffect(() => {
-    let mounted = true;
-    async function fetchDevices() {
-      try {
-        const res = await getDevices();
-        if (mounted) {
-          setDevices(res.devices);
-        }
-      } catch (e) {
-        console.error("Failed to load devices", e);
-      }
-    }
-    fetchDevices();
-    const interval = setInterval(fetchDevices, 5000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
+    if (loading) return;
+    Promise.all([getTrends(30), getTrends(7)])
+      .then(([month, week]) => { setTrends(month); setTrendsWeek(week); setTrendsError(null); })
+      .catch(() => {});
+  }, [finishedKey, loading]);
+
+  const fetchDevices = useCallback(async () => {
+    try { setDevices((await getDevices()).devices); }
+    catch (e) { console.error("Failed to load devices", e); }
   }, []);
+  useEffect(() => { fetchDevices(); }, [fetchDevices]);
+  useLivePoll(fetchDevices, { idleMs: 15000 });
 
   if (loading) return <div className="page-header"><h1 className="page-title animate-fade-in">Loading Dashboard...</h1></div>;
 

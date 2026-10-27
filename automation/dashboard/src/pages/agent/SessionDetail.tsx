@@ -360,17 +360,17 @@ function Summary({ summary, patches }: { summary: SessionSummary; patches: { nam
           <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
               <thead><tr>
-                <th style={th}>Flow</th><th style={th}>Result</th><th style={th}>Category</th>
-                <th style={th}>What happened</th><th style={th}>Action</th><th style={th}>Runs</th>
+                <th style={th}>Flow</th><th style={th}>Result</th><th style={{ ...th, whiteSpace: 'nowrap' }}>Category</th>
+                <th style={th}>What happened</th><th style={{ ...th, whiteSpace: 'nowrap' }}>Action</th><th style={th}>Runs</th>
               </tr></thead>
               <tbody>
                 {flows.map((f, i) => (
                   <tr key={i}>
                     <td style={{ ...td, ...mono }}>{f.flow_id}</td>
                     <td style={td}>{chip(f.final_status || '—', runColor(f.final_status))}</td>
-                    <td style={td}>{f.category || '—'}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>{f.category || '—'}</td>
                     <td style={{ ...td, color: 'var(--text-secondary)' }}>{f.root_cause || '—'}</td>
-                    <td style={td}>{(f.action || '—').replace(/_/g, ' ')}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>{(f.action || '—').replace(/_/g, ' ')}</td>
                     <td style={td}><span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {arr<string>(f.runs).filter(Boolean).map(r => <RunLink key={r} id={r} />)}</span></td>
                   </tr>
@@ -476,7 +476,7 @@ function Runs({ runs }: { runs: RunRow[] }) {
   if (!runs.length) return null;
   return (
     <Block icon={<ListChecks size={16} />} title={`Runs (${runs.length})`}>
-      <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
+      <div className="scroll-box" style={{ maxWidth: '100%' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
           <thead><tr>
             <th style={th}>Flow</th><th style={th}>Attempt</th><th style={th}>Status</th><th style={th}>Time</th>
