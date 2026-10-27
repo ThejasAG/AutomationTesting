@@ -4452,6 +4452,93 @@ class FlowRunner:
             notes.append(f"[warn] first run — sign-in failed: {str(e)[:120]}")
             return False
 
+    _RESTAURANT = "NylaiKitchen2"
+    _HOME_MARKERS = ("homeProductsBar", "homeCouponIcon")
+    # vya-consumer Screens/Home/index.js: the list's footer button has no id, only
+    # I18n 'homePage.loadMoreResturants' = "Load More Restaurants"; the Favourites
+    # chip is HomeChips/ScrollableChips.js accessibilityLabel 'favoriteButton'
+    # (it scopes Home's list to the diner's favourites; the Favorite tab is
+    # commented out in BottomNavigator.js).
+    _LOAD_MORE = ("Load More Restaurants",)
+    _FAVOURITES = ("favoriteButton",)
+    RESTAURANT_SCROLLS = 8           # pages scrolled per search (Home, then Favourites)
+    RESTAURANT_BUDGET_S = 150.0      # under STEP_TIMEOUT, so a miss is a reported FAIL
+
+    def _open_restaurant(self, r: ScenarioRunner, notes: List[str]) -> bool:
+        """Home → the restaurant's card → its booking page.
+
+        MEASURED 2026-10-27 (flow1, run 6d743962): the card was not on Home's first
+        screen (Home's list renders lazily), the verified idb tap found nothing and
+        the Appium lookup after it hung the step for 240s. Then (run 744f3e7e) six
+        scrolls showed other restaurants but not this one. The user's procedure:
+        if the kitchen is not on screen, scroll down; when "Load More Restaurants"
+        shows, tap it and look again; if it is still not found, open Favourites
+        and search there. Never the Appium full-tree lookup."""
+        udid = (getattr(self, "_cur_udid", "") or self.devices.get("consumer")
+                or DEFAULT_CONSUMER_UDID)
+        name = self._RESTAURANT
+        cands = self._id_candidates(name)
+        deadline = time.time() + self.RESTAURANT_BUDGET_S
+
+        def swipe(up: bool) -> None:
+            w, h = _idbd.app_size(_idbd.describe_all(udid))
+            if w and h:            # finger UP = the list scrolls down, and back
+                y1, y2 = (h * 0.72, h * 0.32) if up else (h * 0.32, h * 0.80)
+                _idbd.swipe(udid, w / 2, y1, w / 2, y2, 0.6 if up else 0.4)
+
+        def search(where: str) -> Optional[str]:
+            scrolls = loads = 0
+            while time.time() < deadline:
+                ok, how = _idbd.tap(udid, cands, wait=4.0 if not (scrolls or loads) else 1.5)
+                if ok:
+                    steps = [f"scrolled {scrolls}×"] if scrolls else []
+                    steps += [f"Load More {loads}×"] if loads else []
+                    return f"{where}" + (f", {', '.join(steps)}" if steps else "") + f", {how}"
+                if scrolls >= self.RESTAURANT_SCROLLS:
+                    return None
+                more, _ = _idbd.tap(udid, self._LOAD_MORE)
+                if more:
+                    loads += 1
+                    time.sleep(2.5)           # the next page comes from the server
+                    continue
+                swipe(up=True)
+                scrolls += 1
+                time.sleep(0.8)
+            return None
+
+        found = search("Home")
+        fav_note = ""
+        if found is None and time.time() < deadline:
+            # Favourites: its chip sits at the top of Home -- scroll back up to it.
+            tapped = False
+            for _ in range(self.RESTAURANT_SCROLLS + 2):
+                tapped, _how = _idbd.tap(udid, self._FAVOURITES)
+                if tapped or time.time() >= deadline:
+                    break
+                swipe(up=False)
+                time.sleep(0.6)
+            if tapped:
+                time.sleep(2.0)                   # the favourites feed loads
+                found = search("Favourites")
+            else:
+                fav_note = "; the Favourites chip (favoriteButton) was not found either"
+
+        if found is not None:
+            end = time.time() + 10.0
+            while time.time() < end:
+                now = {_idbd.name(e) for e in _idbd.describe_all(udid)}
+                if not (now & set(self._HOME_MARKERS)) or now & {"Any", "anyBtn"}:
+                    notes.append(f"[ok] click {name} — opened the restaurant ({found})")
+                    return True
+                time.sleep(0.8)
+            notes.append(f"[FAIL] click {name} — tapped the card ({found}) but the "
+                         f"restaurant page did not open in 10s")
+            return False
+        seen = [n for n in (_idbd.name(e) for e in _idbd.describe_all(udid)) if n][:25]
+        notes.append(f"[FAIL] click {name} — not found on Home (scrolling down, Load More) "
+                     f"nor in Favourites{fav_note}. On screen: {seen}")
+        return False
+
     def _consumer_home(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """Reach the Home tab. The app resumes on its last screen (often the Wallet
         with a booking). The fuzzy resolver can't reach the bottom tab in this app's
@@ -8495,6 +8582,8 @@ class FlowRunner:
             return self._consumer_epay(notes)
         if step == "@consumer_checkout":
             return self._consumer_checkout(r, notes)
+        if step == "@open_restaurant":
+            return self._open_restaurant(r, notes)
         if step == "@leave_review":
             return self._leave_review(r, notes)
         if step.startswith("@duration:"):
@@ -8554,6 +8643,9 @@ class FlowRunner:
         # The duration chips became a slider (consumer Reservation.js, 2026-10):
         # 'Not Sure' is now the last stop of the bar, not a button with that text.
         "click Checkout": "@consumer_checkout",
+        # The card can be below Home's first screen (lazy list): scroll to find it
+        # instead of letting the Appium lookup hang 240s (2026-10-27).
+        "click NylaiKitchen2": "@open_restaurant",
         "select Not Sure": "@duration:not_sure",
         "select 1 hr": "@duration:1",
         "select 2 hrs": "@duration:2",
