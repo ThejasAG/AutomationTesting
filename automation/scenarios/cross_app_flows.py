@@ -666,6 +666,29 @@ FLOWS: Dict[str, Dict[str, Any]] = {
             ]),
         ],
     },
+    "cc_reset_table": {
+        "id": "cc_reset_table",
+        "name": "[Draft] Waiter resets an assigned table (My Bookings ⋮ → Reset table)",
+        "description": "Consumer books with ORDER LATER (nothing ordered, so Util/"
+                       "canResetTable.js allows a reset). The waiter opens the booking and "
+                       "assigns a table (In Progress), then on the My Bookings board "
+                       "(Screens/Home/index.js) opens THIS booking card's ⋮ menu "
+                       "(Components/BookingCard, no id), picks Reset table (resetTableBtn, "
+                       "Components/Modal/EventAction/index.js), Confirm (confirmEventBtn) "
+                       "and 'Reset' on the app's Alert. Proves it: the 'Table has been "
+                       "reset' toast, the card leaving the board's Table view, then the "
+                       "booking reopens as Reserved onto the 'Select a table' sheet.",
+        "segments": [
+            _seg("1", "C-App: book + order later", "consumer", _C_ORDER_LATER),
+            _seg("2", "Waiter: assign a table, reset it, check Reserved", "waiter", [
+                "@open_reservation",
+                "@assign_table",
+                "@reset_table",
+                "@open_reservation",
+                "@see:Select a table",
+            ]),
+        ],
+    },
 }
 
 
@@ -713,6 +736,7 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@pay:cash", "help": "Settle by cash"},
         {"step": "@pay:voucher", "help": "Settle by food voucher"},
         {"step": "@filter_orders:Reserved", "help": "My Orders: filter by status (OCR-tap, e.g. Reserved/Order/Serve)"},
+        {"step": "@reset_table", "help": "My Bookings: this run's card ⋮ → Reset table → Confirm → Reset"},
         {"step": "@logout_business", "help": "Sign out of the Business app"},
         {"step": "@logout_consumer", "help": "Sign out of the Consumer app"},
     ],
@@ -8965,6 +8989,209 @@ class FlowRunner:
         notes.append(f"[ok] {tag} — {how}; {how2}" + (f"; {line!r}" if line else "; confirmed by OCR"))
         return True
 
+    # BookingCard (Components/BookingCard/index.js:59-102) is ONE accessible element,
+    # '<Name>card<Status>', so its ⋮ -- a TouchableOpacity with no id (styles.option:
+    # padding 8, marginEnd 10) at the right of the card's top row -- is tapped at an
+    # offset from the card's top-right corner. The touchable's frame includes the
+    # card's margins (ml="md", my="lg"); the top row is a 16pt margin + a 13pt name.
+    _CARD_MENU_OFFSETS = ((26.0, 36.0), (26.0, 26.0))
+    _MENU_UP = ("resetTableBtn", "confirmEventBtn", "cancelEvent", "transferBtn")
+    _ORDER_UP = ("selectAllItemsBtn", "addItemsBtn", "closeEventModal", "AssignTableBtn")
+
+    @staticmethod
+    def _assigned_table(notes: List[str]) -> str:
+        """The table @assign_table picked earlier in this segment ('I2'), else ''."""
+        for n in reversed(notes):
+            m = re.search(r"@assign_table — assigned '([^']+)'", n)
+            if m:
+                t = re.sub(r"^tableChip", "", m.group(1))
+                return "" if re.fullmatch(r"T\d+AssignAnyBtn", t) else t
+        return ""
+
+    @staticmethod
+    def _same_table(seen: str, table: str) -> bool:
+        """OCR reads table 'I16' as '116' (measured, see _open_from_panel)."""
+        def key(s: str) -> str:
+            s = re.sub(r"[^a-z0-9]", "", (s or "").lower())
+            return s.translate(str.maketrans("il|o", "1110"))
+        return bool(table) and key(seen) == key(table)
+
+    def _row_menu_cards(self, els: List[dict], hour_lbl: str) -> List[dict]:
+        """This diner's In Progress cards in the booked hour's row, left to right."""
+        name, frame = _idbd.name, _idbd.frame
+        hours = [(name(e), frame(e)[1] + frame(e)[3] / 2) for e in els
+                 if re.fullmatch(r"\d{2}:00", name(e))]
+        out = []
+        for e in els:
+            lbl = name(e)
+            if "card" not in lbl.lower() or frame(e)[2] <= 60:
+                continue
+            who, status = self._split_card(lbl)
+            if CONSUMER_NAME.lower() not in who.lower() or status != "inprogress":
+                continue
+            near = min(hours, key=lambda h: abs(h[1] - (frame(e)[1] + 20)), default=None)
+            if near and near[0] == hour_lbl:
+                out.append(e)
+        return sorted(out, key=lambda e: frame(e)[0])
+
+    def _bring_menu_into_view(self, udid: str, hour_lbl: str, k: int,
+                              dx: float, dy: float) -> Tuple[Optional[dict], List[dict], str]:
+        """Scroll the board until the k-th card's ⋮ point is on the board, left of the
+        My Orders panel. Returns (card, els, why-not)."""
+        frame = _idbd.frame
+        last = None
+        for _ in range(8):
+            els = _idbd.describe_all(udid)
+            cards = self._row_menu_cards(els, hour_lbl)
+            if len(cards) <= k:
+                return None, els, f"{len(cards)} In Progress card(s) in the {hour_lbl} row"
+            card = cards[k]
+            w_app, h_app = _idbd.app_size(els)
+            head = next((e for e in els if _idbd.name(e).startswith("My Orders")), None)
+            right = (frame(head)[0] - 30) if head else w_app * 0.64
+            x, y, w, h = frame(card)
+            px, py = x + w - dx, y + dy
+            if 0.25 * h_app <= py <= 0.8 * h_app and 0 <= px <= right - 8:
+                return card, els, ""
+            if frame(card) == last:
+                return None, els, f"the {hour_lbl} card did not move when the board was scrolled"
+            last = frame(card)
+            if not 0.25 * h_app <= py <= 0.8 * h_app:
+                hour = next((e for e in els if _idbd.name(e) == hour_lbl), None)
+                col = _idbd.centre(hour)[0] if hour else x / 2   # the hours column
+                travel = min(max(abs(py - 0.5 * h_app), 80.0), 0.4 * h_app)
+                start = 0.75 * h_app if py > 0.5 * h_app else 0.3 * h_app
+                end = start - travel if py > 0.5 * h_app else start + travel
+                _idbd.swipe(udid, col, start, col, end, max(1.0, travel / 200.0))
+            else:                                   # off to the right: drag the row left
+                row_y = y + h / 2
+                travel = min(px - (right - 60), 0.6 * right)
+                _idbd.swipe(udid, right - 40, row_y, right - 40 - travel, row_y,
+                            max(1.0, travel / 200.0))
+            time.sleep(0.8)
+        return None, _idbd.describe_all(udid), "could not scroll the card's ⋮ onto the board"
+
+    def _reset_table(self, notes: List[str]) -> bool:
+        """`@reset_table` -- My Bookings: the booking's ⋮ menu → Reset table → Confirm →
+        'Reset' on the app's Alert (Screens/Home/index.js `_resetTable`), on THIS run's
+        booking after @assign_table put it In Progress.
+
+        Finds the card with the board's 'Table' filter (tableBtn) on: only bookings
+        holding a table are listed there (Screens/Home/index.js:1149-1152). With
+        several of this diner's In Progress cards in the booked hour's row (shared
+        account, earlier runs), the one showing the table @assign_table picked is
+        ours; with no way to tell, it refuses rather than reset someone else's.
+
+        Proves the reset: the success toast, AND this card leaving the Table view
+        (a booking without a table is not listed there). Restores the 'All' filter.
+        canResetTable (Util/canResetTable.js) disables the option on a booking with
+        items, a kitchen order or a bill; the app then refuses -- reported, not retried."""
+        tag = "@reset_table"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        m = re.match(r"^(\d{1,2})", getattr(self, "_booked_slot", "") or "")
+        if not m:
+            notes.append(f"[FAIL] {tag} — no booked slot known: book in an earlier segment")
+            return False
+        hour_lbl = f"{int(m.group(1)):02d}:00"
+        if not self._waiter_board(notes):
+            return False
+        ok, how = _idbd.tap(udid, ["tableBtn"])
+        if not ok:
+            notes.append(f"[FAIL] {tag} — the board's Table filter (tableBtn): {how}")
+            return False
+        els, cards = self._wait_els(udid, lambda es: self._row_menu_cards(es, hour_lbl), 8.0)
+        if not cards:
+            notes.append(f"[FAIL] {tag} — no In Progress card for '{CONSUMER_NAME}' in the "
+                         f"{hour_lbl} row of the Table view (was a table assigned?)")
+            return False
+        before = len(cards)
+        table = self._assigned_table(notes)
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        k = 0
+        if before > 1:
+            if not table:
+                notes.append(f"[FAIL] {tag} — {before} In Progress cards for "
+                             f"'{CONSUMER_NAME}' in the {hour_lbl} row and the assigned table "
+                             f"is unknown: refusing to reset a booking that may not be this run's")
+                return False
+            from automation.scenarios import screen_text
+            k, seen = None, []
+            for i in range(before):
+                card, els, why = self._bring_menu_into_view(udid, hour_lbl, i, dx, dy)
+                if card is None:
+                    seen.append(f"#{i + 1}: {why}")
+                    continue
+                texts = [t for t, *_ in screen_text.read_text(udid, region=_idbd.frame(card))]
+                if any(self._same_table(t, table) for t in texts):
+                    k = i
+                    break
+                seen.append(f"#{i + 1}: {' '.join(texts)[:40]!r}")
+            if k is None:
+                notes.append(f"[FAIL] {tag} — {before} In Progress cards for "
+                             f"'{CONSUMER_NAME}' in the {hour_lbl} row, none showing table "
+                             f"{table}: " + "; ".join(seen))
+                return False
+            notes.append(f"    · {before} In Progress cards in the {hour_lbl} row; "
+                         f"#{k + 1} shows table {table} — this run's")
+        menu_els, opened = [], False
+        for dx, dy in self._CARD_MENU_OFFSETS:
+            card, els, why = self._bring_menu_into_view(udid, hour_lbl, k, dx, dy)
+            if card is None:
+                notes.append(f"[FAIL] {tag} — {why}")
+                return False
+            x, y, w, _h = _idbd.frame(card)
+            _idbd.tap_point(udid, x + w - dx, y + dy)
+            menu_els, opened = self._wait_els(
+                udid, lambda es: any(self._has(es, i) for i in self._MENU_UP + self._ORDER_UP), 6.0)
+            if opened and any(self._has(menu_els, i) for i in self._MENU_UP):
+                break
+            if not opened and self._ocr_sees(udid, "Select an action"):
+                break
+            # The tap hit the card body: the booking opened. Back to the board.
+            notes.append(f"    · the tap at ({x + w - dx:.0f}, {y + dy:.0f}) did not open the "
+                         f"⋮ menu" + (" (it opened the booking)" if opened else ""))
+            opened = False
+            if not self._waiter_board(notes):
+                return False
+        else:
+            notes.append(f"[FAIL] {tag} — the ⋮ menu of '{_idbd.name(card)}' never opened")
+            return False
+        for ident, text in (("resetTableBtn", "Reset table"), ("confirmEventBtn", "Confirm")):
+            if self._has(menu_els, ident):
+                ok, how = _idbd.tap(udid, [ident], menu_els, scroll=False)
+            else:                                   # the Overlay hides its ids from idb
+                ok, how = self._ocr_tap(udid, None, text)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — {ident}: {how}")
+                return False
+            time.sleep(0.6)
+        els, alert = self._wait_els(udid, lambda es: self._has(es, "Reset"), 6.0)
+        if not alert:
+            from automation.scenarios import screen_text
+            said = next((t for t, *_ in screen_text.read_text(udid)
+                         if "not allowed" in t.lower()), "")
+            notes.append(f"[FAIL] {tag} — Confirm did not bring up the 'Reset table' alert"
+                         + (f"; the app said {said!r}" if said else
+                            " (Reset table is disabled when canResetTable is false)"))
+            return False
+        ok, how = _idbd.tap(udid, ["Reset"], els, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — the alert's Reset button: {how}")
+            return False
+        if not self._see_text("Table has been reset", notes):
+            return False
+        els, gone = self._wait_els(
+            udid, lambda es: len(self._row_menu_cards(es, hour_lbl)) < before, 10.0)
+        left = len(self._row_menu_cards(els, hour_lbl))
+        _idbd.tap(udid, ["allBtn"], scroll=False)
+        if not gone:
+            notes.append(f"[FAIL] {tag} — the toast said reset, but the {hour_lbl} row of the "
+                         f"Table view still lists {left} of {before} In Progress card(s)")
+            return False
+        notes.append(f"[ok] {tag} — reset via ⋮ → Reset table → Confirm → Reset; the booking "
+                     f"left the Table view ({before} → {left} In Progress card(s) at {hour_lbl})")
+        return True
+
     def _handle_special(self, r, step: str, notes: List[str]) -> bool:
         if (step in self._DONE_BY_PAYMENT
                 and (getattr(self, "_booking_status", "") or "").startswith("payment")):
@@ -9076,6 +9303,8 @@ class FlowRunner:
             return self._waiter_board(notes)
         if step.startswith("@filter_orders:"):
             return self._filter_orders(r, notes, step.split(":", 1)[1].strip())
+        if step == "@reset_table":
+            return self._reset_table(notes)
         if step == "@close_table":
             return self._close_table(notes)
         if step.startswith("@wait_screen:"):
