@@ -177,7 +177,14 @@ class CrowdedRow:
         self.screen = "board"
         self.cards = [["RoopaDcardReserved", 140], ["RoopaDcardCancelled", 640],
                       ["RoopaDcardDeclined", 1140], ["RoopaDcardConfirmationPending", 1640]]
+        self.times = ["12:00", "12:10", "12:15", "12:30"]   # what each card prints
         self.taps = []
+
+    def read_text(self, udid, region=None, accurate=False):
+        for (_n, x), t in zip(self.cards, self.times):
+            if region == (x, 355, x + 480, 505):
+                return [(f"{t} - 13:30", 0, 0, 10, 10)]
+        return []
 
     def describe_all(self, udid):
         out = [_el("", 0, 0, 1210, 834, "Application"), _el("addNewEvent", 600, 760, 50, 50),
@@ -215,7 +222,7 @@ def test_a_card_past_the_rows_clip_is_dragged_in_from_inside_the_row(monkeypatch
     board = CrowdedRow()
     for fn in ("describe_all", "tap_point", "tap", "swipe"):
         monkeypatch.setattr(F._idbd, fn, getattr(board, fn))
-    monkeypatch.setattr(screen_text, "read_text", lambda *a, **k: [])
+    monkeypatch.setattr(screen_text, "read_text", board.read_text)
     fr = object.__new__(F.FlowRunner)
     fr._cur_udid = "UDID"
     fr.devices = {}
@@ -224,6 +231,66 @@ def test_a_card_past_the_rows_clip_is_dragged_in_from_inside_the_row(monkeypatch
     assert fr._cancel_event(notes) is True, notes
     point = next(t for t in board.taps if isinstance(t, tuple))
     assert point[1] < CrowdedRow.CLIP                # the ⋮ was tapped where it is visible
+    assert "12:30" in notes[-1]                      # ours, not the older 12:10 Cancelled card
+
+
+def _no_toast(board):
+    """MEASURED (run 77458198): the 2.5s toast fell between two iPad screen reads,
+    so neither idb nor OCR ever saw it."""
+    base = board.els
+    board.els = lambda: [e for e in base() if "cancelled" not in F._idbd.name(e).lower()
+                         or "card" in F._idbd.name(e).lower()]
+    return board
+
+
+def test_a_missed_toast_is_fine_when_the_card_turned_cancelled_at_this_slot(monkeypatch):
+    board = _no_toast(Board())
+    fr = runner(board, monkeypatch)
+    notes = []
+    assert fr._cancel_event(notes) is True, notes
+    assert board.status == ["Cancelled"]
+    assert "reads '12:20" in notes[-1]
+
+
+def test_the_cancelled_card_drawn_a_few_reads_late_still_counts(monkeypatch):
+    """MEASURED (run fc6de124): right after Confirm the row showed neither the
+    pending card nor the Cancelled one; the Cancelled card came a few reads later."""
+    board = _no_toast(Board())
+    base, reads = board.els, [0]
+
+    def els():
+        out = base()
+        if board.status == ["Cancelled"] and reads[0] < 4:
+            reads[0] += 1
+            out = [e for e in out if "card" not in F._idbd.name(e).lower()]
+        return out
+    board.els = els
+    fr = runner(board, monkeypatch)
+    notes = []
+    assert fr._cancel_event(notes) is True, notes
+    assert "reads '12:20" in notes[-1]
+
+
+def test_a_missed_toast_and_a_card_still_pending_is_a_failure(monkeypatch):
+    board = _no_toast(Board(cancel_works=False))
+    base = board.els
+    board.els = lambda: [e for e in base() if "wrong" not in F._idbd.name(e).lower()]
+    fr = runner(board, monkeypatch)
+    notes = []
+    assert fr._cancel_event(notes) is False
+    assert "still lists 1 of 1" in notes[-1]
+
+
+def test_a_cancelled_card_at_another_slot_does_not_count(monkeypatch):
+    board = Board()
+    board.read_text = lambda udid, region=None, accurate=False: (
+        [("12:45 - 13:45", 0, 0, 10, 10)] if region else [])
+    fr = runner(board, monkeypatch)
+    fr._booked_slot = "12:20"
+    # one pending card, so _pending_action does not read its time; only the proof does
+    notes = []
+    assert fr._cancel_event(notes) is False
+    assert "prints 12:20" in notes[-1]
 
 
 def test_edit_dispatch_reaches_the_handler():
