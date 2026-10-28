@@ -689,6 +689,72 @@ FLOWS: Dict[str, Dict[str, Any]] = {
             ]),
         ],
     },
+    "cc_cancel_event": {
+        "id": "cc_cancel_event",
+        "name": "[Draft] Waiter cancels an appointment it created (My Bookings ⋮ → Cancel)",
+        "description": "The waiter creates an appointment for roopa D (the flow5 block): a "
+                       "business-created, Confirmation Pending event with nothing in the "
+                       "kitchen, so Cancel is enabled (Components/Modal/EventAction/index.js "
+                       ":74-80). On the My Bookings board (Screens/Home/index.js) it opens "
+                       "THIS appointment's ⋮, picks 'Cancel the event' (cancelEvent) and "
+                       "Confirm (confirmEventBtn). Proves it on both sides: the 'Event has "
+                       "been cancelled successfully!' toast and the card leaving the pending "
+                       "cards, then the consumer's Wallet invitation for this slot shows "
+                       "'Event Cancelled' (vya-consumer Screens/Wallet/Upcoming.js:1108).",
+        "segments": [
+            _seg("1", "Waiter: create appointment (roopa D), cancel it from ⋮", "waiter",
+                 _W_CREATE_APPT + ["@cancel_event"]),
+            _seg("2", "C-App: the invitation shows Event Cancelled", "consumer", [
+                "open app",
+                "click walletTab",
+                "@wait_screen:wallet",
+                "@wallet_invite_cancelled",
+            ]),
+        ],
+    },
+    "cc_edit_event": {
+        "id": "cc_edit_event",
+        "name": "[Draft] Waiter edits a pending appointment's time; the invitation follows",
+        "description": "The waiter creates an appointment for roopa D (the flow5 block): "
+                       "Confirmation Pending, no waiter yet, so 'Edit the event' is enabled "
+                       "(Components/Modal/EventAction/index.js:175). From its ⋮ on the My "
+                       "Bookings board: editEvent → Confirm → the Edit Appointment panel "
+                       "(Components/EditEventModal) → the next time chip (<HH:mm>Btn) → "
+                       "Update (saveEditBtn) → 'Reservation updated'. Then the consumer's "
+                       "Wallet invitation must be at the NEW time: @decline_appointment "
+                       "opens only the invitation whose modal shows that slot, and declines "
+                       "it (which also leaves no pending invitation on the shared account).",
+        "segments": [
+            _seg("1", "Waiter: create appointment (roopa D), edit its time", "waiter",
+                 _W_CREATE_APPT + ["@edit_event_time"]),
+            _seg("2", "C-App: the invitation is at the new time (decline it)", "consumer", [
+                "open app",
+                "click walletTab",
+                "@wait_screen:wallet",
+                "@decline_appointment",
+            ]),
+        ],
+    },
+    "cc_modify_table": {
+        "id": "cc_modify_table",
+        "name": "[Draft] Waiter moves a seated booking to another table (Modify Table)",
+        "description": "Consumer books with ORDER LATER. The waiter opens the booking and "
+                       "assigns a table (In Progress). On the Event screen the header's table "
+                       "(modifyTable, Screens/Event/PaymentDetails.js:4913 — open only before "
+                       "payment is notified) opens the 'Modify Table' sheet "
+                       "(Components/Modal/EventTableSelect, assignRoom status 'modified'); "
+                       "it picks a free table other than the current one and Confirms "
+                       "(AssignTableBtn). Proves the move: the sheet closes and the header "
+                       "now prints the new table.",
+        "segments": [
+            _seg("1", "C-App: book + order later", "consumer", _C_ORDER_LATER),
+            _seg("2", "Waiter: assign a table, then move it to another", "waiter", [
+                "@open_reservation",
+                "@assign_table",
+                "@modify_table",
+            ]),
+        ],
+    },
 }
 
 
@@ -737,6 +803,10 @@ STEP_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"step": "@pay:voucher", "help": "Settle by food voucher"},
         {"step": "@filter_orders:Reserved", "help": "My Orders: filter by status (OCR-tap, e.g. Reserved/Order/Serve)"},
         {"step": "@reset_table", "help": "My Bookings: this run's card ⋮ → Reset table → Confirm → Reset"},
+        {"step": "@modify_table", "help": "Event screen: header table → Modify Table → another free table → Confirm"},
+        {"step": "@edit_event_time", "help": "My Bookings: this run's pending appointment ⋮ → Edit the event → next time → Update"},
+        {"step": "@cancel_event", "help": "My Bookings: this run's pending appointment ⋮ → Cancel the event → Confirm"},
+        {"step": "@wallet_invite_cancelled", "help": "Wallet: this run's invitation (booked slot) reads 'Event Cancelled'"},
         {"step": "@logout_business", "help": "Sign out of the Business app"},
         {"step": "@logout_consumer", "help": "Sign out of the Consumer app"},
     ],
@@ -9016,8 +9086,10 @@ class FlowRunner:
             return s.translate(str.maketrans("il|o", "1110"))
         return bool(table) and key(seen) == key(table)
 
-    def _row_menu_cards(self, els: List[dict], hour_lbl: str) -> List[dict]:
-        """This diner's In Progress cards in the booked hour's row, left to right."""
+    def _row_menu_cards(self, els: List[dict], hour_lbl: str,
+                        want: str = "inprogress") -> List[dict]:
+        """This diner's cards with status *want* (In Progress by default) in the
+        booked hour's row, left to right."""
         name, frame = _idbd.name, _idbd.frame
         hours = [(name(e), frame(e)[1] + frame(e)[3] / 2) for e in els
                  if re.fullmatch(r"\d{2}:00", name(e))]
@@ -9027,28 +9099,33 @@ class FlowRunner:
             if "card" not in lbl.lower() or frame(e)[2] <= 60:
                 continue
             who, status = self._split_card(lbl)
-            if CONSUMER_NAME.lower() not in who.lower() or status != "inprogress":
+            if CONSUMER_NAME.lower() not in who.lower() or status != want:
                 continue
             near = min(hours, key=lambda h: abs(h[1] - (frame(e)[1] + 20)), default=None)
             if near and near[0] == hour_lbl:
                 out.append(e)
         return sorted(out, key=lambda e: frame(e)[0])
 
-    def _bring_menu_into_view(self, udid: str, hour_lbl: str, k: int,
-                              dx: float, dy: float) -> Tuple[Optional[dict], List[dict], str]:
+    def _bring_menu_into_view(self, udid: str, hour_lbl: str, k: int, dx: float, dy: float,
+                              want: str = "inprogress") -> Tuple[Optional[dict], List[dict], str]:
         """Scroll the board until the k-th card's ⋮ point is on the board, left of the
         My Orders panel. Returns (card, els, why-not)."""
         frame = _idbd.frame
         last = None
         for _ in range(8):
             els = _idbd.describe_all(udid)
-            cards = self._row_menu_cards(els, hour_lbl)
+            cards = self._row_menu_cards(els, hour_lbl, want)
             if len(cards) <= k:
-                return None, els, f"{len(cards)} In Progress card(s) in the {hour_lbl} row"
+                return None, els, f"{len(cards)} '{want}' card(s) in the {hour_lbl} row"
             card = cards[k]
             w_app, h_app = _idbd.app_size(els)
             head = next((e for e in els if _idbd.name(e).startswith("My Orders")), None)
-            right = (frame(head)[0] - 30) if head else w_app * 0.64
+            # The hour row's scroll view is clipped well left of the My Orders title.
+            # MEASURED (run 20d429b3, 12:00 row with 5 cards): the title at x≈823, the
+            # row cut off at x≈737. With 'title - 30' the drag started at x≈752 --
+            # outside the row, so nothing moved -- and a ⋮ in the clipped strip
+            # counted as on the board.
+            right = (frame(head)[0] - 90) if head else w_app * 0.60
             x, y, w, h = frame(card)
             px, py = x + w - dx, y + dy
             if 0.25 * h_app <= py <= 0.8 * h_app and 0 <= px <= right - 8:
@@ -9121,7 +9198,7 @@ class FlowRunner:
                 if card is None:
                     seen.append(f"#{i + 1}: {why}")
                     continue
-                texts = [t for t, *_ in screen_text.read_text(udid, region=_idbd.frame(card))]
+                texts = [t for t, *_ in screen_text.read_text(udid, region=self._corners(card))]
                 if any(self._same_table(t, table) for t in texts):
                     k = i
                     break
@@ -9191,6 +9268,358 @@ class FlowRunner:
         notes.append(f"[ok] {tag} — reset via ⋮ → Reset table → Confirm → Reset; the booking "
                      f"left the Table view ({before} → {left} In Progress card(s) at {hour_lbl})")
         return True
+
+    @staticmethod
+    def _corners(e: dict, pad: float = 0.0) -> Tuple[float, float, float, float]:
+        """An element's frame as the (x0, y0, x1, y1) region screen_text.read_text
+        takes -- NOT idb's (x, y, w, h): MEASURED (run 3f9f259f) a frame passed as the
+        region cropped nothing and read ''."""
+        x, y, w, h = _idbd.frame(e)
+        return (max(0.0, x - pad), max(0.0, y - pad), x + w + pad, y + h + pad)
+
+    def _header_table_text(self, udid: str, els: List[dict]) -> Tuple[Optional[dict], List[str]]:
+        """The Event header's table button (modifyTable, Screens/Event/PaymentDetails.js
+        :4913-4935) and the text read off its pixels: it is ONE accessible element,
+        so the table name inside it is invisible to idb."""
+        from automation.scenarios import screen_text
+        btn = next((e for e in els if _idbd.name(e) == "modifyTable"), None)
+        if btn is None:
+            return None, []
+        box = self._corners(btn, 6.0)
+        texts = [t for t, *_ in screen_text.read_text(udid, region=box)]
+        if not texts:
+            texts = [t for t, *_ in screen_text.read_text(udid, region=box, accurate=True)]
+        return btn, texts
+
+    def _modify_table(self, notes: List[str]) -> bool:
+        """`@modify_table` -- on THIS booking's Event screen (a table assigned, payment
+        not yet notified: PaymentDetails.js:4913 only opens the sheet while
+        reminder == false), tap the header's table (modifyTable), pick a free table
+        OTHER than the current one on the 'Modify Table' sheet
+        (Components/Modal/EventTableSelect, chips named after the tables, booked ones
+        not offered), Confirm (AssignTableBtn / applyTableBtn), and prove the move:
+        the sheet closes and the header now prints the new table."""
+        tag = "@modify_table"
+        udid = self._business_udid()
+        name, frame = _idbd.name, _idbd.frame
+        els, btn = self._wait_els(udid, lambda es: next(
+            (e for e in es if name(e) == "modifyTable"), None), 8.0)
+        if btn is None:
+            notes.append(f"[FAIL] {tag} — the Event header's table button (modifyTable) is "
+                         f"not on screen (is the booking open?)")
+            return False
+        old = self._assigned_table(notes)
+        _btn, before = self._header_table_text(udid, els)
+        if not old:
+            old = next((t.strip() for t in before if re.fullmatch(r"[A-Za-z|]{1,2}\d{1,3}", t.strip())), "")
+        ok, how = _idbd.tap(udid, ["modifyTable"], els, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — modifyTable: {how}")
+            return False
+
+        def sheet(es):
+            head = next((e for e in es if _norm(name(e)) == "modifytable"
+                         and e.get("type") == "StaticText"), None)
+            commit = next((e for e in es if name(e) in ("applyTableBtn", "AssignTableBtn")), None)
+            if head is None or commit is None:
+                return None
+            chip_re = re.compile(r"(?:tableChip\w+|[A-Za-z]{1,2}\d{1,3})\Z")
+            chips = [e for e in es if chip_re.fullmatch(name(e))
+                     and frame(head)[1] < frame(e)[1] < frame(commit)[1] and frame(e)[2] > 0]
+            return (commit, chips) if chips else None
+
+        els, up = self._wait_els(udid, sheet, 12.0)
+        if not up:
+            notes.append(f"[FAIL] {tag} — tapped modifyTable but no 'Modify Table' sheet with "
+                         f"free tables came up")
+            return False
+        commit, chips = up
+        others = sorted((c for c in chips
+                         if not self._same_table(re.sub(r"^tableChip", "", name(c)), old)),
+                        key=lambda e: frame(e)[0])
+        if not others:
+            notes.append(f"[FAIL] {tag} — the sheet offers no free table other than "
+                         f"{old or 'the current one'}: {[name(c) for c in chips]}")
+            return False
+        pick = others[0]
+        new = re.sub(r"^tableChip", "", name(pick))
+        ok, how = _idbd.tap_el(udid, pick, els, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — table chip {new}: {how}")
+            return False
+        time.sleep(0.6)
+        ok, how = _idbd.tap_el(udid, commit, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — Confirm: {how}")
+            return False
+        closed = False
+        for _ in range(12):
+            time.sleep(1.0)
+            if not self._table_sheet_open():
+                closed = True
+                break
+        if not closed:
+            said = self._screen_toast(udid)
+            notes.append(f"[FAIL] {tag} — picked {new} and tapped Confirm but the sheet stayed "
+                         f"open" + (f"; the app said {said!r}" if said else ""))
+            return False
+        texts: List[str] = []
+        for _ in range(5):
+            els = _idbd.describe_all(udid)
+            _btn, texts = self._header_table_text(udid, els)
+            if any(self._same_table(t, new) for t in texts):
+                notes.append(f"[ok] {tag} — moved from {old or '?'} to {new}; the Event header "
+                             f"now reads {new}")
+                return True
+            time.sleep(1.5)
+        notes.append(f"[FAIL] {tag} — picked {new} and the sheet closed, but the Event header "
+                     f"reads {texts or 'nothing'} (was {before or old or '?'})")
+        return False
+
+    _PENDING = "confirmationpending"
+
+    def _pending_action(self, tag: str, action: Tuple[str, str],
+                        notes: List[str]) -> Tuple[str, int]:
+        """My Bookings: THIS run's waiter-created appointment (still 'Confirmation
+        Pending') → its ⋮ → *action* (id, OCR text) → Confirm (confirmEventBtn), on
+        Components/Modal/EventAction/index.js. Returns (hour row label, the row's
+        pending card count before), or ('', 0) after noting why it failed.
+
+        The appointment is told from others by the booked slot: with several of the
+        diner's pending cards in the hour's row (shared account), the one printing
+        the slot ('12:20 - …') is ours; with no single match it refuses rather than
+        act on someone else's."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        slot = getattr(self, "_booked_slot", "") or ""
+        m = re.match(r"^(\d{1,2}):\d{2}$", slot)
+        if not m:
+            notes.append(f"[FAIL] {tag} — no booked slot known: create the appointment in "
+                         f"this flow first")
+            return "", 0
+        hour_lbl = f"{int(m.group(1)):02d}:00"
+        if not self._waiter_board(notes):
+            return "", 0
+        want = self._PENDING
+        els, cards = self._wait_els(udid, lambda es: self._row_menu_cards(es, hour_lbl, want), 10.0)
+        if not cards:
+            notes.append(f"[FAIL] {tag} — no Confirmation Pending card for '{CONSUMER_NAME}' "
+                         f"in the {hour_lbl} row (was the appointment saved?)")
+            return "", 0
+        before = len(cards)
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        k = 0
+        if before > 1:
+            from automation.scenarios import screen_text
+            slot_re = re.compile(rf"(?<!\d){re.escape(slot)}(?!\d)")
+            hits, seen = [], []
+            for i in range(before):
+                card, els, why = self._bring_menu_into_view(udid, hour_lbl, i, dx, dy, want)
+                if card is None:
+                    seen.append(f"#{i + 1}: {why}")
+                    continue
+                text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(card)))
+                if slot_re.search(text):
+                    hits.append(i)
+                seen.append(f"#{i + 1}: {text[:40]!r}")
+            if len(hits) != 1:
+                notes.append(f"[FAIL] {tag} — {before} Confirmation Pending cards for "
+                             f"'{CONSUMER_NAME}' in the {hour_lbl} row, {len(hits)} showing "
+                             f"{slot}: refusing to act on one that may not be this run's ("
+                             + "; ".join(seen) + ")")
+                return "", 0
+            k = hits[0]
+            notes.append(f"    · {before} pending cards in the {hour_lbl} row; #{k + 1} shows "
+                         f"{slot} — this run's")
+        menu_els, card = [], None
+        for dx, dy in self._CARD_MENU_OFFSETS:
+            card, els, why = self._bring_menu_into_view(udid, hour_lbl, k, dx, dy, want)
+            if card is None:
+                notes.append(f"[FAIL] {tag} — {why}")
+                return "", 0
+            x, y, w, _h = _idbd.frame(card)
+            _idbd.tap_point(udid, x + w - dx, y + dy)
+            menu_els, opened = self._wait_els(
+                udid, lambda es: any(self._has(es, i) for i in self._MENU_UP), 6.0)
+            if opened or self._ocr_sees(udid, "Select an action"):
+                break
+            notes.append(f"    · the tap at ({x + w - dx:.0f}, {y + dy:.0f}) did not open the ⋮ menu")
+            if not self._waiter_board(notes):
+                return "", 0
+        else:
+            notes.append(f"[FAIL] {tag} — the ⋮ menu of '{_idbd.name(card)}' never opened")
+            return "", 0
+        for ident, text in (action, ("confirmEventBtn", "Confirm")):
+            if self._has(menu_els, ident):
+                ok, how = _idbd.tap(udid, [ident], menu_els, scroll=False)
+            else:                                   # the Overlay hides its ids from idb
+                ok, how = self._ocr_tap(udid, None, text)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — {ident}: {how}")
+                return "", 0
+            time.sleep(0.6)
+        return hour_lbl, before
+
+    def _cancel_event(self, notes: List[str]) -> bool:
+        """`@cancel_event` -- My Bookings: THIS run's waiter-created appointment (still
+        'Confirmation Pending') → its ⋮ → 'Cancel the event' (cancelEvent) → Confirm
+        (confirmEventBtn), Components/Modal/EventAction/index.js. Cancel is enabled only
+        for a business-created event with no kitchen order and no pre-order (:74-80);
+        Screens/Home/index.js `_cancelAppointment` posts cancellEvent and toasts 'Event
+        has been cancelled successfully!' (or 'Something went wrong!'). Proves it: the
+        success toast AND the card leaving the row's pending cards (its status turns
+        Cancelled). Never cancels a card it cannot tell is this run's (_pending_action)."""
+        tag = "@cancel_event"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        want = self._PENDING
+        hour_lbl, before = self._pending_action(tag, ("cancelEvent", "Cancel the event"), notes)
+        if not hour_lbl:
+            return False
+        if not self._see_text("cancelled successfully", notes):
+            said = self._screen_toast(udid)
+            if said:
+                notes.append(f"    · the app said {said!r}")
+            return False
+        els, gone = self._wait_els(
+            udid, lambda es: len(self._row_menu_cards(es, hour_lbl, want)) < before, 10.0)
+        left = len(self._row_menu_cards(els, hour_lbl, want))
+        if not gone:
+            notes.append(f"[FAIL] {tag} — the toast said cancelled, but the {hour_lbl} row "
+                         f"still lists {left} of {before} Confirmation Pending card(s)")
+            return False
+        notes.append(f"[ok] {tag} — cancelled via ⋮ → Cancel the event → Confirm; the "
+                     f"{hour_lbl} row's pending cards went {before} → {left}")
+        return True
+
+    _EDIT_CHIP_RE = re.compile(r"(\d{2}:\d{2})Btn")
+
+    def _edit_event_time(self, notes: List[str]) -> bool:
+        """`@edit_event_time` -- My Bookings: THIS run's waiter-created appointment
+        (Confirmation Pending, no waiter yet: 'Edit the event' is enabled only then,
+        EventAction/index.js:175) → ⋮ → editEvent → Confirm opens the Edit Appointment
+        panel (Components/EditEventModal). It moves the appointment to the next time
+        chip after the booked slot (`<HH:mm>Btn`, :869-901) and taps Update
+        (saveEditBtn); saveEdit posts editReservation and toasts 'Reservation updated'
+        (or 'Could not update reservation'). Proves the toast and the panel closing,
+        then makes the NEW time this run's slot, so a later step (the consumer's
+        invitation) is checked against it."""
+        tag = "@edit_event_time"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        old = getattr(self, "_booked_slot", "") or ""
+        hour_lbl, _before = self._pending_action(tag, ("editEvent", "Edit the event"), notes)
+        if not hour_lbl:
+            return False
+
+        def panel(es):
+            if not self._has(es, "saveEditBtn"):
+                return None
+            return sorted({m.group(1) for e in es
+                           for m in [self._EDIT_CHIP_RE.fullmatch(_idbd.name(e))] if m}) or None
+
+        els, times = self._wait_els(udid, panel, 12.0)
+        if not times:
+            notes.append(f"[FAIL] {tag} — Confirm did not open the Edit Appointment panel "
+                         f"with time chips (saveEditBtn, <HH:mm>Btn)")
+            return False
+        later = [t for t in times if t > old]
+        if not later:
+            notes.append(f"[FAIL] {tag} — the Edit Appointment panel offers no time after "
+                         f"{old}: {times[:12]}")
+            return False
+        new = later[0]
+        ok, how = _idbd.tap(udid, [f"{new}Btn"], els)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — time chip {new}Btn: {how}")
+            return False
+        notes.append(f"    · picked {new}Btn ({how})")
+        time.sleep(0.6)
+        ok, how = _idbd.tap(udid, ["saveEditBtn"])
+        if not ok:
+            notes.append(f"[FAIL] {tag} — Update (saveEditBtn): {how}")
+            return False
+        notes.append(f"    · tapped Update ({how})")
+        # handleSubmit refuses with a toast and keeps the panel open (no time, no
+        # dining area, or the seat-capacity guard 'Sorry, at … has only N seats',
+        # EditEventModal/index.js:638-683). MEASURED (run b5dd8ea4): the panel stayed
+        # open and no 'Reservation updated' came -- so read what the app DID say.
+        # MEASURED (run 8e8e2196): the panel closed but the ~2s toast fell between two
+        # iPad screen reads (3-5s each). saveEdit closes the panel on success AND on
+        # failure ('Could not update reservation'), so the lasting proof is the board:
+        # this diner's pending card at the new hour now prints the new time.
+        refusals = ("sorry", "couldnot", "please", "seats", "cannot", "wrong")
+        said, closed = "", False
+        for _ in range(12):
+            es = _idbd.describe_all(udid)
+            texts = [_idbd.name(e) for e in es] + [e.get("AXLabel") or "" for e in es]
+            said = next((t for t in texts if "reservationupdated" in _norm(t)
+                         or (len(t) > 12 and any(k in _norm(t) for k in refusals))), said)
+            if not self._has(es, "saveEditBtn"):
+                closed = True
+                break
+            if said and "reservationupdated" not in _norm(said):
+                break                               # refused: the panel stays open
+            time.sleep(1.0)
+        if not closed or (said and "reservationupdated" not in _norm(said)):
+            notes.append(f"[FAIL] {tag} — Update did not save the {new} time: "
+                         + (f"the app said {said!r}" if said else
+                            "the Edit Appointment panel stayed open, no message on screen"))
+            return False
+        from automation.scenarios import screen_text
+        new_hour = f"{int(new.split(':')[0]):02d}:00"
+        slot_re = re.compile(rf"(?<!\d){re.escape(new)}(?!\d)")
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        seen: List[str] = []
+        for i in range(8):
+            card, _els, why = self._bring_menu_into_view(udid, new_hour, i, dx, dy, self._PENDING)
+            if card is None:
+                seen.append(why)
+                break
+            text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(card)))
+            if slot_re.search(text):
+                self._booked_slot = new
+                notes.append(f"[ok] {tag} — moved the appointment from {old} to {new} via ⋮ → "
+                             f"Edit the event → {new}Btn → Update; its card now reads "
+                             f"{text[:30]!r}" + (f"; the app said {said!r}" if said else ""))
+                return True
+            seen.append(repr(text[:30]))
+        notes.append(f"[FAIL] {tag} — the panel closed but no pending card in the {new_hour} "
+                     f"row prints {new}: " + "; ".join(seen))
+        return False
+
+    def _wallet_invite_cancelled(self, notes: List[str]) -> bool:
+        """`@wallet_invite_cancelled` -- C-App Wallet → Upcoming: THIS run's invitation
+        (the booked slot) carries the 'Event Cancelled' band (vya-consumer
+        Screens/Wallet/Upcoming.js:1108-1130, shown when el.canceled). The invitation
+        is ONE accessible element, '<Restaurant>InviteCard' (:876-918), so its time and
+        band are read off the pixels inside that element's frame. Another cancelled
+        invitation on the shared account at a different time does not count."""
+        tag = "@wallet_invite_cancelled"
+        udid = self.devices.get("consumer") or DEFAULT_CONSUMER_UDID
+        slot = getattr(self, "_booked_slot", "") or ""
+        if not slot:
+            notes.append(f"[FAIL] {tag} — this run booked no slot, so its invitation cannot "
+                         f"be told from others on the shared account")
+            return False
+        from automation.scenarios import screen_text
+        slot_re = re.compile(rf"(?<!\d){re.escape(slot)}(?!\d)")
+        seen: List[str] = []
+        for attempt in range(4):
+            els = _idbd.describe_all(udid)
+            _w, H = _idbd.app_size(els)
+            cards = [e for e in els if _idbd.name(e).endswith(self._INVITE_SUFFIX)
+                     and 0 <= _idbd.frame(e)[1] and _idbd.frame(e)[1] + _idbd.frame(e)[3] <= H]
+            for c in cards:
+                text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(c)))
+                if slot_re.search(text) and "cancelled" in text.lower():
+                    notes.append(f"[ok] {tag} — the {slot} invitation reads 'Event Cancelled' "
+                                 f"({text[:60]!r})")
+                    return True
+                seen.append(text[:50])
+            if attempt % 2 == 0:                         # pull to refresh
+                _idbd.swipe(udid, 200, H * 0.30, 200, H * 0.75, 0.6)
+            time.sleep(2.0)
+        notes.append(f"[FAIL] {tag} — no invitation for {slot} reads 'Event Cancelled'; "
+                     f"invitations read: {seen[-6:] or 'none on screen'}")
+        return False
 
     def _handle_special(self, r, step: str, notes: List[str]) -> bool:
         if (step in self._DONE_BY_PAYMENT
@@ -9305,6 +9734,14 @@ class FlowRunner:
             return self._filter_orders(r, notes, step.split(":", 1)[1].strip())
         if step == "@reset_table":
             return self._reset_table(notes)
+        if step == "@cancel_event":
+            return self._cancel_event(notes)
+        if step == "@modify_table":
+            return self._modify_table(notes)
+        if step == "@edit_event_time":
+            return self._edit_event_time(notes)
+        if step == "@wallet_invite_cancelled":
+            return self._wallet_invite_cancelled(notes)
         if step == "@close_table":
             return self._close_table(notes)
         if step.startswith("@wait_screen:"):
