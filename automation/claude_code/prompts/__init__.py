@@ -52,7 +52,7 @@ def describe_runs(run_ids: List[str]) -> List[str]:
     return out
 
 
-def _run_scope(options: Dict[str, Any], s: Dict[str, Any]) -> str:
+def _run_scope(options: Dict[str, Any], s: Dict[str, Any], kind: str = "heal") -> str:
     ids = options.get("run_ids") or []
     if ids:
         return ("A dashboard **Run all** just finished. These runs failed — investigate exactly "
@@ -62,7 +62,12 @@ def _run_scope(options: Dict[str, Any], s: Dict[str, Any]) -> str:
     only = options.get("flow_ids") or []
     if only:
         return "Run these flows, one by one, in this order: " + ", ".join(f"`{f}`" for f in only) + "."
-    return f"Run every flow from `flows`, one by one, in that order ({demos})."
+    if kind == "nightly":
+        # A flow proven green on this very code a few hours ago would only repeat itself;
+        # skipping those is most of a night's run time when the day's Run all was green.
+        return (f"Run the flows from `flows` that `green` does not list as proven, one by one, in "
+                f"that order ({demos}); report the proven ones as passed earlier")
+    return f"Run every flow from `flows`, one by one, in that order ({demos}) — a full pass."
 
 
 def _latest_map() -> Optional[Dict[str, Any]]:
@@ -163,7 +168,7 @@ def build(kind: str, options: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, 
         "generate_hint": ("New scenarios are written in a separate 'Create scenarios' session, "
                           "after a person picks the gaps."),
         "focus": _focus(options) if kind == "generate" else "",
-        "run_scope": _run_scope(options, s) if kind in ("heal", "nightly") else "",
+        "run_scope": _run_scope(options, s, kind) if kind in ("heal", "nightly") else "",
         "run_list": "\n".join(describe_runs(options.get("run_ids") or [])) if kind == "fix_run" else "",
     }
     task = Template(_read(f"{kind}.md")).safe_substitute(values)

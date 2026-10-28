@@ -56,6 +56,9 @@ Writing several scenarios? Write them all first, then check and run them back to
    - On a test failure: read `run-info` (the `↳ on screen:` ids and the screenshot),
      fix, and run again (max fix attempts). A failure in segment 2 or later re-runs
      with `--resume <failed run>`, which keeps the segments that passed.
+   - The same failure twice in a row, after a fix aimed at it → drop the draft: a
+     third try costs another 5–10 minutes of simulator time and rarely lands. A draft
+     runs at most 5 times in a session; `run` refuses more.
    - On an app failure: keep the evidence and report it as an app bug.
 4. Keep the draft only if it **passed after your last edit to what it runs**: its own
    steps, or the handler code its tokens reach. Editing or removing another draft, a

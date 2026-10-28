@@ -13,14 +13,21 @@ call). Flows run with the code of the checkout you are in.
    still not ready → report every flow `not_run` (infra) and stop.
 2. **Is a person testing?** `busy`. If a run is on the simulators, wait (call `busy`
    again every minute or two). Never interrupt a person's run.
-3. **Run.** `flows`, then `run <id> --label first` for each, in that order, unless
-   you were given a list of failed runs to look at (then skip to 5 with those).
-   Do not edit anything while this pass runs.
-4. **Retry once, by the rule sorter's verdict** (printed by `run`):
-   - INFRA → `preflight --wait 15`, then `run <id> --label retry`
+3. **Run.** `flows`, then `green`: it lists the flows that already passed in the last
+   8 hours on unchanged flow code — do not run those again; report them as passed
+   (with the time `green` shows). `run <id> --label first` each of the others, in the
+   `flows` order. Run every flow only when the task asks for a full pass; given a list
+   of failed runs, skip to 5 with those. Do not edit anything while this pass runs.
+4. **Retry once, by the rule sorter's verdict** (printed by `run`), continuing from
+   the failed segment whenever it is segment 2 or later — the segments that passed
+   are not repeated:
+   - INFRA → `preflight --wait 15`, then `run <id> --resume <failed run> --label retry`
+     (segment 1 failed → `run <id> --label retry`)
    - TIMING → `run <id> --resume <failed run> --label retry`
    - anything else → no blind retry; investigate.
    A flow that passes on its retry is **flaky**: report it, change nothing.
+   One flow runs at most 5 times in a session (first, retry, fix attempts, final);
+   `run` refuses more. Not settled by then → `needs_human`, with what the runs showed.
 5. **Investigate each real failure** with `.claude/skills/heal-failure/SKILL.md`.
    Use the `flow-debugger` helper agent to read a long run so your own context stays
    free for decisions.

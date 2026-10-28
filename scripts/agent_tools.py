@@ -7,6 +7,7 @@ project folder. Output is plain text.
   busy                              is a flow running on the simulators?
   preflight [--wait MIN]            Appium, simulators, staging; waits up to MIN for the rig
   flows                             every flow with its last results
+  green [--hours H]                 flows that passed in the last H h (8) on unchanged flow code — skip them
   show-flow FLOW                    the flow's segments and steps as they run now
   steps                             every step form, @token (+ its handler) and shared block
   history FLOW                      the flow's last runs and where each failed
@@ -128,6 +129,40 @@ def cmd_flows(_a) -> int:
         hist = runinfo.flow_history(f["id"], limit=3).splitlines()
         last = ", ".join(h.split()[2] for h in hist if len(h.split()) > 2) or "never run"
         print(f"{f['id']}  [{len(f['segments'])} segments]  {f['name']}  — last: {last}")
+    return 0
+
+
+def cmd_green(a) -> int:
+    """Flows already proven: their latest run passed within the last `--hours` AND after
+    the newest commit to the flow code, so running them again would only repeat it.
+    A run-all skips these (a full pass, when asked for, runs everything)."""
+    import calendar
+    from automation.database.config import SessionLocal
+    from automation.database.models import TestRun
+    from automation.scenarios.cross_app_flows import list_flows
+    try:
+        code_ts = int(_git(CODE_ROOT, "log", "-1", "--format=%ct", "--", "automation").strip() or 0)
+    except (RuntimeError, subprocess.SubprocessError, ValueError):
+        code_ts = int(time.time())          # unknown → nothing counts as proven
+    since = max(time.time() - a.hours * 3600, code_ts)
+    green, rest = [], []
+    with SessionLocal() as db:
+        for f in list_flows():
+            last = (db.query(TestRun)
+                    .filter(TestRun.bot_type == "ios-crossapp-flow",
+                            TestRun.test_name.like(f"%{f['name']}"),
+                            TestRun.status.in_(TERMINAL))
+                    .order_by(TestRun.created_at.desc()).first())
+            done = last.completed_at if last else None
+            if last and last.status == "passed" and done and calendar.timegm(done.timetuple()) >= since:
+                ago = (time.time() - calendar.timegm(done.timetuple())) / 3600
+                green.append(f"{f['id']}  passed {ago:.1f} h ago (run {last.id[:8]})")
+            else:
+                rest.append(f["id"])
+    print(f"Proven (passed in the last {a.hours:g} h, after the last change to the flow code) — "
+          f"skip these and report them as passed earlier:")
+    print("\n".join("  " + g for g in green) or "  none")
+    print(f"Run these: {' '.join(rest) or 'none'}")
     return 0
 
 
@@ -407,6 +442,30 @@ def _child(a) -> int:
     return 0
 
 
+def _session_runs() -> List[Dict[str, Any]]:
+    out = []
+    try:
+        for line in open(os.path.join(session_dir(), "runs.jsonl"), encoding="utf-8"):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
+def _max_runs_per_flow() -> int:
+    """first + retry + the fix attempts + final. A flow that has not settled by then
+    only burns simulator time (one draft took 6 runs / 36 min on 2026-10-28)."""
+    try:
+        from automation.agentic import settings
+        fixes = int(settings.get().get("max_fix_attempts") or 2)
+    except Exception:
+        fixes = 2
+    return fixes + 3
+
+
 def _finish(run_id: str) -> None:
     """Record the attempt (runs.jsonl is the ledger the session's gates read) and summarise it."""
     from automation.agentic import classifier, runinfo
@@ -454,6 +513,13 @@ def cmd_run(a) -> int:
     from automation.scenarios.cross_app_flows import resolve_flow
     if not resolve_flow(a.flow):
         print(f"REFUSED: no flow {a.flow!r} (see: flows)")
+        return 1
+    limit = _max_runs_per_flow()
+    tried = sum(1 for r in _session_runs() if r.get("flow_id") == a.flow)
+    if tried >= limit:
+        print(f"REFUSED: {a.flow} already ran {tried} times in this session (limit {limit}: first, "
+              f"retry, the fix attempts, final). Stop on it: report a regression flow as "
+              f"needs_human, drop a draft — with what the runs showed.")
         return 1
     runs_dir = os.path.join(session_dir(), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -699,6 +765,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--wait", type=float, default=0)
     s.set_defaults(fn=cmd_preflight)
     sub.add_parser("flows").set_defaults(fn=cmd_flows)
+    s = sub.add_parser("green")
+    s.add_argument("--hours", type=float, default=8)
+    s.set_defaults(fn=cmd_green)
     sub.add_parser("steps").set_defaults(fn=cmd_steps)
     for name, fn in (("show-flow", cmd_show_flow), ("history", cmd_history), ("check-ids", cmd_check_ids)):
         s = sub.add_parser(name)
