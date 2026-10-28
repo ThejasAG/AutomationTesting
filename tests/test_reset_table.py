@@ -123,6 +123,39 @@ def test_several_cards_and_no_known_table_refuses_to_guess(monkeypatch):
     assert "refusing to reset" in notes[-1]
 
 
+def test_several_cards_it_resets_the_one_showing_the_assigned_table(monkeypatch):
+    """MEASURED (run e4747059): 3 In Progress cards in the row and every one read ''
+    -- the card's (x, y, w, h) frame was passed as read_text's (x0, y0, x1, y1)
+    region, which crops nothing."""
+    class TwoCards(Board):
+        def els(self):                               # My Orders far right: both ⋮ visible
+            return [_el("My Orders", 1200, 30, 10, 30) if e["AXLabel"] == "My Orders" else e
+                    for e in super().els()]
+
+        def tap_point(self, udid, x, y):
+            self.taps.append(("point", round(x), round(y)))
+            if self.screen == "board" and 1080 <= x <= 1106 and 355 <= y <= 400:
+                self.screen = "menu"                 # the ⋮ of the second card
+            return True, "idb"
+
+    board = TwoCards(cards=2)
+    fr = runner(board, monkeypatch)
+
+    def read_text(udid, region=None, accurate=False):
+        for i, table in enumerate(("I7", "I2")):
+            x, y, w, h = 110 + i * 500, 355, 496, 150
+            if region == (x, y, x + w, y + h):
+                return [(table, x + 300, y + 60, 20, 18)]
+        return []
+
+    monkeypatch.setattr(screen_text, "read_text", read_text)
+    notes = ["[ok] @assign_table — assigned 'I2' and the sheet closed (idb)"]
+    assert fr._reset_table(notes) is True, notes
+    assert any("#2 shows table I2" in n for n in notes)
+    point = next(t for t in board.taps if isinstance(t, tuple))
+    assert point[1] > 600                            # the ⋮ of the SECOND card
+
+
 def test_the_assigned_table_is_read_from_this_segments_notes():
     notes = ["[ok] @assign_table — assigned 'tableChipI2' and the sheet closed (idb)"]
     assert F.FlowRunner._assigned_table(notes) == "I2"
