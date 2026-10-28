@@ -4557,9 +4557,91 @@ class FlowRunner:
     _FAVOURITES = ("favoriteButton",)
     RESTAURANT_SCROLLS = 8           # pages scrolled per search (Home, then Favourites)
     RESTAURANT_BUDGET_S = 150.0      # under STEP_TIMEOUT, so a miss is a reported FAIL
+    # vya-consumer Components/Header/index.js 'homeSearchBar' opens
+    # Components/Search/SearchModal.js. MEASURED 2026-10-28 on the iPhone: that sheet
+    # is ONE accessibility element, 'Search' (its SafeAreaView is accessible={true}),
+    # so idb sees neither its input nor its results -- only Home behind it (it is
+    # drawn inside Home, coverScreen={false}, and stays open after it opened a
+    # restaurant). Its text is read off the screen instead (OCR, ~1.7s a read).
+    # The restaurant's display name has a space: 'Nylai Kitchen2' found 1 result;
+    # 'NylaiKitchen2' (the Home card's id) found "0 result(s)". Tapping the result
+    # opened the booking page in 1.3s (SearchResultCard.js -> 'StoreReservation',
+    # the same screen and params as Home's card).
+    _SEARCH_BAR = ("homeSearchBar",)
+    _SEARCH_SHEET = "Search"
+    _SEARCH_TERM = "Nylai Kitchen2"
+
+    def _restaurant_page(self, udid: str, secs: float) -> bool:
+        """The booking page is up: its 'Any' area is shown, or Home is gone."""
+        end = time.time() + secs
+        while True:
+            now = {_idbd.name(e) for e in _idbd.describe_all(udid)}
+            if now & {"Any", "anyBtn"} or not now & set(self._HOME_MARKERS):
+                return True
+            if time.time() >= end:
+                return False
+            time.sleep(0.8)
+
+    def _search_sheet(self, els: List[dict]) -> Optional[Tuple[float, float, float, float]]:
+        """The open search sheet's frame, or None."""
+        e = next((e for e in els if _idbd.name(e) == self._SEARCH_SHEET
+                  and _idbd.frame(e)[3] > 300), None)
+        return _idbd.frame(e) if e is not None else None
+
+    def _close_search(self, udid: str) -> None:
+        """Close a search sheet left open over Home before Home's list is used: its
+        back arrow is an icon (no text to read) at the left of the input row."""
+        sheet = self._search_sheet(_idbd.describe_all(udid))
+        if sheet is not None:
+            _idbd.tap_point(udid, sheet[0] + 22, sheet[1] + 30)
+            self._wait_els(udid, lambda es: self._search_sheet(es) is None, 4.0)
+
+    def _search_restaurant(self, udid: str) -> Optional[str]:
+        """Home's search bar: type the restaurant's name, tap its result.
+
+        MEASURED 2026-10-27, 12 runs: the card was always behind two scrolls and a
+        'Load More Restaurants' (the server's second page), 36-113s to reach (~45s
+        typical). By search it took ~8-10s on 2026-10-28."""
+        from automation.scenarios import screen_text
+        els = _idbd.describe_all(udid)
+        sheet = self._search_sheet(els)
+        if sheet is None:
+            ok, _how = _idbd.tap(udid, self._SEARCH_BAR, els, scroll=False)
+            if not ok:
+                return None
+            els, sheet = self._wait_els(udid, self._search_sheet, 5.0)
+            if sheet is None:
+                return None
+            time.sleep(0.5)                                   # it fades in
+        sx, sy, sw, _sh = sheet
+        row = [p for p in screen_text.read_text(udid)        # the input: placeholder or old text
+               if sy <= p[2] <= sy + 55 and p[1] < sx + sw * 0.8]
+        x, y = ((row[0][1] + row[0][3] / 2, row[0][2] + row[0][4] / 2) if row
+                else (sx + sw * 0.4, sy + 30))
+        _idbd.tap_point(udid, x, y)
+        time.sleep(0.4)
+        _idbd._idb(["ui", "key-sequence", "--udid", udid,
+                    *([_idbd.KEY_DELETE_FORWARD] * 30 + [_idbd.KEY_BACKSPACE] * 30)])
+        _idbd._idb(["ui", "text", self._SEARCH_TERM, "--udid", udid])
+        want = _norm(self._SEARCH_TERM)
+        hit, end = None, time.time() + 10.0
+        while hit is None and time.time() < end:
+            time.sleep(1.0)
+            seen = screen_text.read_text(udid)
+            # "0 result(s) found for « … »" -- OCR reads that 0 as an O (measured)
+            if any(re.match(r"^[0Oo]\s*result", p[0].strip()) for p in seen):
+                return None                                   # the search does not list it
+            hit = next((p for p in seen if _norm(p[0]) == want and p[2] > sy + 60), None)
+        if hit is None:
+            return None
+        _idbd.tap_point(udid, hit[1] + hit[3] / 2, hit[2] + hit[4] / 2)
+        if not self._restaurant_page(udid, 10.0):
+            return None
+        return f"searched {self._SEARCH_TERM!r}, tapped its result"
 
     def _open_restaurant(self, r: ScenarioRunner, notes: List[str]) -> bool:
-        """Home → the restaurant's card → its booking page.
+        """Home → the restaurant's booking page: by Home's search first; when that
+        does not get there, by its card on Home's list.
 
         MEASURED 2026-10-27 (flow1, run 6d743962): the card was not on Home's first
         screen (Home's list renders lazily), the verified idb tap found nothing and
@@ -4571,8 +4653,15 @@ class FlowRunner:
         udid = (getattr(self, "_cur_udid", "") or self.devices.get("consumer")
                 or DEFAULT_CONSUMER_UDID)
         name = self._RESTAURANT
+        t0 = time.time()
+        by_search = self._search_restaurant(udid)
+        if by_search:
+            notes.append(f"[ok] click {name} — opened the restaurant ({by_search})")
+            return True
+        self._close_search(udid)
+        searched = f"search did not open it in {time.time() - t0:.0f}s; "
         cands = self._id_candidates(name)
-        deadline = time.time() + self.RESTAURANT_BUDGET_S
+        deadline = t0 + self.RESTAURANT_BUDGET_S          # one budget for both ways
 
         def swipe(up: bool) -> None:
             w, h = _idbd.app_size(_idbd.describe_all(udid))
@@ -4618,19 +4707,15 @@ class FlowRunner:
                 fav_note = "; the Favourites chip (favoriteButton) was not found either"
 
         if found is not None:
-            end = time.time() + 10.0
-            while time.time() < end:
-                now = {_idbd.name(e) for e in _idbd.describe_all(udid)}
-                if not (now & set(self._HOME_MARKERS)) or now & {"Any", "anyBtn"}:
-                    notes.append(f"[ok] click {name} — opened the restaurant ({found})")
-                    return True
-                time.sleep(0.8)
-            notes.append(f"[FAIL] click {name} — tapped the card ({found}) but the "
+            if self._restaurant_page(udid, 10.0):
+                notes.append(f"[ok] click {name} — opened the restaurant ({searched}{found})")
+                return True
+            notes.append(f"[FAIL] click {name} — tapped the card ({searched}{found}) but the "
                          f"restaurant page did not open in 10s")
             return False
         seen = [n for n in (_idbd.name(e) for e in _idbd.describe_all(udid)) if n][:25]
-        notes.append(f"[FAIL] click {name} — not found on Home (scrolling down, Load More) "
-                     f"nor in Favourites{fav_note}. On screen: {seen}")
+        notes.append(f"[FAIL] click {name} — {searched}not found on Home (scrolling down, "
+                     f"Load More) nor in Favourites{fav_note}. On screen: {seen}")
         return False
 
     def _consumer_home(self, r: ScenarioRunner, notes: List[str]) -> bool:

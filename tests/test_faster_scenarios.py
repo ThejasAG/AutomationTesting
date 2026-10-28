@@ -370,3 +370,27 @@ def test_the_session_dump_carries_each_flows_segments():
     d = gates.dump_flows(root)
     assert d["segments"]["flow1"][0][:2] == ["open app", "@consumer_home"]
     assert [s for seg in d["segments"]["flow1"] for s in seg] == d["flows"]["flow1"]
+
+
+# ── the whole suite in parallel ──────────────────────────────────────────────
+
+def test_the_whole_suite_runs_in_parallel_and_a_few_files_do_not(monkeypatch):
+    """MEASURED 2026-10-28: 4 workers ran the suite in 2m01s against 5m45s."""
+    import importlib.util
+    from automation.claude_code import gates
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: object() if name == "xdist" else real(name, *a))
+    assert gates._parallel_args(None) == ["-n", str(gates.UNIT_WORKERS)]
+    assert gates._parallel_args(["tests/test_x.py"]) == []
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "xdist" else real(name, *a))
+    assert gates._parallel_args(None) == []
+
+
+def test_failures_are_read_the_same_from_a_parallel_run(tmp_path):
+    from automation.claude_code import gates
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_one.py").write_text(
+        "def test_ok():\n    assert True\n\ndef test_bad():\n    assert False\n")
+    res = gates.run_unit_tests(str(tmp_path), timeout=180)
+    assert res["failed"] == ["tests/test_one.py::test_bad"]
+    assert res["counts"].get("passed") == 1 and res["returncode"] == 1

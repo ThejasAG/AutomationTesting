@@ -56,6 +56,11 @@ handler's own check) of the state the feature produces: a status, a total, a
 - Some restaurant data makes a check impossible. MEASURED: the seat-capacity guard
   never tripped because it is skipped when the area has no capacity data. Before you
   build a scenario around a guard, read the condition that skips it.
+- Home's **search sheet** (`homeSearchBar`) is ONE accessibility element named
+  `Search` (MEASURED 2026-10-28). idb sees neither its input nor its results, so
+  read and tap them by text (OCR), as `_search_restaurant` does. The restaurant's
+  display name is **"Nylai Kitchen2"** (with a space); searching `NylaiKitchen2`
+  finds nothing. The sheet stays open over Home after it opens a restaurant.
 - iPad = waiter and kitchen (same app, different login); iPhone = consumer.
 
 ## A new handler (only when no step or token above does it)
