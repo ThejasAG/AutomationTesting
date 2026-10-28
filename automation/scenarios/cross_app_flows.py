@@ -755,6 +755,31 @@ FLOWS: Dict[str, Dict[str, Any]] = {
             ]),
         ],
     },
+    "cc_remind_payment": {
+        "id": "cc_remind_payment",
+        "name": "[Draft] Waiter reminds the diner to pay, then settles the bill",
+        "description": "Consumer books with ORDER LATER; the waiter assigns a table, adds "
+                       "the items and sends them; the kitchen readies them; the waiter "
+                       "serves and notifies payment. Once notified, the iPad's order "
+                       "summary turns that button into REMIND PAYMENT (same id "
+                       "notifyPaymentBtn, Screens/Event/OrderSummary.js:1328-1350, shown "
+                       "while appointment.reminder and unpaid). Tapping it posts "
+                       "reminderData (Screens/Event/index.js:1033) and toasts 'Payment "
+                       "Notified'. Proves it: REMIND PAYMENT is on screen after the notify, "
+                       "the reminder toast shows after the tap, and the bill still settles "
+                       "by E-Payment (bill check) and the table closes.",
+        "segments": [
+            _seg("1", "C-App: book + order later", "consumer", _C_ORDER_LATER),
+            _seg("2", "Waiter: assign + add items + send to kitchen", "waiter", _W_ASSIGN_ADDALL_SEND),
+            _seg("3", "Kitchen: mark items ready", "kitchen", _K_READY),
+            _seg("4", "Waiter: serve + notify, remind payment, pay (B-App) + close", "waiter",
+                 _W_SERVE_NOTIFY + [
+                     "@see:REMIND PAYMENT",
+                     "click notifyPaymentBtn",
+                     "@see:Payment Notified",
+                 ] + _W_PAY_CLOSE),
+        ],
+    },
 }
 
 
@@ -9466,29 +9491,64 @@ class FlowRunner:
         for a business-created event with no kitchen order and no pre-order (:74-80);
         Screens/Home/index.js `_cancelAppointment` posts cancellEvent and toasts 'Event
         has been cancelled successfully!' (or 'Something went wrong!'). Proves it: the
-        success toast AND the card leaving the row's pending cards (its status turns
-        Cancelled). Never cancels a card it cannot tell is this run's (_pending_action)."""
+        card leaving the row's pending cards AND a Cancelled card in that row printing
+        this run's slot; 'Something went wrong!' fails it. Never cancels a card it
+        cannot tell is this run's (_pending_action)."""
         tag = "@cancel_event"
         udid = getattr(self, "_cur_udid", "") or self._business_udid()
         want = self._PENDING
+        slot = getattr(self, "_booked_slot", "") or ""
         hour_lbl, before = self._pending_action(tag, ("cancelEvent", "Cancel the event"), notes)
         if not hour_lbl:
             return False
-        if not self._see_text("cancelled successfully", notes):
-            said = self._screen_toast(udid)
-            if said:
-                notes.append(f"    · the app said {said!r}")
+        # MEASURED (run 77458198): the 2.5s toast (Home/index.js:392-395) fell between
+        # two iPad screen reads (3-5s each) and @see missed it, while the board already
+        # showed the card Cancelled. _cancelAppointment replaces the bookings with the
+        # server's answer (:805-810), so the lasting proof is the board, as in
+        # _edit_event_time; the toast is noted when it is caught.
+        said, left = "", before
+        for _ in range(12):
+            es = _idbd.describe_all(udid)
+            texts = [_idbd.name(e) for e in es] + [e.get("AXLabel") or "" for e in es]
+            said = next((t for t in texts if "cancelledsuccessfully" in _norm(t)
+                         or "somethingwentwrong" in _norm(t)), said)
+            if "somethingwentwrong" in _norm(said):
+                break
+            left = len(self._row_menu_cards(es, hour_lbl, want))
+            if left < before:
+                break
+            time.sleep(1.0)
+        if "somethingwentwrong" in _norm(said):
+            notes.append(f"[FAIL] {tag} — Confirm was refused: the app said {said!r}")
             return False
-        els, gone = self._wait_els(
-            udid, lambda es: len(self._row_menu_cards(es, hour_lbl, want)) < before, 10.0)
-        left = len(self._row_menu_cards(els, hour_lbl, want))
-        if not gone:
-            notes.append(f"[FAIL] {tag} — the toast said cancelled, but the {hour_lbl} row "
-                         f"still lists {left} of {before} Confirmation Pending card(s)")
+        if left >= before:
+            notes.append(f"[FAIL] {tag} — after Confirm the {hour_lbl} row still lists "
+                         f"{left} of {before} Confirmation Pending card(s)"
+                         + (f"; the app said {said!r}" if said else ""))
             return False
-        notes.append(f"[ok] {tag} — cancelled via ⋮ → Cancel the event → Confirm; the "
-                     f"{hour_lbl} row's pending cards went {before} → {left}")
-        return True
+        # MEASURED (run fc6de124): the pending card was gone a read before the board
+        # drew it again as Cancelled -- wait for it rather than read the row once.
+        self._wait_els(udid, lambda es: self._row_menu_cards(es, hour_lbl, "cancelled"), 10.0)
+        from automation.scenarios import screen_text
+        slot_re = re.compile(rf"(?<!\d){re.escape(slot)}(?!\d)")
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        seen: List[str] = []
+        for i in range(8):
+            card, _els, why = self._bring_menu_into_view(udid, hour_lbl, i, dx, dy, "cancelled")
+            if card is None:
+                seen.append(why)
+                break
+            text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(card)))
+            if slot_re.search(text):
+                notes.append(f"[ok] {tag} — cancelled via ⋮ → Cancel the event → Confirm; the "
+                             f"{hour_lbl} row's pending cards went {before} → {left} and its "
+                             f"Cancelled card reads {text[:30]!r}"
+                             + (f"; the app said {said!r}" if said else ""))
+                return True
+            seen.append(repr(text[:30]))
+        notes.append(f"[FAIL] {tag} — the pending card left the {hour_lbl} row, but no "
+                     f"Cancelled card there prints {slot}: " + "; ".join(seen))
+        return False
 
     _EDIT_CHIP_RE = re.compile(r"(\d{2}:\d{2})Btn")
 
