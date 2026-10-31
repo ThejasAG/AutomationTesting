@@ -1,4 +1,4 @@
-"""Scenario Generator — builds ONE large cross-app end-to-end scenario.
+"""Scenario Generator — builds large cross-app end-to-end scenarios.
 
 Reads:
   knowledge_pack/app_knowledge_pack.json   (screens, journeys, manual_journeys)
@@ -56,7 +56,8 @@ _E2E_SPEC_PATH = _AKA_DIR / "e2e_spec.txt"
 _STEP_VOCAB = """Each step must be one plain-language sentence using ONLY this vocabulary:
   - tap / click / press / touch / open / select / choose / pick / book / place / add / reserve / confirm / submit / proceed / continue <label>
   - type / enter / input / fill / search <field> with <value>
-  - swipe / scroll / drag <direction>
+    - swipe / scroll <direction>
+    - drag <control> to <position or value>
   - wait <duration or condition>
   - verify / check / confirm / ensure <label> is visible   (use for assertions)
   - go back
@@ -333,6 +334,22 @@ comped (and how many units), event/table status, payments made. The next \
 phase is written from this alone.
 8. "checklist_covered": the validation-checklist items (copied verbatim from \
 the list given) that this phase actually exercises.
+9. PAGE NAVIGATION. Never assume a tap navigated, a modal closed, or a page \
+loaded. Write every tap, swipe, text entry, and confirmation as its own step. \
+After each action that changes screens, verify a real label/id from the \
+destination screen is visible before interacting with it. When a segment is \
+required to end Home, explicitly navigate there, verify Home, and make that the \
+segment's final step. A later segment must explicitly navigate from Home to its \
+starting screen. Do not leave the app parked on a dialog or intermediate page.
+10. VENUE. This entire scenario is for Nylai Kitchen2 (also shown in ids as \
+NylaiKitchen2). Keep every consumer, waiter, and kitchen segment on that same \
+restaurant. Do not select or substitute another restaurant or kitchen.
+11. SETUP ORDER. Follow every numbered Test Setup action in exact order. In \
+particular, after Add Guest, include seven separate guest-selection steps, then \
+Invite; drag the duration slider to 1 hr, select the first available time \
+slot (naming its exact on-screen label), press bookAppoitment, \
+press ORDER LATER, and return Home. Do not combine, reorder, or omit them.
+The duration control is a drag-only slider: do not tap duration markers or ids.
 
 Return ONLY a JSON object of exactly this shape, no prose:
 {{
@@ -366,6 +383,68 @@ def _validate_phase_segments(raw: Any) -> list[dict[str, Any]]:
             "gaps":   [g for g in (s.get("gaps") or []) if isinstance(g, str)],
         })
     return out
+
+
+def _setup_segment_is_complete(segments: list[dict[str, Any]]) -> bool:
+    """Reject setup output unless the required booking path is explicit."""
+    if not segments or segments[0].get("role") != "consumer":
+        return False
+
+    steps = [step.strip().lower() for step in segments[0].get("steps", [])]
+    normalized = [re.sub(r"[^a-z0-9]+", "", step) for step in steps]
+    venue = next((i for i, step in enumerate(normalized)
+                  if "nylaikitchen2" in step), None)
+    add_guest = next((i for i, step in enumerate(normalized)
+                      if "guestadd" in step or "addguest" in step), None)
+    if venue is None or add_guest is None or venue >= add_guest:
+        return False
+    invite = next((i for i in range(add_guest + 1, len(steps))
+                   if "invite" in normalized[i]
+                   and re.match(r"^(?:(?:step\s*)?\d+[.): -]*\s*)?(open|tap|click|press|select|choose|pick)\b",
+                                steps[i])), None)
+    if invite is None:
+        return False
+
+    guest_selections = [
+        step for step in steps[add_guest + 1:invite]
+        if re.match(r"^(?:(?:step\s*)?\d+[.): -]*\s*)?(select|tap|choose|pick)\b", step)
+    ]
+    if len(guest_selections) != 7:
+        return False
+
+    cursor = invite
+    duration = next((i for i in range(cursor + 1, len(steps))
+                     if any(marker in normalized[i]
+                            for marker in ("1hr", "1hour", "onehour", "duration1"))
+                     and any(verb in normalized[i] for verb in ("drag", "swipe"))), None)
+    if duration is None:
+        return False
+
+    time_slot = next((i for i in range(duration + 1, len(steps))
+                      if (("first" in normalized[i]
+                          and any(word in normalized[i] for word in ("slot", "time")))
+                         or re.search(r"\b\d{1,2}:\d{2}\b", steps[i]))
+                      and re.match(r"^(?:(?:step\s*)?\d+[.): -]*\s*)?(tap|click|press|select|choose|pick)\b",
+                                steps[i])), None)
+    if time_slot is None:
+        return False
+
+    booking = next((i for i in range(time_slot + 1, len(steps))
+                    if any(marker in normalized[i]
+                      for marker in ("bookappoitment", "bookappointment", "bookreservation"))
+                  and re.match(r"^(?:(?:step\s*)?\d+[.): -]*\s*)?(tap|click|press|book|reserve|confirm)\b",
+                         steps[i])), None)
+    order_later = next((i for i in range((booking or 0) + 1, len(steps))
+                   if "orderlater" in normalized[i]
+                   and re.match(r"^(?:(?:step\s*)?\d+[.): -]*\s*)?(tap|click|press|choose|select)\b",
+                          steps[i])), None)
+    if booking is None or order_later is None:
+        return False
+
+    final = len(steps) - 1
+    return (final > order_later
+            and "home" in normalized[final]
+            and any(verb in normalized[final] for verb in ("verify", "check", "confirm", "ensure")))
 
 
 def _generate_e2e_phase(
@@ -404,12 +483,13 @@ def _generate_e2e_phase(
         "roles": roles_payload,
     }
     user_prompt = json.dumps(payload, indent=2, ensure_ascii=False)
+    setup_retry_feedback = ""
 
     for attempt in range(1, attempts + 1):
         try:
             response = provider.generate(
                 system_prompt=system_prompt,
-                user_prompt=user_prompt,
+                user_prompt=user_prompt + setup_retry_feedback,
                 json_schema={"segments": []},
                 max_tokens=_MAX_OUTPUT_TOKENS,
             )
@@ -429,6 +509,18 @@ def _generate_e2e_phase(
         if not segments:
             logger.error("    No valid segments (phase %s, attempt %d).",
                          phase.number, attempt)
+            continue
+        if phase.number == 0 and not _setup_segment_is_complete(segments):
+            logger.error("    Setup is missing required guest or booking steps "
+                         "(phase %s, attempt %d).", phase.number, attempt)
+            setup_retry_feedback = (
+                "\n\nRETRY CORRECTION: The previous setup segment failed validation. "
+                "Return the full Consumer setup segment with Nylai Kitchen2, Add Guest, "
+                "seven separate guest-selection actions before Invite, drag to 1 hr, "
+                "select the first available time slot using its exact HH:MM label, "
+                "bookAppoitment, ORDER LATER, then return Home and verify/check/ensure "
+                "Home is visible as the final step. Keep each action as a separate step."
+            )
             continue
         return {
             "segments":          segments,
@@ -466,7 +558,7 @@ def generate_e2e_flow(
         result = _generate_e2e_phase(phase, spec, by_role, ledger, provider)
         if result is None:
             failed_phases.append(phase.number)
-            if allow_partial:
+            if allow_partial and phase.number != 0:
                 logger.error("    Phase %s failed — continuing (--allow-partial).",
                              phase.number)
                 continue
@@ -519,40 +611,52 @@ def write_e2e_flow(
     replace: bool = False,
     dry_run: bool = False,
 ) -> int:
-    """Insert (or, with replace=True, overwrite) the E2E flow as a
-    CrossAppFlowEdit row. Id is ai_e2e_<slug> so it can't collide with the
-    built-ins or the short 'variant' flows. Segment dicts carry the standard
-    keys (num/name/role/steps) plus 'checks' and 'gaps' (JSON, so extra keys
-    are stored harmlessly; the UI/runner may simply ignore them)."""
-    flow_id = f"ai_e2e_{_slug(flow['name'])[:60]}"
-    if flow_id in FLOWS:
-        logger.error("  id %r collides with a built-in flow — not writing.", flow_id)
-        return 0
+    """Insert the flow, keeping earlier generated variants unless replacing."""
+    base_name = flow["name"]
+    base_slug = _slug(base_name)
+    variant = 1
+    while True:
+        if variant == 1:
+            flow_name = base_name
+            flow_id = f"ai_e2e_{base_slug[:60]}"
+        else:
+            suffix = f"_v{variant}"
+            flow_name = f"{base_name} (Variant {variant})"
+            flow_id = f"ai_e2e_{base_slug[:60 - len(suffix)]}{suffix}"
 
-    row = db.query(CrossAppFlowEdit).filter(CrossAppFlowEdit.id == flow_id).first()
+        row = db.query(CrossAppFlowEdit).filter(
+            CrossAppFlowEdit.id == flow_id
+        ).first()
+        if flow_id in FLOWS:
+            variant += 1
+            continue
+        if row and not (replace and variant == 1):
+            variant += 1
+            continue
+        break
+
     n_steps = sum(len(s["steps"]) for s in flow["segments"])
     if dry_run:
-        logger.info("  [dry-run] would %s E2E flow %r: %d segments, %d steps, roles %s",
-                    "replace" if row else "create", flow_id, len(flow["segments"]),
-                    n_steps, sorted({s["role"] for s in flow["segments"]}))
+        logger.info("  [dry-run] would %s E2E flow %r (%s): %d segments, %d steps, roles %s",
+                    "replace" if row else "create", flow_id, flow_name,
+                    len(flow["segments"]), n_steps,
+                    sorted({s["role"] for s in flow["segments"]}))
         return 1
-    if row and not replace:
-        logger.info("  [skip] %r already exists (use --replace to overwrite).", flow_id)
-        return 0
     if row:
-        row.name        = flow["name"]
+        row.name        = flow_name
         row.description = flow["description"]
         row.segments    = flow["segments"]
     else:
         db.add(CrossAppFlowEdit(
             id          = flow_id,
-            name        = flow["name"],
+            name        = flow_name,
             description = flow["description"],
             segments    = flow["segments"],
         ))
     db.commit()
-    logger.info("  E2E flow %r %s: %d segments, %d steps.",
-                flow_id, "replaced" if row else "created", len(flow["segments"]), n_steps)
+    logger.info("  E2E flow %r (%s) %s: %d segments, %d steps.",
+                flow_id, flow_name, "replaced" if row else "created",
+                len(flow["segments"]), n_steps)
     return 1
 
 
@@ -602,7 +706,8 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Generate the single large end-to-end cross-app flow from the spec."
+        description=("Generate a large end-to-end cross-app flow from the spec. "
+                    "Existing flows are preserved; later runs create numbered variants.")
     )
     parser.add_argument("--spec", default=str(_E2E_SPEC_PATH),
                         help="Path to the phase-structured E2E spec (txt/md).")

@@ -1,12 +1,27 @@
 End-to-End Automation Test Flow (Consumer App → Business App → Kitchen App → Payment)
 
 Test Setup
-Launch the Consumer App.
-Create an event with:
-1 Host
-1 Participant
-5 Guests
-Participant accepts the event invitation.
+Launch the Consumer App and start on Home. Use Nylai Kitchen2 for this entire
+cross-app scenario; do not choose another restaurant or kitchen.
+
+Create the host's reservation as an explicit, ordered Consumer segment:
+1. From Home, open Nylai Kitchen2 and choose Reserve a table.
+2. Open Add Guest. Then select a guest contact exactly seven times, as seven
+	separate steps, and only after all seven selections press Invite.
+3. Drag the duration slider to 1 hr. Do not tap a duration marker.
+4. Select the first available time slot shown on the reservation screen, and
+	name its exact on-screen label.
+5. Press bookAppoitment to submit the reservation.
+6. On the booking confirmation, press ORDER LATER.
+7. Return to the Consumer Home page. This must be the final step of this
+	reservation segment; do not leave the app on the confirmation, wallet, or
+	reservation screen.
+
+The reservation has one host, one participant, and six additional guests.
+After the host segment returns Home, accept the event invitation as the
+participant in a separate segment: explicitly open Wallet, open the event
+invitation, accept it, and return to Home. Do not imply that invitation
+acceptance happens automatically.
 
 Phase 1 – Pre-Order (Consumer App)
 Host Pre-Order
@@ -28,7 +43,7 @@ Complete the pre-order.
 Phase 2 – Table Assignment (Business App)
 Open the created event.
 Assign a table.
-For all seven people (Host + Participant + 5 Guests):
+For all eight people (Host + Participant + 6 Guests):
 Add products manually.
 Use a combination of:
 Products without options
@@ -122,7 +137,7 @@ After serving:
 Perform one additional split on a Consumer App ordered item.
 
 Phase 8 – Notify Payment
-Notify payment for all seven people.
+Notify payment for all eight people.
 
 Phase 9 – Consumer App Payment
 Host selects Pay for Others.
@@ -157,7 +172,7 @@ Phase 11 – Invoice Validation
 Verify invoices for:
 Host.
 Participant.
-All guests.
+All six guests.
 Validate:
 Assigned items.
 Split items.
