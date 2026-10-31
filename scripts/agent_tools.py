@@ -25,7 +25,7 @@ project folder. Output is plain text.
   app-changes                       new upstream commits in both app repos since the last analysis
   app-show APP PATH [--start N --end M]   a file as it is upstream (new code not checked out)
   app-grep APP PATTERN              git grep over the upstream code
-  screen consumer|waiter|kitchen    what the simulator shows now: element list + screenshot
+  screen consumer|participant|waiter|kitchen   what the simulator shows now: element list + screenshot
   recover wda|rig                   restart WebDriverAgent on both simulators / start the rig
 
 Flows run in a detached child process: if the calling command is killed (a Bash
@@ -61,7 +61,8 @@ STATE_FILE = os.path.join(MAIN_ROOT, "logs", "agent_sessions", "state.json")
 ENV = "staging"
 TERMINAL = ("passed", "failed", "error", "stopped", "cancelled", "canceled")
 DEFAULT_WAIT_S = 540          # under Claude Code's 10-minute Bash cap
-ROLE_DEVICE = {"consumer": "consumer", "waiter": "waiter", "kitchen": "kitchen"}
+ROLE_DEVICE = {"consumer": "consumer", "participant": "participant", "waiter": "waiter",
+               "kitchen": "kitchen"}
 
 
 def session_dir() -> str:
@@ -262,7 +263,7 @@ def cmd_check_flows(_a) -> int:
         if f.get("id") != fid:
             problems.append(f"{fid}: its 'id' field says {f.get('id')!r}")
         for s in f.get("segments") or []:
-            if s.get("role") not in ("consumer", "waiter", "kitchen"):
+            if s.get("role") not in ("consumer", "participant", "waiter", "kitchen"):
                 problems.append(f"{fid} segment {s.get('num')}: unknown role {s.get('role')!r}")
             for st in s.get("steps") or []:
                 if not token_ok(st):
@@ -808,7 +809,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("pattern")
     s.set_defaults(fn=cmd_app_grep)
     s = sub.add_parser("screen")
-    s.add_argument("role", choices=["consumer", "waiter", "kitchen"])
+    s.add_argument("role", choices=["consumer", "participant", "waiter", "kitchen"])
     s.set_defaults(fn=cmd_screen)
     s = sub.add_parser("recover")
     s.add_argument("what", choices=["wda", "rig"])

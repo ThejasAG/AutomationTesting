@@ -84,6 +84,14 @@ DEFAULT_BUSINESS_PHONE_UDID = local_udid_for(
     "iPhone", "B1093E61-C510-4E6E-8A60-C2D05D150F64",
     exclude=[DEFAULT_CONSUMER_UDID], sims=_SIMS) \
     or "B1093E61-C510-4E6E-8A60-C2D05D150F64"                        # iPhone 16
+# The participant: a SECOND diner account on its OWN iPhone, for flows where two
+# consumers act on one event (host + participant). Never the consumer's sim or the
+# B-app phone: one app instance holds one login, and a shared sim brings back the
+# WDA session collisions above. Booted only by a flow that has a participant segment.
+DEFAULT_PARTICIPANT_UDID = local_udid_for(
+    "iPhone", "BB34587D-3415-4A78-B791-B6A16AD276A3",
+    exclude=[DEFAULT_CONSUMER_UDID, DEFAULT_BUSINESS_PHONE_UDID], sims=_SIMS) \
+    or "BB34587D-3415-4A78-B791-B6A16AD276A3"                        # iPhone 17
 APPIUM_URL = "http://127.0.0.1:4723"
 
 # The Business app is a SEPARATE React Native app — it cannot share Metro on

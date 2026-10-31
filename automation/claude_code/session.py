@@ -371,6 +371,51 @@ def reject(sid: str, by: str = "") -> Dict[str, Any]:
     return {"rejected": True}
 
 
+def recheck_size(sid: str, by: str = "") -> Dict[str, Any]:
+    """Check the size again for a session whose ONLY failed check is size — the one
+    check that depends on a setting (max_changed_lines, plus the allowance per new
+    flow, gates.LINES_PER_NEW_FLOW). The other checks are not re-run: they stand as
+    the session's end left them. MEASURED 2026-10-28: session 60f14a6c kept 3 new
+    scenarios that passed every other check, but 961 lines against a flat 800 left it
+    unapprovable, and only Reject was offered."""
+    from automation.agentic import settings
+    from automation.claude_code import gates, runner
+    from automation.database.config import SessionLocal
+    from automation.database.models import AgentSession
+    s = get(sid)
+    if s is None:
+        raise ValueError("no such session")
+    if s["status"] != "gates_failed":
+        raise Refused(f"only a session whose size check failed can be checked again "
+                      f"(this one is '{s['status']}')")
+    failed = [g.get("name") for g in s["gates"] if not g.get("ok")]
+    if failed != ["size"]:
+        raise Refused("only the size check can be checked again; this session also failed: "
+                      + ", ".join(f for f in failed if f != "size"))
+    branch = s.get("branch") or ""
+    if not (s.get("base_commit") and branch and _git("branch", "--list", branch, check=False).strip()):
+        raise Refused("its branch is gone — start a new session instead")
+    before = runner.flows_at(s["base_commit"])
+    after = runner.flows_at(_git("rev-parse", branch).strip())
+    new = gates.flow_changes(before["flows"], after["flows"])[1] if before and after else []
+    g = gates.size_gate(s["files_changed"], int(settings.get().get("max_changed_lines") or 800), len(new))
+    if by:
+        g["detail"] += f" — checked again by {by}"
+    gl = [g if x.get("name") == "size" else x for x in s["gates"]]
+    status = "review" if g["ok"] else "gates_failed"
+    with SessionLocal() as db:
+        r = db.get(AgentSession, sid)
+        r.gates, r.status = gl, status
+        r.phase = "waiting for your approval" if g["ok"] else "a gate failed — see the checks"
+        db.commit()
+    try:
+        with open(os.path.join(paths.session_dir(sid), "gates.json"), "w") as f:
+            json.dump(gl, f, indent=1)
+    except OSError:
+        pass
+    return {"ok": g["ok"], "status": status, "detail": g["detail"], "new_flows": new}
+
+
 # ── the backend itself ───────────────────────────────────────────────────────
 
 def restart_backend_if_idle() -> Dict[str, Any]:

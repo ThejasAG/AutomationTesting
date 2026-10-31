@@ -5,9 +5,10 @@ import { getCrossAppConfig, runCrossAppSuite, listCrossAppFlows, runCrossAppFlow
 import type { CrossAppConfig, CrossAppFlow, FlowEnv, BusinessDevice } from '../api';
 import ModalPortal from './ModalPortal';
 
-type Role = 'consumer' | 'waiter' | 'kitchen';
+type Role = 'consumer' | 'participant' | 'waiter' | 'kitchen';
 const ROLES: { key: Role; label: string; hint: string }[] = [
   { key: 'consumer', label: 'Consumer (diner)', hint: 'iPhone — books, orders, pays' },
+  { key: 'participant', label: 'Participant (2nd diner)', hint: 'Its own iPhone — booted only by flows with a participant' },
   { key: 'waiter', label: 'Waiter', hint: 'Business app — accepts the reservation' },
   { key: 'kitchen', label: 'Kitchen', hint: 'Business app — accepts & serves the order' },
 ];
@@ -20,10 +21,10 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
   onStarted: (runId: string) => void;
 }) {
   const [cfg, setCfg] = useState<CrossAppConfig | null>(null);
-  const [devices, setDevices] = useState<Record<Role, string>>({ consumer: '', waiter: '', kitchen: '' });
-  const [emails, setEmails] = useState<Record<Role, string>>({ consumer: '', waiter: '', kitchen: '' });
-  const [passwords, setPasswords] = useState<Record<Role, string>>({ consumer: '', waiter: '', kitchen: '' });
-  const [hasPw, setHasPw] = useState<Record<Role, boolean>>({ consumer: false, waiter: false, kitchen: false });
+  const [devices, setDevices] = useState<Record<Role, string>>({ consumer: '', participant: '', waiter: '', kitchen: '' });
+  const [emails, setEmails] = useState<Record<Role, string>>({ consumer: '', participant: '', waiter: '', kitchen: '' });
+  const [passwords, setPasswords] = useState<Record<Role, string>>({ consumer: '', participant: '', waiter: '', kitchen: '' });
+  const [hasPw, setHasPw] = useState<Record<Role, boolean>>({ consumer: false, participant: false, waiter: false, kitchen: false });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [flows, setFlows] = useState<CrossAppFlow[]>([]);
@@ -41,9 +42,12 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
     getCrossAppConfig()
       .then(c => {
         setCfg(c);
-        setDevices(c.devices);
-        setEmails({ consumer: c.credentials.consumer.email, waiter: c.credentials.waiter.email, kitchen: c.credentials.kitchen.email });
-        setHasPw({ consumer: c.credentials.consumer.has_password, waiter: c.credentials.waiter.has_password, kitchen: c.credentials.kitchen.has_password });
+        // An older backend has no participant: keep its field blank, not undefined.
+        const none = { email: '', has_password: false };
+        const part = c.credentials.participant ?? none;
+        setDevices({ ...c.devices, participant: c.devices.participant ?? '' });
+        setEmails({ consumer: c.credentials.consumer.email, participant: part.email, waiter: c.credentials.waiter.email, kitchen: c.credentials.kitchen.email });
+        setHasPw({ consumer: c.credentials.consumer.has_password, participant: part.has_password, waiter: c.credentials.waiter.has_password, kitchen: c.credentials.kitchen.has_password });
       })
       .catch(e => setError(e?.message || 'Could not load config'));
     reloadFlows();
@@ -75,7 +79,8 @@ export default function CrossAppRunModal({ onClose, onStarted }: {
     }
   };
   const roleColor = (role: string) =>
-    role === 'consumer' ? '#3182ce' : role === 'kitchen' ? '#dd6b20' : '#805ad5';
+    role === 'consumer' ? '#3182ce' : role === 'participant' ? '#319795'
+      : role === 'kitchen' ? '#dd6b20' : '#805ad5';
 
   const sameWK = devices.waiter && devices.waiter === devices.kitchen;
 

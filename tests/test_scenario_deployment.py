@@ -187,5 +187,7 @@ def test_a_consumer_only_flow_does_not_require_the_business_app():
     from automation.scenarios.cross_app_flows import FlowRunner
     src = inspect.getsource(FlowRunner._preflight)
     assert 'seg["role"]' in src and '"segments"' in src   # roles come from the flow
-    assert 'if "consumer" in roles:' in src
-    assert 'if roles - {"consumer"}:' in src
+    # The C-App is required per diner role the flow has (consumer, participant);
+    # the B-App only when some other role is there.
+    assert 'for c_role in (r_ for r_ in _CONSUMER_ROLES if r_ in roles):' in src
+    assert 'if roles - set(_CONSUMER_ROLES):' in src

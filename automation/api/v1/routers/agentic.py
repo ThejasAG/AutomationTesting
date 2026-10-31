@@ -169,6 +169,16 @@ def continue_session(sid: str, current_user=Depends(get_current_user)):
         raise HTTPException(400, str(e))
 
 
+@router.post("/sessions/{sid}/recheck-size", dependencies=[_admin])
+def recheck_session_size(sid: str, current_user=Depends(get_current_user)):
+    try:
+        return session.recheck_size(sid, _who(current_user))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except session.Refused as e:
+        raise HTTPException(400, str(e))
+
+
 @router.post("/sessions/{sid}/approve", dependencies=[_admin])
 def approve_session(sid: str, current_user=Depends(get_current_user)):
     try:

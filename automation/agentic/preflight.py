@@ -26,7 +26,10 @@ def _appium() -> Dict[str, Any]:
 
 def _simulators() -> Dict[str, Any]:
     from automation.scenarios import cross_app_config as cfgmod
-    want = {u for u in (cfgmod.load_config().get("devices") or {}).values() if u}
+    # Not the on-demand roles: the participant's iPhone is booted by the one flow
+    # that uses it, and is normally down.
+    want = {u for role, u in (cfgmod.load_config().get("devices") or {}).items()
+            if u and role not in cfgmod.ON_DEMAND_ROLES}
     try:
         out = subprocess.run(["xcrun", "simctl", "list", "devices", "booted", "-j"],
                              capture_output=True, text=True, timeout=20).stdout

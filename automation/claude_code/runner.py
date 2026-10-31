@@ -586,7 +586,9 @@ def harvest(sid: str, sdir: str, wt: str, base: str, branch: str, before: Option
             gl.append(g)
         else:
             gl.append(gates.gate("on device", True, "no flow or device code changed"))
-    gl.append(gates.size_gate(files, int(s.get("max_changed_lines") or 800)))
+    new_flows = (gates.flow_changes(before["flows"], after["flows"])[1]
+                 if before is not None and after is not None else [])
+    gl.append(gates.size_gate(files, int(s.get("max_changed_lines") or 800), len(new_flows)))
     out["gates"] = gl
     ok = all(g["ok"] for g in gl)
 

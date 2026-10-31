@@ -197,6 +197,15 @@ def test_size_gate():
     assert not gates.size_gate([{"added": 700, "removed": 200}], 800)["ok"]
 
 
+def test_the_size_limit_grows_with_each_new_scenario():
+    """MEASURED 2026-10-28: session 60f14a6c kept 3 new scenarios, 961 lines."""
+    files = [{"added": 952, "removed": 9}]
+    assert not gates.size_gate(files, 800)["ok"]
+    g = gates.size_gate(files, 800, new_flows=3)
+    assert g["ok"] and g["detail"] == "961 changed lines (limit 800 + 3 new scenarios × 400 = 2000)"
+    assert gates.size_gate(files, 800, new_flows=1)["detail"].endswith("1 new scenario × 400 = 1200)")
+
+
 # ── impact ───────────────────────────────────────────────────────────────────
 
 _SRC = '''
@@ -254,7 +263,8 @@ def test_impact_on_the_real_engine():
     src = open(os.path.join(paths.MAIN_ROOT, impact.FLOWS_FILE), encoding="utf-8").read()
     flows = {k: [st for s in v["segments"] for st in s["steps"]] for k, v in FLOWS.items()}
     hit = impact.flows_for_functions(flows, src, ["_accept_appointment"], FlowRunner._PLAIN_STEP_TOKENS)
-    assert set(hit) == {"flow5", "flow6"}
+    # The full event's participant accepts the host's invitation too.
+    assert set(hit) == {"flow5", "flow6", "flow_full_event", "flow_full_event_eve"}
 
 
 # ── transcript events ────────────────────────────────────────────────────────
