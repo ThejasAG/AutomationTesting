@@ -12,7 +12,8 @@ session runner, so nothing depends on the model having done what it said:
   on device    each flow whose steps changed, each new flow, and (for engine
                code) at least one flow the change reaches PASSED on the simulators
                after the last edit
-  size         the change is small enough to review (settings.max_changed_lines)
+  size         the change is small enough to review (settings.max_changed_lines,
+               plus LINES_PER_NEW_FLOW for each new flow)
 """
 from __future__ import annotations
 
@@ -252,6 +253,18 @@ def device_gate(runs: List[Dict[str, Any]], last_edit: float, must_pass: Iterabl
     return gate("on device", not problems, "\n".join(problems + [detail]))
 
 
-def size_gate(numstat: List[Dict[str, Any]], limit: int) -> Dict[str, Any]:
+# What one new scenario adds (its flow, handler and unit test): MEASURED over the
+# approved 'New scenarios' sessions 2026-10-26..28, 150-370 changed lines each. A
+# session makes one per ticked feature, so the limit grows with the ones it keeps.
+# MEASURED 2026-10-28: session 60f14a6c kept 3, passed every other check, and its
+# 961 lines against a flat 800 left it unapprovable.
+LINES_PER_NEW_FLOW = 400
+
+
+def size_gate(numstat: List[Dict[str, Any]], limit: int, new_flows: int = 0) -> Dict[str, Any]:
     total = sum(int(f.get("added") or 0) + int(f.get("removed") or 0) for f in numstat)
-    return gate("size", total <= limit, f"{total} changed lines (limit {limit})")
+    new_flows = max(0, int(new_flows or 0))
+    allowed = limit + LINES_PER_NEW_FLOW * new_flows
+    how = (f"limit {limit} + {new_flows} new scenario{'' if new_flows == 1 else 's'} × "
+           f"{LINES_PER_NEW_FLOW} = {allowed}") if new_flows else f"limit {limit}"
+    return gate("size", total <= allowed, f"{total} changed lines ({how})")

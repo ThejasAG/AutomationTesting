@@ -494,15 +494,15 @@ def cross_app_step_catalog(current_user=Depends(get_current_user)):
     """Step tokens the runner understands, for the editor's picker. Free text is still
     accepted (it falls through to the fuzzy click/type resolver) — this is a menu."""
     from automation.scenarios.cross_app_flows import STEP_CATALOG
-    return {"catalog": STEP_CATALOG, "roles": ["consumer", "waiter", "kitchen"]}
+    return {"catalog": STEP_CATALOG, "roles": ["consumer", "participant", "waiter", "kitchen"]}
 
 
 def _validate_segments(segments: List[FlowSegmentIn]) -> None:
     if not segments:
         raise HTTPException(400, "A flow needs at least one segment.")
     for i, s in enumerate(segments, 1):
-        if s.role not in ("consumer", "waiter", "kitchen"):
-            raise HTTPException(400, f"Segment {i}: role must be consumer, waiter or kitchen.")
+        if s.role not in ("consumer", "participant", "waiter", "kitchen"):
+            raise HTTPException(400, f"Segment {i}: role must be consumer, participant, waiter or kitchen.")
         if not [x for x in s.steps if x.strip()]:
             raise HTTPException(400, f"Segment {i} ('{s.name or s.role}') has no steps.")
 

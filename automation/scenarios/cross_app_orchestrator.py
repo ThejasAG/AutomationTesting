@@ -84,6 +84,14 @@ DEFAULT_BUSINESS_PHONE_UDID = local_udid_for(
     "iPhone", "B1093E61-C510-4E6E-8A60-C2D05D150F64",
     exclude=[DEFAULT_CONSUMER_UDID], sims=_SIMS) \
     or "B1093E61-C510-4E6E-8A60-C2D05D150F64"                        # iPhone 16
+# The participant: a SECOND diner account on its OWN iPhone, for flows where two
+# consumers act on one event (host + participant). Never the consumer's sim or the
+# B-app phone: one app instance holds one login, and a shared sim brings back the
+# WDA session collisions above. Booted only by a flow that has a participant segment.
+DEFAULT_PARTICIPANT_UDID = local_udid_for(
+    "iPhone", "BB34587D-3415-4A78-B791-B6A16AD276A3",
+    exclude=[DEFAULT_CONSUMER_UDID, DEFAULT_BUSINESS_PHONE_UDID], sims=_SIMS) \
+    or "BB34587D-3415-4A78-B791-B6A16AD276A3"                        # iPhone 17
 APPIUM_URL = "http://127.0.0.1:4723"
 
 # The Business app is a SEPARATE React Native app — it cannot share Metro on
@@ -263,6 +271,9 @@ def _options(udid: str, bundle_id: str, wda_port: int) -> XCUITestOptions:
     o.set_capability("waitForIdleTimeout", 0)         # 0s idle wait
     o.set_capability("shouldWaitForQuiescence", False)
     o.set_capability("maxTypingFrequency", 30)
+    # Nothing reads the device syslog through Appium, and streaming it kept diagnosticd
+    # the busiest process inside the simulators (MEASURED 2026-10-31: 11 CPU-min of 56).
+    o.set_capability("skipLogCapture", True)
     # NOTE: do NOT cap snapshotMaxDepth here — this app's cards (e.g. NylaiKitchen2)
     # live deep in the tree, and a shallow cap made the resolver miss them without
     # actually speeding snapshots up. waitForQuiescence=False is what stops the hangs.

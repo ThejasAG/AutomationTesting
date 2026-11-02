@@ -165,8 +165,9 @@ export async function getGoldenRun(): Promise<{ run_id: string | null; report_ur
 export interface SimDevice { udid: string; name: string; state: string; ios: string; apps?: string[] | null; }
 export interface CrossAppConfig {
     simulators: SimDevice[];
-    devices: { consumer: string; waiter: string; kitchen: string };
-    credentials: Record<'consumer' | 'waiter' | 'kitchen', { email: string; has_password: boolean }>;
+    devices: { consumer: string; participant?: string; waiter: string; kitchen: string };
+    credentials: Record<'consumer' | 'waiter' | 'kitchen', { email: string; has_password: boolean }>
+      & { participant?: { email: string; has_password: boolean } };
 }
 
 export async function getCrossAppConfig(): Promise<CrossAppConfig> {

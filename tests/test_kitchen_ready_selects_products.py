@@ -27,11 +27,13 @@ class Board:
     """A kitchen board that behaves like the app (layout measured on ticket 4772)."""
 
     def __init__(self, items=("TagliatellealSalmoneBtn", "SpaghettiallaPuttanescaBtn"),
-                 ticket="4772", ready_works=True, dots_work=True, leftover_close=False):
+                 ticket="4772", ready_works=True, dots_work=True, leftover_close=False,
+                 scrolls_on_select=False):
         self.items, self.ticket = list(items), ticket
         self.selected, self.completed, self.closed = set(), set(), False
         self.ready_works, self.dots_work = ready_works, dots_work
         self.leftover_close = leftover_close
+        self.scrolls_on_select, self.ready_y = scrolls_on_select, 424
         self.taps = []
 
     def els(self):
@@ -56,7 +58,7 @@ class Board:
         done = (all(i in self.completed for i in self.items) if self.items
                 else getattr(self, "closed_ready", False))
         out += [_el("orderPrintBtn", 153, 424, 64, 48),
-                _el("orderCloseBtn" if done else "orderReadyBtn", 286, 424, 148, 48)]
+                _el("orderCloseBtn" if done else "orderReadyBtn", 286, self.ready_y, 148, 48)]
         return out
 
     def tap(self, udid, e, els=None, scroll=True):
@@ -74,6 +76,8 @@ class Board:
                 self.closed = True
         elif n in self.items and self.dots_work:
             self.selected.add(n)
+            if self.scrolls_on_select:
+                self.ready_y = 600
         return True, "idb"
 
     def colours(self, udid, points, els=None, radius=1.5):
@@ -125,6 +129,14 @@ def test_selects_every_item_then_ready_then_close(kitchen):
                       "orderReadyBtn", "orderCloseBtn"]
     assert b.closed
     assert "Ready → Close Order" in notes[-1] and "4772" in notes[-1]
+
+
+def test_ready_is_read_where_it_is_after_selecting_scrolled_the_ticket(kitchen):
+    # MEASURED 2026-10-31 (ticket 5591, run 9a58c662): the long ticket scrolled while its
+    # dots were selected, Ready's old place read as background: "still disabled".
+    ok, notes, b = kitchen(scrolls_on_select=True)
+    assert ok, notes
+    assert b.taps[-2:] == ["orderReadyBtn", "orderCloseBtn"]
 
 
 def test_nav_rail_is_never_taken_for_a_product(kitchen):

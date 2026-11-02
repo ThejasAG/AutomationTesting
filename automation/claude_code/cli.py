@@ -7,6 +7,7 @@
   python -m automation.claude_code.cli stop ID
   python -m automation.claude_code.cli continue ID   an interrupted session, where it stopped
   python -m automation.claude_code.cli approve ID | reject ID
+  python -m automation.claude_code.cli recheck ID    the size check again (when only it failed)
   python -m automation.claude_code.cli schedule            install/remove the launchd job per settings
 
 The same sessions as the AI Agent page: they show up there, and are approved there
@@ -115,6 +116,19 @@ def cmd_decide(a) -> int:
     return 0
 
 
+def cmd_recheck(a) -> int:
+    from automation.claude_code import session
+    try:
+        out = session.recheck_size(a.id, "cli")
+    except (session.Refused, ValueError) as e:
+        print(f"refused: {e}")
+        return 1
+    print(f"size: {'ok' if out['ok'] else 'still too big'} — {out['detail']}")
+    print("now waiting for approval" if out["ok"] else "raise 'Largest change it may propose' "
+          "in the AI Agent settings, or reject it")
+    return 0
+
+
 def cmd_schedule(_a) -> int:
     from automation.agentic import settings
     from automation.claude_code import schedule
@@ -149,6 +163,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         s = sub.add_parser(name)
         s.add_argument("id")
         s.set_defaults(fn=cmd_decide)
+    s = sub.add_parser("recheck")
+    s.add_argument("id")
+    s.set_defaults(fn=cmd_recheck)
     sub.add_parser("schedule").set_defaults(fn=cmd_schedule)
     a = p.parse_args(argv)
     if getattr(a, "id", None) and len(a.id) < 36:          # accept a short id

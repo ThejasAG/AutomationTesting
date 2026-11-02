@@ -84,6 +84,25 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
     }
   };
 
+  // Size is the one check that depends on a setting: when it is the only one that
+  // failed, it can be checked again with the current limit.
+  const onlySizeFailed = s.status === 'gates_failed'
+    && s.gates.filter(g => !g.ok).map(g => g.name).join() === 'size';
+  const recheckSize = async () => {
+    setBusy('recheck');
+    setActErr('');
+    try {
+      const out = await agentApi.recheckSize(s.id);
+      if (!out.ok) setActErr(`Still too big: ${out.detail}. Raise "Largest change it may propose" in the settings, or reject it.`);
+      setReload(n => n + 1);
+      onChanged();
+    } catch (e) {
+      setActErr((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
   const resume = async () => {
     if (!window.confirm('Continue this session where it stopped (same worktree, same Claude conversation)?')) return;
     setBusy('continue');
@@ -161,7 +180,9 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
           <p style={{ ...muted, marginBottom: 12 }}>
             {s.status === 'review'
               ? 'Every check passed. Approve merges the session\'s branch into the checkout the backend runs from.'
-              : 'Reject it to delete the branch, or start a new session.'}
+              : onlySizeFailed
+                ? 'Only the size check failed. Check it again with the current limit (AI Agent settings; it grows with each new scenario), or reject it to delete the branch.'
+                : 'Reject it to delete the branch, or start a new session.'}
           </p>
           <Gates s={s} />
           <Change s={s} />
@@ -169,6 +190,12 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
             {s.status === 'review' && (
               <button className="btn" disabled={!!busy} onClick={() => decide('approve')}>
                 {busy === 'approve' ? <Loader2 size={16} className="spin" /> : <GitMerge size={16} />} Approve &amp; merge
+              </button>
+            )}
+            {onlySizeFailed && (
+              <button className="btn" disabled={!!busy} onClick={recheckSize}
+                      title="Only the size failed: check it again with the current limit (it grows with each new scenario)">
+                {busy === 'recheck' ? <Loader2 size={16} className="spin" /> : <ShieldCheck size={16} />} Check the size again
               </button>
             )}
             <button style={ghost} disabled={!!busy} onClick={() => decide('reject')}>

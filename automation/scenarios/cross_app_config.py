@@ -1,8 +1,10 @@
 """Cross-app run configuration: which simulator plays each role, and the logins.
 
 Roles:
-  consumer — the diner (Consumer app, iPhone)
-  waiter   — Business app, waiter account
+  consumer    — the diner (Consumer app, iPhone)
+  participant — a SECOND diner account on its own iPhone (Consumer app), for flows
+                where host and participant both act; booted only by those flows
+  waiter      — Business app, waiter account
   kitchen  — Business app, kitchen account
 
 Waiter and kitchen are the SAME app with two accounts. They may run on the same
@@ -28,11 +30,12 @@ _CONFIG_PATH = Path(os.getenv(
     Path(__file__).resolve().parents[2] / "cross_app_config.json",
 ))
 
-ROLES = ("consumer", "waiter", "kitchen")
+ROLES = ("consumer", "participant", "waiter", "kitchen")
 
 # Env vars each role's credentials seed from, when the config file is first made.
 _ENV_SEED = {
     "consumer": ("VYA_CONSUMER_USER", "VYA_CONSUMER_PASSWORD"),
+    "participant": ("VYA_PARTICIPANT_USER", "VYA_PARTICIPANT_PASSWORD"),
     "waiter": ("VYA_BUSINESS_WAITER_USER", "VYA_BUSINESS_WAITER_PASSWORD"),
     "kitchen": ("VYA_BUSINESS_KITCHEN_USER", "VYA_BUSINESS_KITCHEN_PASSWORD"),
 }
@@ -40,6 +43,7 @@ _ENV_SEED = {
 # Sensible defaults when nothing is configured yet.
 _DEFAULT_DEVICES = {
     "consumer": "DA24A392-FF1B-4283-A5CE-CDDE0D000D21",   # iPhone 16 Pro
+    "participant": "BB34587D-3415-4A78-B791-B6A16AD276A3",  # iPhone 17 (its own sim)
     "waiter":   "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",   # iPad Pro 11"
     "kitchen":  "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B",   # same iPad (switch accounts)
 }
@@ -58,7 +62,11 @@ def list_ios_simulators() -> List[Dict[str, str]]:
 
 
 # Which kind of simulator each role needs.
-ROLE_KIND = {"consumer": "iPhone", "waiter": "iPad", "kitchen": "iPad"}
+ROLE_KIND = {"consumer": "iPhone", "participant": "iPhone", "waiter": "iPad", "kitchen": "iPad"}
+
+# Roles whose simulator is booted only by a flow that uses them, so a check that
+# "every configured simulator is up" must not count them.
+ON_DEMAND_ROLES = ("participant",)
 
 
 def local_udid_for(kind: str, preferred: Optional[str] = None,
@@ -95,6 +103,7 @@ _DEFAULT_MODEL = {
     "DA24A392-FF1B-4283-A5CE-CDDE0D000D21": "iPhone 16 Pro",
     "D19D3EC7-5494-4B69-AC7B-3AB8AE0B4D1B": "iPad Pro 11",
     "B1093E61-C510-4E6E-8A60-C2D05D150F64": "iPhone 16",
+    "BB34587D-3415-4A78-B791-B6A16AD276A3": "iPhone 17",
 }
 
 
@@ -103,7 +112,8 @@ def localize_devices(devices: Dict[str, str],
     """Replace every role device that does not exist on this Mac with a local one.
 
     Waiter and kitchen stay on ONE iPad when they were configured that way (the
-    shared-device account switch); consumer never shares with them.
+    shared-device account switch); consumer never shares with them, and the
+    participant never shares with the consumer (one app instance, one login).
     """
     sims = list_ios_simulators() if sims is None else sims
     if not sims:
@@ -112,6 +122,13 @@ def localize_devices(devices: Dict[str, str],
     shared = devices.get("waiter") == devices.get("kitchen")
     out["consumer"] = local_udid_for("iPhone", devices.get("consumer"), sims=sims) \
         or devices.get("consumer")
+    if "participant" in devices:
+        # local_udid_for keeps a preferred id that exists, so a participant set to
+        # the consumer's own sim is dropped here, not kept.
+        pref = devices.get("participant")
+        out["participant"] = local_udid_for(
+            "iPhone", None if pref == out["consumer"] else pref,
+            exclude=[out["consumer"]], sims=sims) or pref
     out["waiter"] = local_udid_for("iPad", devices.get("waiter"),
                                    exclude=[out["consumer"]], sims=sims) or devices.get("waiter")
     out["kitchen"] = out["waiter"] if shared else (
