@@ -17,11 +17,27 @@ strings the validator emits during a run, e.g.::
 
 so this module renders *real* numbers whenever those strings are present, and
 degrades gracefully (plain status) when they are not.
+
+Flows that check money themselves (flow_full_event) leave their tables ready-made as
+'[calc] {json}' notes and every sum that did not match as a '[mismatch]' note
+(automation/scenarios/invoice_check.py); every other step's '[ok]' line is read into a
+table of the same shape (automation/reporting/step_tables.py). Each table is drawn with
+only its failing rows red, and the mismatches are listed red under Failed At; the
+segment keeps the status the run recorded.
+
+What a run saw that did NOT fail it -- the app crashed and was relaunched, a spinner
+stayed up, an error toast, a slow screen or step, a known app bug worked around -- is
+listed in yellow under Failed At, after any red (automation/scenarios/run_issues.py),
+and counted in the header's Warnings.
 """
 from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Optional
+
+from automation.reporting.step_tables import tables_of
+from automation.scenarios.invoice_check import MISMATCH_PREFIX
+from automation.scenarios.run_issues import issues_of
 
 # ── HTML shell ─────────────────────────────────────────────────────────────
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -55,6 +71,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .stat .val { font-size: 28px; font-weight: 800; }
     .stat .lbl { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
     table { width: 100%; border-collapse: collapse; }
+    /* Fixed columns, as in the sample reports: a wide calculation table wraps inside its
+       column instead of pushing 'Failed At' off the page. */
+    table.main { table-layout: fixed; }
+    .td-bill table td, .td-bill table th { overflow-wrap: break-word; }
     thead th {
       background: #f7fafc; padding: 16px 20px; font-size: 16px; font-weight: 700;
       color: #333; border-bottom: 2px solid #e2e8f0; text-align: center;
@@ -62,7 +82,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     thead th:first-child { text-align: left; }
     td { padding: 14px 20px; border-bottom: 1px solid #edf2f7; font-size: 14px; vertical-align: top; }
     .td-c { text-align: center; }
-    .td-bill { padding: 16px 20px; font-size: 15px; line-height: 2.0; text-align: center; min-width: 500px; }
+    .td-bill { padding: 16px 20px; font-size: 15px; line-height: 2.0; text-align: center; }
     .muted { color: #999; }
     tr:hover td { background: #f7fafc; }
     @media print {
@@ -85,11 +105,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="stat"><div class="val">__TOTAL__</div><div class="lbl">Total</div></div>
       <div class="stat"><div class="val" style="color:#27ae60">__PASSED__</div><div class="lbl">Passed</div></div>
       <div class="stat"><div class="val" style="color:#e74c3c">__FAILED__</div><div class="lbl">Failed</div></div>
+      <div class="stat"><div class="val" style="color:#b7791f">__WARNINGS__</div><div class="lbl">Warnings</div></div>
       <div class="stat"><div class="val" style="color:#3182ce">__DURATION__</div><div class="lbl">Duration</div></div>
       <div class="stat"><div class="val" style="color:#805ad5">__PASS_RATE__%</div><div class="lbl">Pass Rate</div></div>
     </div>
 
-    <table>
+    <table class="main">
+      <colgroup>
+        <col style="width:13%"><col style="width:7%"><col style="width:8%">
+        <col style="width:55%"><col style="width:17%">
+      </colgroup>
       <thead>
         <tr>
           <th>Test Case</th>
@@ -187,7 +212,10 @@ def _extract_bill_check_sections(reasons: List[str]) -> List[Dict[str, Any]]:
                 'sum_excl': m.group(1), 'sum_vat': m.group(2), 'calculated': m.group(3),
                 'displayed': m.group(4), 'diff': m.group(5), 'pass': False,
             }
-        sections.append(section)
+        # A plain '[ok] Bill check: total €…, paid €…' (the B-App payment step) carries
+        # none of these: it is drawn from its '[calc]' table instead, not as an empty box.
+        if section['vat_rows'] or section.get('items_sum') or section.get('total_breakdown'):
+            sections.append(section)
 
     for i, s in enumerate(sections):
         s['label'] = ('Pre-Payment Bill Check' if i == 0 else
@@ -232,15 +260,59 @@ def _render_vat_table(vat_rows: List[Dict[str, Any]]) -> str:
     return html + '</table>'
 
 
+_CELL = 'border:1px solid #ccc;padding:4px 7px;text-align:center'
+
+
+def _render_calc_table(table: Dict[str, Any]) -> str:
+    """One '[calc]' table: its title, its head, a row per sum. A row's last value is
+    True / False / None (matches, does not, information); only the False rows are red."""
+    rows = [r for r in (table.get('r') or []) if isinstance(r, list) and r]
+    graded = any(isinstance(r[-1], bool) for r in rows)
+    head = list(table.get('h') or []) + (['Status'] if graded else [])
+    html = (f'<div style="font-weight:700;color:#1a202c;margin:14px 0 6px;'
+            f'border-top:1px solid #cbd5e1;padding-top:10px">{_esc(table.get("t"))}</div>'
+            '<table style="border-collapse:collapse;font-size:13px;margin:0 auto 16px">'
+            '<tr>' + ''.join(f'<th style="{_CELL};background:#f7f7f7;font-weight:600;'
+                             f'">{_esc(h)}</th>' for h in head) + '</tr>')
+    for r in rows:
+        status = r[-1] if isinstance(r[-1], bool) or r[-1] is None else None
+        cells = r[:-1] if (isinstance(r[-1], bool) or r[-1] is None) else r
+        color = '#e74c3c' if status is False else '#15803d' if status else '#333'
+        weight = ';font-weight:600' if status is False else ''
+        html += f'<tr style="color:{color}{weight}">' + ''.join(
+            f'<td style="{_CELL}">{_esc(c)}</td>' for c in cells)
+        if graded:
+            mark = ('PASS &#10003;' if status else 'FAIL &#10007;' if status is False else '')
+            html += f'<td style="{_CELL}">{mark}</td>'
+        html += '</tr>'
+    return html + '</table>'
+
+
+def _mismatches(record: Dict[str, Any]) -> List[str]:
+    """The sums of this segment that did not match, each once, in the order found."""
+    lines = [str(r)[len(MISMATCH_PREFIX):] for r in (record.get('reasons') or [])
+             if str(r).startswith(MISMATCH_PREFIX)]
+    return list(dict.fromkeys(lines))
+
+
+def _all_reasons(record: Dict[str, Any]) -> List[str]:
+    return ((record.get('consumer_reasons') or []) + (record.get('business_reasons') or [])
+            + (record.get('reasons') or []))
+
+
+def _has_calculation(record: Dict[str, Any]) -> bool:
+    reasons = _all_reasons(record)
+    return bool(tables_of(reasons) or _extract_bill_check_sections(reasons))
+
+
 def _build_validation_cell(record: Dict[str, Any]) -> str:
-    all_reasons = ((record.get('consumer_reasons') or [])
-                   + (record.get('business_reasons') or [])
-                   + (record.get('reasons') or []))
+    all_reasons = _all_reasons(record)
     sections = _extract_bill_check_sections(all_reasons)
-    if not sections:
+    tables = tables_of(all_reasons)
+    if not sections and not tables:
         return '<span style="color:#999">&mdash;</span>'
 
-    blocks = []
+    blocks = [''.join(_render_calc_table(t) for t in tables)] if tables else []
     for s in sections:
         lines = [f'<div style="font-weight:700;color:#1a202c;margin:10px 0 4px 0;font-size:14px">{s["label"]}</div>']
         if s.get('items_sum'):
@@ -310,16 +382,29 @@ def _format_failed_at_html(err: str) -> str:
             + '<br>'.join(lines) + '</div>')
 
 
+def _warnings(record: Dict[str, Any]) -> List[str]:
+    """What this segment saw that did not fail it, each once: 'App crash: …', 'Loading: …'
+    (never slowness: run_issues.KINDS)."""
+    return [f"{label}: {text}" for label, text in issues_of(record.get('reasons') or [])]
+
+
 def _build_failed_at_cell(record: Dict[str, Any]) -> str:
-    if record.get("status") == "PASS":
-        return '<span style="color:#27ae60">-</span>'
+    # The sums that did not match: red, one per line, whether or not a step failed too.
+    mism = ''.join(f'<div style="color:#e74c3c;font-weight:600;margin-top:8px;line-height:1.5">'
+                   f'{i}. {_esc(m)}</div>' for i, m in enumerate(_mismatches(record), 1))
+    # Then what did not fail it: yellow, one per line.
+    warn = ''.join(f'<div style="color:#b7791f;font-weight:500;margin-top:8px;line-height:1.5">'
+                   f'{i}. {_esc(w)}</div>' for i, w in enumerate(_warnings(record), 1))
+    if (record.get("status") or "").upper() == "PASS":
+        return (mism + warn) or '<span style="color:#27ae60">-</span>'
     err = record.get("error", "") or ""
     if not err:
-        return '<span style="color:#c0392b">Failure</span>'
+        return (mism + warn) or '<span style="color:#c0392b">Failure</span>'
     structured = _format_failed_at_html(err)
     if structured:
-        return structured
-    return f'<span style="font-size:13px">{_esc(err[:400])}{"…" if len(err) > 400 else ""}</span>'
+        return mism + structured + warn
+    return mism + (f'<span style="font-size:13px">{_esc(err[:400])}'
+                   f'{"…" if len(err) > 400 else ""}</span>') + warn
 
 
 def _app_label(record: Dict[str, Any]) -> str:
@@ -356,7 +441,11 @@ def _screenshot_html(record: Dict[str, Any]) -> str:
 
 def _build_row(record: Dict[str, Any], index: int, include_screenshots: bool = True) -> str:
     bg = "#ffffff" if index % 2 == 0 else "#f8fafc"
-    name = _esc(record.get("name", "Unknown"))
+    # 'Waiter: quantities +1 / -1, remove a product' -> the role in bold, what the
+    # segment does in grey under it (the sample reports' test-case column).
+    who, sep, what = (record.get("name") or "Unknown").partition(": ")
+    name = _esc(who) + (f'<div style="font-weight:400;font-size:13px;color:#718096;'
+                        f'margin-top:4px;line-height:1.5">{_esc(what)}</div>' if sep else "")
     num = _esc(record.get("num", ""))
     test_case = f"{num}. {name}" if num else name
 
@@ -419,11 +508,24 @@ def render_run_report(records: List[Dict[str, Any]], *, title: str,
     total = len(records)
     passed = sum(1 for r in records if (r.get("status") or "").upper() == "PASS")
     failed = sum(1 for r in records if (r.get("status") or "").upper() == "FAIL")
+    warnings = sum(len(_warnings(r)) for r in records)
     pass_rate = round((passed / total) * 100) if total else 0
 
-    rows_html = "\n        ".join(
-        _build_row(r, i, include_screenshots=include_screenshots)
-        for i, r in enumerate(records))
+    # The segments that calculated something come first, in order; a passed segment with
+    # no calculation (a quantity change, the kitchen, send / serve) is listed at the end,
+    # just passed (the user, 2026-11-04: "these all keep it last like just passed").
+    plain = [r for r in records if (r.get("status") or "").upper() == "PASS"
+             and not _has_calculation(r)]
+    first = [r for r in records if not any(r is p for p in plain)]
+    rows = [_build_row(r, i, include_screenshots=include_screenshots)
+            for i, r in enumerate(first)]
+    if first and plain:
+        rows.append('<tr><td colspan="5" style="padding:10px 20px;background:#edf2f7;'
+                    'color:#4a5568;font-size:13px;font-weight:600">Passed — no calculation '
+                    'in these segments</td></tr>')
+    rows += [_build_row(r, len(first) + i, include_screenshots=include_screenshots)
+             for i, r in enumerate(plain)]
+    rows_html = "\n        ".join(rows)
     if not rows_html:
         rows_html = ('<tr><td colspan="5" style="text-align:center;padding:40px;color:#999">'
                      'No scenario results for this run yet</td></tr>')
@@ -435,6 +537,7 @@ def render_run_report(records: List[Dict[str, Any]], *, title: str,
             .replace("__TOTAL__", str(total))
             .replace("__PASSED__", str(passed))
             .replace("__FAILED__", str(failed))
+            .replace("__WARNINGS__", str(warnings))
             .replace("__DURATION__", _esc(duration))
             .replace("__PASS_RATE__", str(pass_rate))
             .replace("__ROWS__", rows_html))

@@ -323,3 +323,45 @@ def test_epay_taps_inside_pay_when_its_text_answers_the_hit_test(monkeypatch, pa
     notes = []
     assert r._consumer_epay(notes), notes
     assert s.taps == ["ePayment", "Pay (inside)"]
+
+
+def test_a_checkout_begun_before_is_re_initiated_so_the_pay_for_sheet_opens(monkeypatch):
+    """MEASURED 2026-11-04 (flow_full_event seg 17, run 60355a70): the run before had
+    claimed Guest 1 + Guest 2 and stopped at the coupon, so Checkout asked 'Re-Initiate
+    Checkout ?' (no ids). NO only closes it (UpcomingCard.js:1019-1021) and the pay-for
+    step found nothing; YES, RE-CHECKOUT resets the payer and opens the pay-for sheet."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+    event = [el("Vya Consumer", 0, 0, 402, 874), el("RoopaDClose", 300, 200),
+             el("TODAY", 40, 230), el("10:38", 150, 230), el("TICKET: 5606", 200, 420),
+             el("RoopaDfinishedCard", 20, 600, 362, 51)]
+    dialog = [el("Vya Consumer", 0, 0, 402, 874), el("Re-Initiate Checkout ?", 40, 200),
+              el("YES, RE-CHECKOUT", 40, 500), el("NO", 40, 560)]
+    pay_for = [el("Vya Consumer", 0, 0, 402, 874), el("Guest 1pay", 40, 300),
+               el("Guest 2pay", 120, 300), el("proceedPayment", 40, 700)]
+    state = {"screen": event, "tapped": []}
+
+    def tap_el(udid, e, els=None, scroll=True):
+        state["tapped"].append(caf._idbd.name(e))
+        if caf._idbd.name(e) == "RoopaDfinishedCard":
+            state["screen"] = dialog
+        return True, "idb"
+
+    def tap(udid, names, els=None, scroll=True):
+        state["tapped"].append(names[0])
+        if names == ["YES, RE-CHECKOUT"]:
+            state["screen"] = pay_for
+        return True, "idb"
+
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: list(state["screen"]))
+    monkeypatch.setattr(caf._idbd, "tap_el", tap_el)
+    monkeypatch.setattr(caf._idbd, "tap", tap)
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: None)
+    r = FlowRunner.__new__(FlowRunner)
+    r.devices = {"consumer": "IPHONE"}
+    r._booked_slot, r._booked_ticket = "10:38", "5606"
+    notes = []
+    assert r._consumer_checkout(None, notes), notes
+    assert "YES, RE-CHECKOUT" in state["tapped"] and "NO" not in state["tapped"]
+    assert state["screen"] is pay_for and "re-initiated" in notes[-1]

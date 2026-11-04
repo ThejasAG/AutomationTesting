@@ -182,3 +182,35 @@ are not the checked-out source).
 - Split share = line / (k+1). Comp n % → the line's compWithVAT (server).
 - Consumer coupon: % → total × (1 − pct/100); fixed → total − price; only if base ≥
   `offerAbove`. Tip added on top. Invoice total = Σ brackets + paid-for + tip.
+
+## Money checks and the run report (automation/scenarios/invoice_check.py)
+`@w_invoice` and `@c_invoice` read the whole invoice and recalculate it. `@pay_stripe`,
+`@consumer_epay` (bill vs Stripe's charge), `@c_coupon` / `@w_discount` (Total before × (1 −
+the tile's %), or − its €), `@c_tip` / `@w_tip` (Total before + tip) check the payments. A sum
+that does not match becomes a `[mismatch]` note and the step PASSES, so the segment and the
+run go on (the table closes, both invoices get read); `@invoice_verdict` (last step of the
+flow) repeats every one as a red `[mismatch]` line and passes (the user, 2026-11-04: "make
+the 21 passed"); it fails only when no invoice was checked. A missing control, or no coupon
+to take, still FAILs. Every check also leaves a `[calc] {json}` note: the table the run's
+HTML report draws (Run Details → Report, or Reports; automation/reporting/scenario_report.py),
+only failing rows red and the mismatches listed red under Failed At; the segment keeps the
+status the run recorded (a mismatch alone does not turn it FAILED). The report shows ONLY
+calculations: steps without their own table are read from their '[ok]' line by
+automation/reporting/step_tables.py (Pre-payment Total, the waiter's adds with each
+person's share, split before/after, comps with unit price / comp amount / expected line,
+outstanding balance, the verdict); a passed segment with no calculation is listed last,
+just passed. Slow steps are never shown (run_issues.KINDS) -- automation slowness is not
+an app issue.
+Step lists and `agent_tools run-info` hide `[calc]` notes.
+- In each block: Excl + VAT = ATI per VAT row; VAT not above its rate (size prices carry
+  none, so below is normal); VAT rows' ATI + Tip = Total; Total − Discount = final Total;
+  payments − Total = Due or what the run overpaid on purpose.
+- Dishes add up to the Total on the Pre-Order block and the phone's On Premises block. The
+  event invoice's on-premises dishes do NOT: it prints their price before comps and not the
+  comps (InvoiceModal), so that sum cannot be made there and the notes say so.
+- Against the run's own notes (`[ok] Bill check`, `@pay_stripe`, `@consumer_epay`, `@c_tip`,
+  `@w_tip`; changing their wording means changing the regexes there): the Totals and Tip
+  equal what was paid. The event invoice takes everyone's, the phone's that diner's.
+  Not compared when a payment was skipped or repeated.
+- MEASURED 2026-10-29 on `main`: VAT 3.26 on 111.36 at 3 % (the most is 3.24), the source's
+  VYP-106 rounding, derived from the ATI on preprod-2-May18.

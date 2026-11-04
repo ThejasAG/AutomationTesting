@@ -11,9 +11,10 @@ project folder. Output is plain text.
   show-flow FLOW                    the flow's segments and steps as they run now
   steps                             every step form, @token (+ its handler) and shared block
   history FLOW                      the flow's last runs and where each failed
-  run FLOW [--resume RUN] [--label L] [--max SEC]
+  run FLOW [--resume RUN] [--label L] [--max SEC] [--until N]
                                     run one flow on the simulators, with THIS checkout's
-                                    code, and wait for it (one at a time)
+                                    code, and wait for it (one at a time); --until N stops
+                                    once segment N passed (resume it to go on)
   wait RUN [--max SEC]              keep waiting for a run `run` returned early on
   run-info RUN                      segments, errors, notes, rule verdict, screenshot files
   check-flows                       does cross_app_flows.py import, is every @token handled?
@@ -531,6 +532,8 @@ def cmd_run(a) -> int:
     if a.resume:
         cmd += ["--resume", a.resume]
     env = dict(os.environ, PYTHONPATH=CODE_ROOT)
+    if a.until:
+        env["FLOW_STOP_AFTER"] = str(a.until)
     t0 = time.time()
     proc = subprocess.Popen(cmd, cwd=CODE_ROOT, stdout=log, stderr=subprocess.STDOUT, env=env,
                             start_new_session=True)
@@ -779,6 +782,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--resume")
     s.add_argument("--label", default="run")
     s.add_argument("--max", type=int, default=DEFAULT_WAIT_S)
+    s.add_argument("--until", type=int, default=0)
     s.set_defaults(fn=cmd_run)
     s = sub.add_parser("wait")
     s.add_argument("run_id")

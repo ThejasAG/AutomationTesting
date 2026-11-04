@@ -139,6 +139,74 @@ def test_ready_is_read_where_it_is_after_selecting_scrolled_the_ticket(kitchen):
     assert b.taps[-2:] == ["orderReadyBtn", "orderCloseBtn"]
 
 
+class LongBoard(Board):
+    """A 14-item ticket that runs past the screen (MEASURED 2026-11-04, ticket 5606: dots
+    from y 318 to 1546, Ready at 1667 on an 834-high screen). The board scrolls with a
+    drag; a tap below the screen lands nowhere and a dot there reads no colour."""
+
+    def __init__(self, **kw):
+        super().__init__(items=tuple(f"Dish{i}Btn" for i in range(14)), ticket="5606", **kw)
+        self.offset = 0                      # how far the board is dragged up
+
+    def els(self):
+        out = super().els()
+        for e in out[1:]:
+            n = dv.name(e)
+            if n in self.items or n in ("orderPrintBtn", "orderReadyBtn", "orderCloseBtn",
+                                        self.ticket):
+                f = e["frame"]
+                if n in self.items:
+                    f["y"] = 320 + 90 * self.items.index(n) - self.offset
+                elif n == self.ticket:
+                    f["y"] = 164 - self.offset
+                else:
+                    f["y"] = 320 + 90 * len(self.items) - self.offset
+        return out
+
+    def _on_screen(self, e):
+        return 0 <= dv.frame(e)[1] <= 834
+
+    def tap(self, udid, e, els=None, scroll=True):
+        n = dv.name(e)
+        live = next((x for x in self.els() if dv.name(x) == n), None)
+        if live is not None and not self._on_screen(live):
+            self.taps.append(f"{n} (off screen)")
+            return True, "idb"               # idb taps the point: nothing there
+        return super().tap(udid, live or e, els, scroll)
+
+    def swipe(self, udid, x0, y0, x1, y1, duration=1.0):
+        self.offset = max(0, min(1600, self.offset + (y0 - y1)))
+        return True
+
+    def colours(self, udid, points, els=None, radius=1.5):
+        return [None if not 0 <= y <= 834 else c
+                for (x, y), c in zip(points, super().colours(udid, points, els, radius))]
+
+
+def test_a_ticket_longer_than_the_screen_has_every_dot_selected(monkeypatch):
+    b = LongBoard()
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: b.els())
+    monkeypatch.setattr(caf._idbd, "tap_el", b.tap)
+    monkeypatch.setattr(caf._idbd, "tap", lambda udid, names, els=None, scroll=True:
+                        b.tap(udid, {"AXLabel": names[0]}))
+    monkeypatch.setattr(caf._idbd, "sample_colors", b.colours)
+    monkeypatch.setattr(caf._idbd, "swipe", b.swipe)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    runner = FlowRunner.__new__(FlowRunner)
+    runner.devices = {"waiter": "IPAD", "kitchen": "IPAD"}
+    runner._booked_ticket = "5606"
+    notes = []
+
+    class R:
+        class d:
+            @staticmethod
+            def find_elements(*a):
+                return []
+    assert FlowRunner._kitchen_ready(runner, R(), notes), notes
+    assert b.completed == set(b.items), "every dish readied"
+    assert not any("off screen" in t for t in b.taps if "Btn" in t and "order" not in t)
+
+
 def test_nav_rail_is_never_taken_for_a_product(kitchen):
     ok, notes, b = kitchen()
     assert "inventoryBtn" not in b.taps and "historyBtn" not in b.taps
@@ -247,3 +315,25 @@ def test_a_ticket_already_prepared_is_just_closed(monkeypatch):
     notes = []
     assert FlowRunner._kitchen_ready(runner, None, notes)
     assert tapped == [("orderCloseBtn", 636)] and "already prepared" in notes[-1]
+
+
+def test_a_resumed_run_whose_ticket_left_the_board_was_readied_last_time(monkeypatch):
+    # MEASURED 2026-11-02 (run cc43a98c): @kitchen_ready hit its limit with ticket 5601
+    # on the board; the step thread went on, readied and closed it, and the board (it
+    # hides closed tickets) no longer listed 5601.
+    runner = _runner(monkeypatch, _two_cards(), "5601")
+    runner._resume, runner._rerun = {"start_at": 6, "retry": True}, True
+    monkeypatch.setattr(FlowRunner, "_kitchen_select_items",
+                        lambda *a: pytest.fail("must not touch another run's ticket"))
+    notes = []
+    assert FlowRunner._kitchen_ready(runner, None, notes)
+    assert "no longer on the kitchen board" in notes[-1] and "resumes" in notes[-1]
+
+
+def test_a_first_attempt_in_a_resumed_run_still_needs_the_ticket(monkeypatch):
+    # One segment per run (`--until`): every run is a resume, most segments run fresh.
+    runner = _runner(monkeypatch, _two_cards(), "5601")
+    runner._resume, runner._rerun = {"start_at": 6, "retry": False}, False
+    notes = []
+    assert not FlowRunner._kitchen_ready(runner, None, notes)
+    assert "is not on the kitchen board" in notes[-1]

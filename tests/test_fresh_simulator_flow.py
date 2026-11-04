@@ -15,8 +15,9 @@ def test_consumer_prewarm_sets_metro_before_attaching():
     # The prewarm launches the app; without Metro set first the session held a
     # "No bundle URL present" instance for the whole run.
     src = inspect.getsource(F.FlowRunner._prewarm_sessions)
-    # needs_metro=True for both diners' phones (consumer :8100, participant :8102).
-    assert "else 8100, True)" in src
+    # needs_metro=True for both diners' phones (consumer :8100, participant :8102); the
+    # targets are chosen in _prewarm_targets (only the devices this run's segments use).
+    assert "else 8100, True)" in inspect.getsource(F.FlowRunner._prewarm_targets)
     assert "ensure_app_metro" in src
 
 

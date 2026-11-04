@@ -4,7 +4,8 @@ import ReactMarkdown from 'react-markdown';
 import {
   FileText, X, Loader2, Download, Sparkles, CheckCircle2, AlertTriangle, Clock, Smartphone, Bug, FileDown,
 } from 'lucide-react';
-import { getReports, getReport, generateReport, getReportTrends, getReportConfig, fileJira, API_BASE, getHeaders } from '../api';
+import { getReports, getReport, generateReport, getReportTrends, getReportConfig, fileJira } from '../api';
+import { openRichReport } from '../richReport';
 import type { ReportRow, FullReport, ReportTrends } from '../api';
 import ModalPortal from '../components/ModalPortal';
 import { formatDistanceToNow } from 'date-fns';
@@ -37,20 +38,6 @@ function VerdictBadge({ verdict }: { verdict: string }) {
   return <span className={`badge ${statusColor(verdict)}`}>{verdict}</span>;
 }
 
-// The rich report endpoint requires a login. window.open() performs a plain
-// browser navigation with no Authorization header, so it 401s — fetch the HTML
-// with credentials and open that instead of leaving the endpoint unprotected.
-async function openRichReport(runId: string) {
-    const tab = window.open('', '_blank');
-    try {
-        const res = await fetch(`${API_BASE}/reports/${runId}/rich`, { headers: getHeaders() });
-        if (!res.ok) throw new Error(`Report failed to load (${res.status})`);
-        const html = await res.text();
-        if (tab) { tab.document.open(); tab.document.write(html); tab.document.close(); }
-    } catch (e) {
-        if (tab) tab.document.body.innerText = `Could not open the report: ${(e as Error).message}`;
-    }
-}
 
 export default function ReportsPage() {
   const [rows, setRows] = useState<ReportRow[]>([]);

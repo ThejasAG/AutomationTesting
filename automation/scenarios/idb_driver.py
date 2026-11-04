@@ -30,10 +30,11 @@ Anything idb cannot confirm returns False, and the caller falls back to Appium
 from __future__ import annotations
 
 import json
+import re
 import logging
 import subprocess
 import time
-from typing import List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from automation.scenarios.idb_coords import to_device
 from automation.scenarios.idb_path import idb_binary
@@ -51,14 +52,30 @@ def _idb(args: Sequence[str], timeout: float = 20.0) -> str:
                           timeout=timeout).stdout
 
 
+# Called with (udid, els) after every read that saw a screen: the run's issue watch
+# (run_issues.StepWatch) looks at the screens the steps read anyway. A hook can never
+# break a read.
+READ_HOOKS: List[Callable[[str, List[dict]], None]] = []
+
+
 def describe_all(udid: str) -> List[dict]:
-    """Every element on screen as idb's raw dicts ([] if idb is unavailable)."""
+    """Every element on screen as idb's raw dicts ([] if idb is unavailable).
+
+    40s: a big order on a loaded Mac reads in 9-25s, and a read cut off at 20s also
+    costs the worker (killed, restarted) -- MEASURED 2026-11-02, a step spent 277s so."""
     try:
-        out = _idb(["ui", "describe-all", "--udid", udid])
-        return json.loads(out) if out.strip().startswith("[") else []
+        out = _idb(["ui", "describe-all", "--udid", udid], timeout=40.0)
+        els = json.loads(out) if out.strip().startswith("[") else []
     except Exception as e:
         logger.debug("describe-all %s: %s", udid[:8], e)
         return []
+    if els:
+        for hook in list(READ_HOOKS):
+            try:
+                hook(udid, els)
+            except Exception:
+                logger.debug("read hook failed", exc_info=True)
+    return els
 
 
 def describe_point(udid: str, px: int, py: int) -> dict:
@@ -107,14 +124,20 @@ def _is_target(hit: dict, target: dict) -> bool:
         return False
     if name(target) and name(hit) == name(target):
         return True
-    if name(hit):
-        return False
     hx, hy, hw, hh = frame(hit)
     tx, ty, tw, th = frame(target)
     if hw <= 0 or hh <= 0:
         return False
-    return (hx >= tx - 1 and hy >= ty - 1
-            and hx + hw <= tx + tw + 1 and hy + hh <= ty + th + 1)
+    inside = (hx >= tx - 1 and hy >= ty - 1
+              and hx + hw <= tx + tw + 1 and hy + hh <= ty + th + 1)
+    if name(hit):
+        # Its own caption is part of it: 'Close' inside 'RoopaDClose' (MEASURED
+        # 2026-11-04, the Wallet's open event could not be folded). A name that is
+        # not in the target's own ('Wallet' over the card) is something else.
+        own = re.sub(r"\s+", "", name(hit)).lower()
+        return (inside and hit.get("type") == "StaticText" and len(own) >= 3
+                and own in name(target).lower())
+    return inside
 
 
 def _probe(udid: str, e: dict) -> dict:

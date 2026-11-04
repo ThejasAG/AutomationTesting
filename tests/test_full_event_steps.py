@@ -52,7 +52,8 @@ class Menu:
                              "groups": [{"small", "large"}, {"veg", "nonveg"}]},
     }
 
-    def __init__(self, other_booking_cart=False, left_in_cart=None):
+    def __init__(self, other_booking_cart=False, left_in_cart=None, slow_close=0):
+        self.slow_close, self.closing = slow_close, 0
         self.dragged = self.searching = False
         self.typed = ""
         self.counts = {p: 0 for p in self.PRODUCTS}
@@ -64,6 +65,10 @@ class Menu:
         self.taps = []
 
     def describe_all(self, udid):
+        if self.closing:
+            self.closing -= 1
+            if not self.closing:
+                self.sheet = None
         out = [el("Vya Consumer", 0, 0, 402, 874, "Application"),
                el("cartImage", 20, 778, 362, 48)]
         if self.dialog == "prev":
@@ -126,7 +131,9 @@ class Menu:
             groups = self.PRODUCTS[self.sheet["pid"]]["groups"]
             if all(g & self.sheet["opts"] for g in groups):
                 self.counts[self.sheet["pid"]] += self.sheet["qty"]
-                self.sheet = None
+                self.closing = self.slow_close
+                if not self.closing:
+                    self.sheet = None
         return True, "idb"
 
     def tap_el(self, udid, e, els=None, scroll=True):
@@ -196,6 +203,26 @@ def test_c_add_lists_what_the_sheet_offers_for_an_unknown_option(menu):
     assert "no option 'huge'" in notes[-1] and "large" in notes[-1]
 
 
+def test_c_add_waits_for_a_sheet_that_closes_slowly(menu):
+    # MEASURED 2026-11-02 (run 24abc8d2): Add to cart worked, the sheet took over 6s to go
+    # on a busy Mac, and the dish was reported as needing an option it does not have.
+    ok, notes, m = menu("Penne Pollo", slow_close=15)
+    assert ok, notes
+    assert m.counts["PennePollo"] == 1
+
+
+def test_a_resumed_segment_does_not_add_a_dish_twice(monkeypatch, clock):
+    # MEASURED 2026-11-02 (run 24abc8d2): the failed run's unpaid cart was still on the phone.
+    m = Menu(left_in_cart={"PennePollo": 2})
+    install(monkeypatch, m)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices, fr._resume = "IPHONE", {}, {"start_at": 1}
+    notes = []
+    assert fr._c_add_product("Penne Pollo*2", notes), notes
+    assert m.counts["PennePollo"] == 2 and "already in the cart" in notes[-1]
+    assert not any(t.endswith("Inc") for t in m.taps)
+
+
 def test_c_add_empties_another_bookings_cart_first(menu):
     ok, notes, m = menu("Penne Pollo", other_booking_cart=True)
     assert ok, notes
@@ -239,6 +266,8 @@ class Ipad:
     PROFILES = ["RoopaD", "NooluNaga", "Guest1", "Guest2"]
     OPTIONS = {"PizzaMargheritas": ["small", "large", "veg", "nonveg"], "PennePollo": []}
     PRICE = {"PennePollo": 17.51, "PizzaMargheritas": 22.58}
+    PER_DISH_IDS = False               # the Summary's '+' as `<pid>Increase`
+    OCR = "clean"                      # how Vision reads the Custom Selections panel
 
     def __init__(self):
         self.rows = []                 # (pid, price)
@@ -247,6 +276,7 @@ class Ipad:
         self.ticked = set()
         self.picked = set()
         self.custom = None             # the Custom Selections panel: pid
+        self.row_dx = 0                # how far the dialog's avatar row is scrolled
         self.taps = []
 
     def describe_all(self, udid):
@@ -254,9 +284,9 @@ class Ipad:
                el("historyBtn", 26, 155, 43, 50)]
         if self.dialog:
             for i, p in enumerate(self.PROFILES):
-                out.append(el(f"{p}select", 300 + 90 * i, 300, 60, 60))
+                out.append(el(f"{p}select", 300 + 90 * i + self.row_dx, 300, 60, 60))
                 if p in self.picked:
-                    out.append(el(f"{p}close", 340 + 90 * i, 290, 20, 20))
+                    out.append(el(f"{p}close", 340 + 90 * i + self.row_dx, 290, 20, 20))
             return out + [el("assignProductsBtn", 300, 600, 200, 60),
                           el("assignProductsBtn", 650, 600, 200, 60)]
         if self.sheet:
@@ -271,7 +301,8 @@ class Ipad:
                 y = 156 + 40 * i
                 out += [el(f"{p}card", 827, y, 126, 36), el("removeItem", 1100, y + 13, 30, 10),
                         el(str(n), 1137, y + 8, 9, 21, "StaticText"),
-                        el("incrementQuantity", 1153, y + 13, 30, 10)]
+                        el(f"{p}Increase" if self.PER_DISH_IDS else "incrementQuantity",
+                           1153, y + 13, 30, 10)]
             if self.pane:
                 out += [el(f"{o}CheckBtn", 807, 300 + 44 * i, 180, 44)
                         for i, o in enumerate(self.OPTIONS[self.pane])]
@@ -301,7 +332,7 @@ class Ipad:
                 self.pane = False
         elif n == "assignToBtn" and self.staged:
             self.dialog = True
-        elif n == "incrementQuantity" and self.staged:
+        elif n in ("incrementQuantity", f"{next(iter(self.staged), '')}Increase") and self.staged:
             self.custom = next(iter(self.staged))
         elif n.endswith("select"):
             self.picked.add(n[:-6])
@@ -316,9 +347,17 @@ class Ipad:
         self.taps.append("Assign" if x < 600 else "Split")
         return True, "idb"
 
+    def swipe(self, udid, x1, y1, x2, y2, duration=0.25):
+        last = 300 + 90 * (len(self.PROFILES) - 1) + 60
+        self.row_dx = min(0, max(850 - last, self.row_dx + (x2 - x1)))
+        self.taps.append("drag")
+
     def tap_el(self, udid, e, els=None, scroll=True):
         if caf._idbd.name(e) == "assignProductsBtn":
             return self.press_assign(caf._idbd.frame(e)[0])
+        if caf._idbd.name(e).endswith("select") and not (
+                300 <= caf._idbd.frame(e)[0] and sum(caf._idbd.frame(e)[::2]) <= 850):
+            return True, "idb"         # outside the dialog: lands on the backdrop
         return self._press(caf._idbd.name(e))
 
     def tap(self, udid, names, els=None, scroll=True, wait=0.0):
@@ -331,8 +370,14 @@ class Ipad:
         return True, "idb"
 
     def read_text(self, udid, region=None, els=None, accurate=False):
-        return [("X", 951, 272, 12, 12), ("1", 980, 271, 14, 13), ("+", 1008, 268, 19, 19)] \
-            if self.custom else []
+        if not self.custom:
+            return []
+        n = self.staged[self.custom]
+        if self.OCR == "merged":       # MEASURED: 'X' [945,264,14,13], '1t' [972,261,50,17]
+            return [("X", 945, 264, 14, 13), (f"{n}t", 972, 261, 50, 17)]
+        if self.OCR == "x_only":
+            return [("X", 945, 264, 14, 13)]
+        return [("X", 951, 272, 12, 12), (str(n), 980, 271, 14, 13), ("+", 1008, 268, 19, 19)]
 
     def tap_point(self, udid, x, y):
         if self.custom and 1000 <= x <= 1030 and 260 <= y <= 290:
@@ -376,6 +421,66 @@ def test_w_add_picks_checkbtn_options_once_and_sets_the_quantity_with_the_summar
     assert "homeBtn" not in s.taps and "historyBtn" not in s.taps, "the side bar is not an option"
     assert [p for p, _ in s.rows] == ["PizzaMargheritas"] * 2
     assert "0 → 2 row(s)" in notes[-1] and "+90.32 € on the order" in notes[-1]
+
+
+def test_w_add_finds_the_summary_plus_by_its_per_dish_id(monkeypatch, ipad):
+    # MEASURED 2026-11-02 (run 9f8ad3f6): '+' read `Coca-Cola®Light1.0lIncrease`, not
+    # `incrementQuantity`: "the Summary line has no '+'" with the '+' on screen.
+    monkeypatch.setattr(Ipad, "PER_DISH_IDS", True)
+    ok, notes, _pad = ipad("Penne Pollo*3 > split: Guest 1, Guest 2")
+    assert ok, notes
+
+
+def test_w_add_drags_the_avatar_row_to_reach_someone_outside_the_dialog(ipad):
+    # MEASURED 2026-11-02 (run db8be6c1): with 7 people Guest 5 sits beyond the dialog's
+    # edge, and "tapped Guest 5 but they did not get selected".
+    wide = Ipad()
+    wide.PROFILES = ["RoopaD", "NooluNaga", "Guest1", "Guest2", "Guest3", "Guest4", "Guest5"]
+    ok, notes, _pad = ipad("Penne Pollo*3 > split: Guest 4, Guest 5", screen=wide)
+    assert ok, notes
+    assert "drag" in wide.taps and wide.taps[-1] == "Split"
+
+
+@pytest.mark.parametrize("mode,cards,done", [
+    ("split", {"Guest 1": ["Penne Pollo x 2/3"], "Guest 2": ["Penne Pollo x 1/3"]}, True),
+    ("split", {"Guest 1": ["Penne Pollo x 2/3"], "Guest 2": []}, False),
+    ("split", {"Guest 1": ["Penne Pollo x 2"], "Guest 2": ["Penne Pollo x 1/3"]}, False),
+    ("assign", {"Guest 1": ["Penne Pollo x 2"], "Guest 2": ["Penne Pollo x 2/2"]}, True),
+    ("assign", {"Guest 1": ["Spaghetti Bolognese x 1"], "Guest 2": []}, False),
+])
+def test_w_add_knows_when_a_resumed_run_already_added_the_dish(mode, cards, done):
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._owner_lines = lambda udid, who, raw=False: cards.get(who, [])
+    assert fr._w_add_done("IPAD", "Penne Pollo", mode, list(cards)) is done
+
+
+def test_w_add_done_is_unknown_when_a_card_cannot_be_read():
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._owner_lines = lambda udid, who, raw=False: (None if who == "Guest 5"
+                                                     else ["Penne Pollo x 1/2"])
+    assert fr._w_add_done("IPAD", "Penne Pollo", "split", ["Guest 4", "Guest 5"]) is None
+
+
+def test_a_resumed_w_add_never_adds_blind_when_the_cards_cannot_be_read(monkeypatch):
+    # MEASURED 2026-11-02 (run 7c4df97b): the resumed segment added the 5 split Coca-Cola
+    # again ('7 → 0 row(s)': seven rows of it were already on the order).
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices, fr._resume = "IPAD", {}, {"start_at": 2}
+    fr._w_add_done = lambda udid, product, mode, people: None
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    monkeypatch.setattr(caf._idbd, "describe_all",
+                        lambda udid: pytest.fail("went on to add the dish"))
+    notes = []
+    assert not fr._w_add_item(None, "Coca-Cola® Light 1.0l*5 > split: Guest 1, Guest 2", notes)
+    assert "not adding it again" in notes[-1]
+
+
+@pytest.mark.parametrize("ocr", ["merged", "x_only"])
+def test_w_add_finds_the_custom_selections_plus_when_ocr_misreads_it(monkeypatch, ipad, ocr):
+    # MEASURED 2026-11-02 (run 4ebed5e7): the count and '+' read as one word, '1t'.
+    monkeypatch.setattr(Ipad, "OCR", ocr)
+    ok, notes, _pad = ipad("Penne Pollo*3 > split: Guest 1, Guest 2")
+    assert ok, notes
 
 
 def test_w_add_splits_with_the_right_button(ipad):
@@ -530,6 +635,83 @@ def test_w_qty_remove_steps_down_to_one_then_removes(monkeypatch, clock):
     ok, notes, c = qty(monkeypatch, clock, "Guest 5/Pizza Salamees remove", n=2)
     assert ok, notes
     assert c.taps == ["decrementQuantity", "removeItem"] and c.n == 0
+
+
+class SlowFoldingCards(Cards):
+    """The server takes *delay* s to apply a change; the reload folds the card, so its
+    lines stay hidden until it is tapped open again."""
+
+    def __init__(self, n=5, delay=90.0, clock=None):
+        super().__init__(n)
+        self.delay, self.clock, self.due, self.folded = delay, clock, None, False
+
+    def describe_all(self, udid):
+        if self.due is not None and self.clock["t"] >= self.due[0]:
+            self.n, self.due, self.folded = self.due[1], None, True
+        out = super().describe_all(udid)
+        if self.folded:
+            out = [e for e in out if "accordionCard" in e["AXLabel"]
+                   or e["type"] == "Application"]
+        return out
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        n = caf._idbd.name(e)
+        self.taps.append(n)
+        if "Guest5accordionCard" in n:
+            self.folded = False
+        elif n in ("decrementQuantity", "incrementQuantity", "removeItem"):
+            to = 0 if n == "removeItem" else self.n + (1 if n == "incrementQuantity" else -1)
+            self.due = (self.clock["t"] + self.delay, to)
+        return True, "idb"
+
+
+def test_w_qty_waits_for_a_slow_server_and_reopens_a_folded_card(monkeypatch, clock):
+    # MEASURED 2026-11-02 (run 0fc4ea4a): "tapped Decrease but Guest 3's Pizza
+    # Margheritas stayed at 2" after 228.8s; the card read 1 right after.
+    c = SlowFoldingCards(n=2, delay=90.0, clock=clock)
+    install(monkeypatch, c)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    notes = []
+    assert fr._w_qty("Guest 5/Pizza Salamees =1", notes), notes
+    assert c.n == 1 and "2 → 1" in notes[-1]
+
+
+class SharedLineCards(SlowFoldingCards):
+    """Guest 5's card also holds a shared Coca-Cola line, as on the real order."""
+
+    ignore = False
+
+    def describe_all(self, udid):
+        out = super().describe_all(udid)
+        if not self.folded:
+            out.append(el("Coca-Cola® Light 1.0l x 5/5", 839, 440, 229, 16, "StaticText"))
+        return out
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if self.ignore and caf._idbd.name(e) == "removeItem":
+            self.taps.append("removeItem")
+            return True, "idb"
+        return super().tap_el(udid, e, els, scroll)
+
+
+@pytest.mark.parametrize("ignore", [False, True])
+def test_w_qty_remove_is_judged_on_an_open_card(monkeypatch, clock, ignore):
+    c = SharedLineCards(n=1, delay=40.0, clock=clock)
+    c.ignore = ignore
+    install(monkeypatch, c)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    notes = []
+    assert fr._w_qty("Guest 5/Pizza Salamees remove", notes) is not ignore, notes
+    if not ignore:
+        assert c.n == 0 and "1 → removed" in notes[-1]
+    else:
+        assert "still in Guest 5's card" in notes[-1]
+
+
+def test_w_qty_is_a_heavy_step():
+    assert caf._step_limit("@w_qty:Guest 3/Pizza Margheritas remove") == caf.STEP_TIMEOUT_HEAVY
 
 
 def test_w_qty_on_another_profile_does_not_touch_guest_5(monkeypatch, clock):
@@ -787,7 +969,7 @@ def test_an_empty_idb_dump_is_not_taken_for_the_screen(monkeypatch, clock):
     """idb times out on an overloaded rig and describe_all gives []: "the sheet is
     gone" must not pass on it, and the last real screen is what comes back."""
     dumps = iter([[], [], [el("Vya Business", 0, 0, 1210, 834, "Application"),
-                           el("addNewItemClose")]] + [[]] * 50)
+                           el("addNewItemClose")]] + [[]] * 200)
     monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: next(dumps))
     fr = FlowRunner.__new__(FlowRunner)
     els, gone = fr._wait_els("IPAD", lambda es: not fr._has(es, "addNewItemClose"), 10.0)
@@ -806,6 +988,7 @@ class PhoneRig:
         fr = FlowRunner.__new__(FlowRunner)
         fr.devices = {"participant": self.UDID}
         fr._timeline = lambda event: None
+        fr._persist = lambda *a, **k: None
         self.settled = 0
         fr._settle_after_phone_shutdown = self._settled
         driver = types.SimpleNamespace(quit=self._quit)
@@ -817,7 +1000,7 @@ class PhoneRig:
     def _quit(self):
         self.quit += 1
 
-    def _settled(self):
+    def _settled(self, seg):
         self.settled += 1
 
     def run(self, cmd, **kw):
@@ -876,9 +1059,9 @@ def test_participant_phone_last_segment_not_its_own_still_shuts_it(monkeypatch):
 
 
 @pytest.mark.parametrize("loads,cancelled,lo,hi", [
-    ([5.0], False, 90, 95),            # a calm Mac still waits for the delayed spike
-    ([500.0, 500.0, 5.0], False, 100, 105),  # keeps waiting while it is busy, then stops
-    ([500.0] * 200, False, 300, 305),  # never settles: gives up, the run goes on
+    ([5.0], False, 60, 65),            # a calm Mac still waits for the delayed spike
+    ([500.0, 500.0, 5.0], False, 70, 75),  # keeps waiting while it is busy, then stops
+    ([500.0] * 200, False, 120, 125),  # never settles: gives up, the run goes on
     ([500.0], True, 0, 1),             # the user stopped the run
 ])
 def test_the_wait_after_a_shutdown_is_bounded(monkeypatch, clock, loads, cancelled, lo, hi):
@@ -892,8 +1075,11 @@ def test_the_wait_after_a_shutdown_is_bounded(monkeypatch, clock, loads, cancell
     monkeypatch.setattr(caf.os, "getloadavg", load)
     fr = FlowRunner.__new__(FlowRunner)
     fr._timeline = lambda event: None
+    shown = []
+    fr._persist = lambda seg, status, notes, secs: shown.append(notes[0])
     monkeypatch.setattr(FlowRunner, "cancelled", cancelled)
-    fr._settle_after_phone_shutdown()
+    fr._settle_after_phone_shutdown({"num": "3"})
+    assert "letting the Mac settle" in shown[0], "the dashboard must not just say QUEUED"
     assert lo <= clock["t"] <= hi
 
 
@@ -921,6 +1107,48 @@ def test_appium_does_not_stream_the_device_log():
     from automation.scenarios.cross_app_orchestrator import _options
     caps = _options("UDID", "org.example.app", 8100).to_capabilities()
     assert caps.get("appium:skipLogCapture") is True
+
+
+@pytest.mark.parametrize("bundle", ["org.vyapy.sarls.vyabusinessipadstaging",
+                                    "org.vyapy.sarls.vyaconsumerstaging"])
+def test_no_session_runs_wdas_alert_watcher(bundle):
+    # MEASURED 2026-11-02 (run 822ff575): WDA's alert watcher snapshots every active app
+    # every 2s; on the big order every idb read took 7-14s and a split 595s of its 600.
+    # 2026-11-04: an idle host-phone session kept its WDA at 55 % CPU.
+    from automation.scenarios.cross_app_orchestrator import _options
+    caps = _options("UDID", bundle, 8101).to_capabilities()
+    assert not caps.get("appium:autoAcceptAlerts")
+
+
+@pytest.mark.parametrize("start,until,devices", [
+    (3, 4, {"IPAD"}),                        # waiter segments only: no phone session
+    (0, 1, {"HOST"}),                        # the host's booking only
+    (16, 0, {"HOST", "IPAD"}),               # to the end: host, waiter (participant later)
+])
+def test_only_the_devices_this_runs_segments_use_are_prewarmed(start, until, devices):
+    fr = FlowRunner.__new__(FlowRunner)
+    fr.flow = caf.FLOWS["flow_full_event"]
+    fr._start_at, fr._stop_after = start, until
+    fr._participant_soon = lambda: False
+    fr._role_udid = lambda role: "HOST" if role == "consumer" else "PHONE2"
+    fr._business_udid = lambda: "IPAD"
+    fr.consumer_bundle, fr.business_bundle = "c", "b"
+    assert set(fr._prewarm_targets()) == devices
+
+
+def test_business_sign_in_accepts_the_notification_alert_itself(monkeypatch):
+    calls = []
+
+    class D:
+        def execute_script(self, script, args=None):
+            calls.append((script, args))
+
+    fr = FlowRunner.__new__(FlowRunner)
+    fr.credentials = {"waiter": {"email": "w@x", "password": "p"}}
+    fr._biz_role_state = lambda: "waiter"
+    notes = []
+    assert fr._login_business(types.SimpleNamespace(d=D()), "waiter", notes)
+    assert calls == [("mobile: alert", {"action": "accept"})]
 
 
 @pytest.mark.parametrize("sent,on_board,readied", [
@@ -1113,7 +1341,1321 @@ def test_focus_presses_again_when_the_order_pane_really_is_empty(monkeypatch, cl
     assert order.presses == 2
 
 
-def test_the_more_orders_segment_can_be_re_run_after_its_send():
-    steps = caf._W_FULL_EVENT_MORE_ASSIGN_SEND
-    assert "@select_all_items" not in steps and steps.count("@send_if_any") == 2
+def test_the_more_orders_segment_only_sends_and_can_be_re_run():
+    # The user's call, 2026-11-02: "just send new items to kitchen thats it".
+    assert caf._W_FULL_EVENT_MORE_SEND == ["@open_order", "@send_if_any"]
 
+
+class AvatarRow:
+    """OCR of a dialog's avatar row: each swipe left shows the next page of names."""
+
+    def __init__(self, pages):
+        self.pages, self.page, self.tapped, self.swipes = pages, 0, [], 0
+
+    def read_text(self, udid, region=None, els=None, accurate=False):
+        return [(t, 400 + 90 * i, 420, 50, 14) for i, t in enumerate(self.pages[self.page])]
+
+    def tap_point(self, udid, x, y):
+        self.tapped.append((x, y))
+        return True, "idb"
+
+    def swipe(self, udid, x1, y1, x2, y2, duration=0.25):
+        self.swipes += 1
+        self.page = max(0, min(len(self.pages) - 1, self.page + (1 if x2 < x1 else -1)))
+
+
+def _row(monkeypatch, pages):
+    from automation.scenarios import screen_text
+    row = AvatarRow(pages)
+    install(monkeypatch, row)
+    monkeypatch.setattr(screen_text, "read_text", row.read_text)
+    return row, FlowRunner.__new__(FlowRunner)
+
+
+BOX = (330, 242, 880, 592)
+
+
+def test_a_two_line_name_is_found_by_its_first_word(monkeypatch, clock):
+    # preprod-2-May18 Util/participant.js shows 'Noolu' over 'Naga'.
+    row, fr = _row(monkeypatch, [["Roopa D", "Noolu", "Naga", "Guest 1"]])
+    ok, how = fr._ocr_tap_person("IPAD", BOX, "Noolu Naga")
+    assert ok and row.tapped == [(400 + 90 + 25, 427.0)] and row.swipes == 0, how
+
+
+@pytest.mark.parametrize("person", ["Guest 1", "Roopa D"])
+def test_a_one_line_name_is_matched_whole(monkeypatch, clock, person):
+    row, fr = _row(monkeypatch, [["Guest", "Roopa D", "Guest 1"]])
+    ok, how = fr._ocr_tap_person("IPAD", BOX, person)
+    assert ok and row.tapped and row.tapped[0][0] > 400 + 25, how
+
+
+def test_a_name_off_the_row_is_reached_by_dragging_it(monkeypatch, clock):
+    row, fr = _row(monkeypatch, [["Roopa D", "Guest 1"], ["Guest 4", "Guest 5"]])
+    ok, how = fr._ocr_tap_person("IPAD", BOX, "Guest 5")
+    assert ok and row.swipes == 1 and row.tapped == [(400 + 90 + 25, 427.0)], how
+
+
+def test_a_name_left_of_the_row_is_reached_by_dragging_back(monkeypatch, clock):
+    row, fr = _row(monkeypatch, [["Roopa D", "Guest 1"], ["Guest 4", "Guest 5"]])
+    row.page = 1
+    ok, how = fr._ocr_tap_person("IPAD", BOX, "Roopa D")
+    assert ok and row.tapped, how
+
+
+def test_a_name_nobody_shows_fails_without_endless_dragging(monkeypatch, clock):
+    row, fr = _row(monkeypatch, [["Roopa D"]])
+    ok, how = fr._ocr_tap_person("IPAD", BOX, "Guest 9")
+    assert not ok and row.swipes == 5 and "Guest 9" in how
+
+
+class DiscountSheet:
+    """The Discount sheet: a heading that contains 'offer', then coupons after a spinner."""
+
+    def __init__(self, loads_after=0, coupons=("5% OFFER",)):
+        self.reads, self.loads_after, self.coupons = 0, loads_after, coupons
+        self.tapped = []
+
+    def read_text(self, udid, region=None, els=None, accurate=False):
+        self.reads += 1
+        out = [("Select a coupon to offer to client", 400, 200, 300, 20)]
+        if self.reads > self.loads_after:
+            out += [(c, 420, 300 + 60 * i, 80, 16) for i, c in enumerate(self.coupons)]
+        return out
+
+    def tap_point(self, udid, x, y):
+        self.tapped.append(y)
+        return True, "idb"
+
+    def describe_all(self, udid):
+        return [el("Vya Business", 0, 0, 1210, 834, "Application")]
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        return True, "idb"
+
+
+def _discount(monkeypatch, sheet):
+    from automation.scenarios import screen_text
+    install(monkeypatch, sheet)
+    monkeypatch.setattr(screen_text, "read_text", sheet.read_text)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    fr._open_card = lambda udid, who, ident: ([], {}, {"AXLabel": ident})
+    fr._profile_region = lambda es, who: ({}, 0, 0)
+    totals = iter([100.0, 95.0])
+    fr._payer_card_total = lambda es, card: next(totals, 95.0)
+    fr._screen_toast = lambda udid: "This coupon needs a bill above 500€"
+    notes = []
+    return fr._w_discount("Noolu Naga", notes), notes
+
+
+def test_discount_taps_a_coupon_never_the_sheets_heading(monkeypatch, clock):
+    sheet = DiscountSheet()
+    ok, notes = _discount(monkeypatch, sheet)
+    assert ok, notes
+    assert sheet.tapped == [308.0], "the coupon's row, not the heading at y 210"
+
+
+def test_discount_waits_for_the_coupon_list_to_load(monkeypatch, clock):
+    sheet = DiscountSheet(loads_after=3)
+    ok, notes = _discount(monkeypatch, sheet)
+    assert ok, notes
+    assert sheet.reads == 4
+
+
+def test_discount_with_no_coupons_says_so(monkeypatch, clock):
+    ok, notes = _discount(monkeypatch, DiscountSheet(coupons=()))
+    assert not ok and "lists no" in notes[-1] and "above 500" in notes[-1]
+
+
+def test_discount_already_applied_is_not_tapped_again(monkeypatch, clock):
+    # A resumed seg 18: a tap on the applied coupon REMOVES it (ApplyDiscountCoupon.js:86).
+    sheet = DiscountSheet()
+    install(monkeypatch, sheet)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    btn = el("discountBtn", 850, 400, 80, 30)
+    fr._open_card = lambda udid, who, ident: ([btn, el("-4.74 €", 852, 436, 60, 16, "StaticText")],
+                                              {}, btn)
+    fr._payer_card_total = lambda es, card: pytest.fail("opened the sheet")
+    notes = []
+    assert fr._w_discount("Noolu Naga", notes)
+    assert "already applied" in notes[-1] and "-4.74 €" in notes[-1]
+    assert sheet.tapped == []
+
+
+def test_discount_is_not_skipped_when_the_open_card_shows_it(monkeypatch, clock):
+    # The first look caught the panel reloading (no card): not "this build has none".
+    sheet = DiscountSheet()
+    install(monkeypatch, sheet)
+    from automation.scenarios import screen_text
+    monkeypatch.setattr(screen_text, "read_text", sheet.read_text)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    card = el("N NooluNagaaccordionCard", 834, 146, 336, 49)
+    btn = el("discountBtn", 850, 400, 80, 30)
+    open_els = [card, el("epaymentBtn", 850, 300), btn]
+    calls = []
+
+    def open_card(udid, who, ident):
+        calls.append(ident)
+        if len(calls) == 1:
+            return [], None, None                      # the reload spinner
+        return open_els, card, (btn if ident == "discountBtn" else open_els[1])
+    fr._open_card = open_card
+    fr._profile_region = lambda es, who: (card, 140, 800) if es else (None, 0, 0)
+    totals = iter([100.0, 95.0])
+    fr._payer_card_total = lambda es, c: next(totals, 95.0)
+    notes = []
+    assert fr._w_discount("Noolu Naga", notes), notes
+    assert not any(n.startswith("[skip]") for n in notes)
+    assert sheet.tapped, "the coupon was tapped"
+
+
+def test_a_tip_the_keypad_did_not_take_is_not_input(monkeypatch, clock):
+    taps = []
+    monkeypatch.setattr(caf._idbd, "tap_el", lambda *a, **k: (True, "idb"))
+    monkeypatch.setattr(caf._idbd, "tap", lambda udid, names, *a, **k: taps.append(names) or (True, "idb"))
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    btn = el("tipBtn", 850, 400, 80, 30)
+    fr._open_card = lambda udid, who, ident: ([btn], {}, btn)
+    fr._payer_card_total = lambda es, card: 100.0
+    fr._wait_els = lambda udid, pick, secs, reads=3: ([el("userInputBtn")], True)
+    fr._keypad_type = lambda udid, text: "0 €"          # the '3' was lost
+    from automation.scenarios import screen_text
+    monkeypatch.setattr(screen_text, "read_text", lambda *a, **k: [("0 €", 1108, 535, 30, 15)])
+    notes = []
+    assert not fr._w_tip("Noolu Naga 3", notes)
+    assert "reads '0 €'" in notes[-1] and ["userInputBtn"] not in taps
+
+
+def test_a_tip_already_set_is_not_set_again(monkeypatch, clock):
+    # A resumed seg 18: the tip button stays and prints the tip (MEASURED 2026-11-04).
+    from automation.scenarios import screen_text
+    monkeypatch.setattr(screen_text, "read_text", lambda *a, **k: [("3.00 €", 1108, 535, 45, 15)])
+    monkeypatch.setattr(caf._idbd, "tap_el", lambda *a, **k: pytest.fail("tapped Tip again"))
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    btn = el("tipBtn", 1096, 524, 70, 36)
+    fr._open_card = lambda udid, who, ident: ([btn], {}, btn)
+    notes = []
+    assert fr._w_tip("Noolu Naga 3", notes)
+    assert "already 3.00 €" in notes[-1]
+
+
+class ClippedDiscount:
+    """preprod-2-May18, MEASURED 2026-11-04 (run f2adc613): Discount is the 4th tile of a
+    sideways row and sits past the card's right edge (x 1159-1247, card ends at 1171);
+    a tap there opens nothing. The sheet prints each value on its own line above OFFER."""
+
+    def __init__(self):
+        self.shift, self.sheet, self.tapped = 0.0, False, []
+
+    def btn(self):
+        return el("discountBtn", 1159.5 - self.shift, 392, 88, 69)
+
+    def describe_all(self, udid):
+        return [el("Vya Business", 0, 0, 1210, 834, "Application"),
+                el("N NooluNagaaccordionCard", 834.5, -131, 336.5, 49),
+                el("epaymentBtn", 847.5 - self.shift, 392, 88, 69), self.btn()]
+
+    def swipe(self, udid, x0, y0, x1, y1, duration=0.25):
+        self.shift = min(89.5, max(0.0, self.shift + (x0 - x1)))
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        x, _y, w, _h = caf._idbd.frame(e)
+        self.sheet = x + w / 2 < 1171
+        return True, "idb"
+
+    def read_text(self, udid, region=None, els=None, accurate=False):
+        if not self.sheet:
+            return []
+        return [("Select a coupon to offer to client", 821, 331, 241, 16),
+                ("10%", 851, 443, 33, 14), ("OFFER", 848, 459, 44, 11),
+                ("50%", 851, 595, 35, 14), ("OFFER", 846, 610, 46, 14)]
+
+    def tap_point(self, udid, x, y):
+        self.tapped.append((x, y))
+        return True, "idb"
+
+
+def test_discount_slides_the_clipped_tile_into_the_card_and_reads_its_value(monkeypatch, clock):
+    from automation.scenarios import screen_text
+    pad = ClippedDiscount()
+    install(monkeypatch, pad)
+    monkeypatch.setattr(screen_text, "read_text", pad.read_text)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    card = el("N NooluNagaaccordionCard", 834.5, -131, 336.5, 49)
+    fr._open_card = lambda udid, who, ident: (pad.describe_all(udid), card, pad.btn())
+    fr._profile_region = lambda es, who: (card, -131, 800)
+    totals = iter([264.90, 238.41])
+    fr._payer_card_total = lambda es, c: next(totals, 238.41)
+    notes = []
+    assert fr._w_discount("Noolu Naga", notes), notes
+    assert pad.sheet, "Discount was tapped inside the card"
+    assert pad.tapped and pad.tapped[0][1] > 459, "tapped the first OFFER"
+    assert "'10% OFFER'" in " ".join(notes)
+    assert not any(n.startswith("[mismatch]") for n in notes), notes
+    # The user, 2026-11-04: "after apply discount again scroll left side to the epayment".
+    assert pad.shift == 0, "E-Payment is back inside the card"
+
+
+class SlowPayFor:
+    """Noolu's card; the Pay For dialog (one Overlay with every id) opens only on the
+    second tap of payForBtn."""
+
+    def __init__(self):
+        self.taps, self.dialog, self.presses = [], False, 0
+
+    def describe_all(self, udid):
+        out = [el("Vya Business", 0, 0, 1210, 834, "Application"),
+               el("N NooluNagaaccordionCard", 834, 146, 336, 49)]
+        if self.dialog:
+            ids = "NooluNagaselect NooluNagaclose Guest3select Guest4select applyPayment"
+            return out + [el(ids, 300, 200, 600, 400, "Other")]
+        return out + [el("epaymentBtn", 850, 300), el("payForBtn", 866, 665)]
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        n = caf._idbd.name(e)
+        self.taps.append(n)
+        if n == "payForBtn":
+            self.presses += 1
+            self.dialog = self.presses >= 2
+        return True, "idb"
+
+    def tap(self, udid, names, els=None, scroll=True):
+        self.taps.append(names[0])
+        return True, "idb"
+
+
+def test_w_pay_for_never_makes_the_payer_through_e_payment(monkeypatch, clock):
+    # The user, 2026-11-04, on "made Noolu Naga the payer (E-Payment, keypad closed)":
+    # "remove this step". A slow dialog gets a second Pay For tap instead.
+    pad = SlowPayFor()
+    install(monkeypatch, pad)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    btn = el("payForBtn", 866, 665)
+    fr._open_card = lambda udid, who, ident: (pad.describe_all(udid), {}, btn)
+    fr._overlay = lambda es, ident: next((e for e in es if ident in caf._idbd.name(e)), None)
+    notes = []
+    fr._pay_for_named("Noolu Naga", ["Guest 3"], notes)
+    assert "epaymentBtn" not in pad.taps and "numberPadClose" not in pad.taps
+    assert pad.taps[:2] == ["payForBtn", "payForBtn"], pad.taps
+    assert not any("made Noolu Naga the payer" in n for n in notes)
+    # Not a failure, but said in yellow (run_issues).
+    assert ("    [warn] @w_pay_for:Noolu Naga > Guest 3 — Pay For on Noolu Naga's card opened "
+            "its dialog only on the second tap") in notes, notes
+
+
+def test_w_pay_for_already_done_passes_without_the_dialog(monkeypatch, clock):
+    # A resumed seg 18 (MEASURED 2026-11-04, run 932ff968): Noolu's card lists 'Paid for
+    # Guest 3/4'; Pay For is disabled for anyone but the current payer, so it never opened.
+    pad = SlowPayFor()
+    install(monkeypatch, pad)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    card = el("N NooluNagaaccordionCard", 834, -131, 336, 49)
+    listed = [card, el("Paid for Guest 3", 847, 307, 120, 16, "StaticText"),
+              el("Paid for Guest 4", 847, 341, 120, 16, "StaticText"), el("payForBtn", 866, 665)]
+    fr._open_card = lambda udid, who, ident: (listed, card, listed[-1])
+    fr._profile_region = lambda es, who: (card, -131, 800)
+    fr._payer_card_total = lambda es, c: 238.41
+    notes = []
+    assert fr._pay_for_named("Noolu Naga", ["Guest 3", "Guest 4"], notes)
+    assert pad.taps == [] and "already pays for Guest 3, Guest 4" in notes[-2]
+    assert fr._paid_for_others == ["Guest 3", "Guest 4"]
+
+
+def test_the_discount_check_leaves_an_earlier_tip_out(monkeypatch, clock):
+    # Tip first (it makes Noolu the payer): 267.90 with the 3 € tip; the coupon takes
+    # 10 % of the 264.90 items only -> 241.41 (MEASURED 2026-11-04).
+    from automation.scenarios import screen_text
+    pad = ClippedDiscount()
+    install(monkeypatch, pad)
+    monkeypatch.setattr(screen_text, "read_text", pad.read_text)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    fr._tips = {"Noolu Naga": 3.0}
+    card = el("N NooluNagaaccordionCard", 834.5, -131, 336.5, 49)
+    fr._open_card = lambda udid, who, ident: (pad.describe_all(udid), card, pad.btn())
+    fr._profile_region = lambda es, who: (card, -131, 800)
+    totals = iter([267.90, 241.41])
+    fr._payer_card_total = lambda es, c: next(totals, 241.41)
+    notes = []
+    assert fr._w_discount("Noolu Naga", notes), notes
+    assert not any(n.startswith("[mismatch]") for n in notes), notes
+
+
+def test_seg_18_tips_first_so_pay_for_is_live():
+    # Pay For is disabled for anyone but the current payer (PaymentDetails.js:2573-2575);
+    # Tip makes Noolu the payer. The user's order otherwise: Pay For, Discount, E-Payment.
+    seg = next(sg for sg in caf.FLOWS["flow_full_event"]["segments"] if sg["num"] == "18")
+    st = seg["steps"]
+    assert st.index("@w_tip:Noolu Naga 3") < st.index("@w_pay_for:Noolu Naga > Guest 3, Guest 4") \
+        < st.index("@w_discount:Noolu Naga") < st.index("@pay:epay")
+
+
+def test_a_booking_the_app_completed_is_closed_and_read_from_history(monkeypatch, clock):
+    # MEASURED 2026-11-04 (run 7dc700b8): after the last payment the app completed 5606
+    # itself; its order screen no longer opens and the board hides it.
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    fr._booking_done = "5606  COMPLETED 10:38 - 11:38"
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: pytest.fail("read the screen"))
+    notes = []
+    assert fr._close_table(notes) and "closed the order itself" in notes[-1]
+    fr._history_invoice = lambda udid, tag, n: n.append("history") or True
+    notes = []
+    assert fr._w_invoice(notes) and notes == ["history"]
+
+
+class HistoryScreen:
+    """The waiter's History: historyCard rows (ticket in pixels only) and, once one is
+    tapped, its invoice inline on the left."""
+
+    def __init__(self):
+        self.tapped = None
+
+    def describe_all(self, udid):
+        return [el("Vya Business", 0, 0, 1210, 834, "Application"),
+                el("historyCard", 822, 200, 362, 150), el("historyCard", 822, 360, 362, 150)]
+
+    def read_text(self, udid, region=None, els=None, accurate=False):
+        return [("5611", 850, 410, 30, 14), ("5606", 850, 250, 30, 14)]
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        self.tapped = caf._idbd.frame(e)[1]
+        return True, "idb"
+
+
+def test_the_history_invoice_is_this_runs_ticket(monkeypatch, clock):
+    from automation.scenarios import screen_text
+    h = HistoryScreen()
+    install(monkeypatch, h)
+    monkeypatch.setattr(screen_text, "read_text", h.read_text)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices, fr._booked_ticket = "IPAD", {}, "5606"
+    fr._invoice_up = lambda udid, box, els: True
+    boxes = []
+    fr._read_invoice = lambda udid, box, els: boxes.append(box) or {"Total": "Total 367.74 €"}
+    fr._check_invoice = lambda *a, **k: None
+    notes = []
+    assert fr._history_invoice("IPAD", "@w_invoice", notes)
+    assert h.tapped == 200, "the 5606 card, not 5611's"
+    assert boxes[0][2] < 822, "the invoice left of the list"
+    assert "367.74" in notes[-1]
+
+
+class EmptyHistory(HistoryScreen):
+    """History's list comes up blank until it is pulled to refresh (runs ba67d113,
+    1182e5de: a History tap, Home and back, a relaunch -- none helped)."""
+
+    def __init__(self):
+        super().__init__()
+        self.pulled, self.loaded = False, False
+
+    def describe_all(self, udid):
+        out = super().describe_all(udid)
+        return out if self.loaded else out[:1] + [el("historyBtn"), el("homeBtn")]
+
+    def tap(self, udid, names, els=None, scroll=True):
+        return True, "idb"
+
+    def swipe(self, udid, x0, y0, x1, y1, duration=0.25):
+        self.pulled = y1 > y0                      # a pull down
+        self.loaded = self.loaded or self.pulled
+
+
+def test_a_blank_history_is_pulled_to_refresh(monkeypatch, clock):
+    from automation.scenarios import screen_text
+    h = EmptyHistory()
+    install(monkeypatch, h)
+    monkeypatch.setattr(screen_text, "read_text", h.read_text)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices, fr._booked_ticket = "IPAD", {}, "5606"
+    fr._invoice_up = lambda udid, box, els: True
+    fr._read_invoice = lambda udid, box, els: {"Total": "Total 367.74 €"}
+    fr._check_invoice = lambda *a, **k: None
+    notes = []
+    assert fr._history_invoice("IPAD", "@w_invoice", notes), notes
+    assert h.pulled and h.tapped == 200
+    # The app bug it worked around is said in yellow (run_issues).
+    assert ("    [APP GLITCH] @w_invoice — the waiter's History list was blank until it was "
+            "pulled to refresh (1 pull(s))") in notes, notes
+
+
+def test_open_order_on_a_completed_booking_skips_the_ticket_check(monkeypatch):
+    fr = FlowRunner.__new__(FlowRunner)
+
+    def opened(r, notes, statuses, what):
+        fr._booking_done = "5606  COMPLETED 10:38 - 11:38"
+        return True
+    fr._open_reservation = opened
+    fr._own_ticket_open = lambda *a: pytest.fail("the board's panel shows 5606 too")
+    assert fr._handle_special(None, "@open_order", []) is True
+
+
+class FinishedTab:
+    """The host's Wallet > Finished after the app completed the paid event (MEASURED
+    2026-11-04, run efeb8678): this run's TODAY 10:38 card asks 'How was your
+    experience?' (Restuarantrating, finishedSkipReview); an 11:00 NO SHOW above it."""
+
+    def __init__(self, skipped=False):
+        self.review, self.rated, self.skipped, self.taps = False, None, skipped, []
+        self.offset = 0.0                     # the list scrolls; the card starts below the screen
+
+    def describe_all(self, udid):
+        base = [el("Vya Consumer", 0, 0, 402, 874, "Application"), el("finishedBlock", 200, 88),
+                el("walletFinishedSearchInput", 67, 151)]
+        if self.review:
+            return base + [el(f"star{i}", 40 * i, 300) for i in range(1, 6)] + \
+                [el("writeFeedback", 20, 400, 360, 80, "TextView"), el("submitReview", 20, 600)]
+        o = self.offset
+        rows = [el("NylaiKitchen2Card", 20, 760, 362, 100, "Button"), el("TODAY", 40, 843),
+                el("11:00", 40, 864), el("NO SHOW", 300, 893),
+                el("NylaiKitchen2Card", 20, 968, 362, 100, "Button"),
+                el("TODAY", 40, 1025), el("10:38", 40, 1046)]
+        if not (self.rated or self.skipped):
+            rows += [el("Restuarantrating", 200, 993, 150, 26), el("finishedSkipReview", 300, 1036)]
+        for e in rows:
+            e["frame"]["y"] -= o
+        return base + rows
+
+    def tap(self, udid, names, els=None, scroll=True):
+        self.taps.append(names[0])
+        if names[0] == "submitReview":
+            self.review, self.rated = False, True
+        return True, "idb"
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        n = caf._idbd.name(e)
+        if not 0 <= caf._idbd.frame(e)[1] <= 874 - 60:
+            return False, "not reachable (covered or scrolled out)"    # MEASURED, run 2a061572
+        self.taps.append(n)
+        if n == "Restuarantrating":
+            self.review = True
+        elif n == "finishedSkipReview":
+            self.skipped = True
+        return True, "idb"
+
+    def swipe(self, udid, x0, y0, x1, y1, duration=0.25):
+        self.offset = max(0.0, min(400.0, self.offset + (y0 - y1)))
+
+
+def _finished(monkeypatch, tab):
+    install(monkeypatch, tab)
+    monkeypatch.setattr(caf._idbd, "_idb", lambda *a, **k: None)
+    monkeypatch.setattr(caf._idbd, "press_return", lambda *a, **k: None)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices, fr._booked_slot = "IPHONE", {}, "10:38"
+    fr._c_rating_prompt = lambda *a: pytest.fail("went to Upcoming")
+    return fr
+
+
+def test_rate_from_the_finished_card_of_a_completed_event(monkeypatch, clock):
+    tab = FinishedTab()
+    fr = _finished(monkeypatch, tab)
+    notes = []
+    assert fr._c_rate("5", notes), notes
+    assert tab.rated and "star5" in tab.taps and "rated 5" in notes[-1]
+
+
+def test_skip_from_the_finished_card_of_a_completed_event(monkeypatch, clock):
+    tab = FinishedTab()
+    fr = _finished(monkeypatch, tab)
+    notes = []
+    assert fr._c_skip_review(notes), notes
+    assert tab.skipped and "finishedSkipReview" in tab.taps and "Finished card" in notes[-1]
+
+
+def test_a_rating_already_skipped_passes_on_a_rerun(monkeypatch, clock):
+    tab = FinishedTab(skipped=True)
+    fr = _finished(monkeypatch, tab)
+    fr._rerun = True
+    notes = []
+    assert fr._c_skip_review(notes), notes
+    assert "finishedSkipReview" not in tab.taps and "asks for no rating any more" in notes[-1]
+
+
+def test_a_first_run_whose_card_asks_nothing_does_not_pass_silently(monkeypatch, clock):
+    tab = FinishedTab(skipped=True)
+    fr = _finished(monkeypatch, tab)
+    fr._c_rating_prompt = lambda udid, notes, tag: notes.append("[FAIL] no Completed") or None
+    notes = []
+    assert not fr._c_skip_review(notes)
+
+
+class SwipeCounter(FinishedTab):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.swipes = 0
+
+    def swipe(self, udid, x0, y0, x1, y1, duration=0.25):
+        self.swipes += 1
+        super().swipe(udid, x0, y0, x1, y1, duration)
+
+
+def test_the_finished_search_stops_at_this_runs_card_without_scrolling(monkeypatch, clock):
+    # The user, 2026-11-04 (seg 21, 199s): the card was on the screen and it kept scrolling.
+    tab = SwipeCounter(skipped=True)
+    fr = _finished(monkeypatch, tab)
+    _els, stars, skip = fr._c_finished_prompt("IPHONE")
+    assert stars is None and skip is None and fr._finished_card_seen
+    assert tab.swipes == 0
+
+
+def test_the_wallet_search_takes_the_card_already_on_screen(monkeypatch, clock):
+    from automation.scenarios import screen_text
+    w = PrintedWallet(times=("13:50", "10:38", "15:30"))
+    w.DAYS = ("TODAY", "TODAY", "02 NOV 2026")
+    install(monkeypatch, w)
+    monkeypatch.setattr(screen_text, "read_text", w.read_text)
+    swipes = []
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: swipes.append(a))
+    fr = FlowRunner.__new__(FlowRunner)
+    folded = lambda es: [e for e in es if caf._idbd.name(e) == "NylaiKitchen2Card"]  # noqa: E731
+    card = fr._wallet_card_at("IPHONE", "10:38", folded)
+    assert card is not None and swipes == []
+
+
+def test_a_signed_out_ipad_is_not_taken_for_the_same_account(monkeypatch):
+    # preprod-2-May18: any 401 logs the app out (axios-config.js), so the remembered
+    # account alone is not proof.
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._biz_account = "waiter"
+    fr._biz_role_state = lambda: "waiter"
+    assert fr._ensure_business_account(None, "waiter", []) is True
+
+    class Reached(Exception):
+        pass
+
+    states = iter(["login"])
+
+    def state():
+        try:
+            return next(states)
+        except StopIteration:
+            raise Reached()
+
+    fr._biz_role_state = state
+    with pytest.raises(Reached):
+        fr._ensure_business_account(None, "waiter", [])
+
+
+def test_appium_fallback_clicks_the_dot_at_this_rows_height():
+    near = types.SimpleNamespace(location={"y": 300})
+    far = types.SimpleNamespace(location={"y": 40})
+    assert FlowRunner._nearest([far, near], 310) is near
+    broken = types.SimpleNamespace()
+    assert FlowRunner._nearest([broken], 310) is broken
+
+
+class SlowReads:
+    """A screen read takes *cost* seconds; the thing waited for shows on read *hit*."""
+
+    def __init__(self, clock, cost, hit=None, empty=False):
+        self.clock, self.cost, self.hit, self.empty, self.reads = clock, cost, hit, empty, 0
+
+    def describe_all(self, udid):
+        self.clock["t"] += self.cost
+        self.reads += 1
+        if self.empty:
+            return []
+        return [el("Done" if self.hit and self.reads >= self.hit else "Busy", 0, 0)]
+
+
+def _wait(monkeypatch, clock, secs, reads=None, **kw):
+    screen = SlowReads(clock, **kw)
+    install(monkeypatch, screen)
+    fr = FlowRunner.__new__(FlowRunner)
+    pick = lambda es: fr._has(es, "Done")  # noqa: E731
+    got = fr._wait_els("IPAD", pick, secs) if reads is None else fr._wait_els("IPAD", pick, secs, reads)
+    return got[1], screen
+
+
+def test_a_short_wait_still_looks_three_times(monkeypatch, clock):
+    # A 5s window with 7s reads was a single look: it showed on the next one.
+    hit, screen = _wait(monkeypatch, clock, 5.0, cost=7.0, hit=3)
+    assert hit and screen.reads == 3
+
+
+def test_a_quick_check_can_ask_for_one_look(monkeypatch, clock):
+    hit, screen = _wait(monkeypatch, clock, 2.0, reads=1, cost=7.0)
+    assert not hit and screen.reads == 1
+
+
+def test_a_wait_ends_even_if_every_read_comes_back_empty(monkeypatch, clock):
+    hit, screen = _wait(monkeypatch, clock, 5.0, cost=20.0, empty=True)
+    assert not hit and screen.reads <= 4 and clock["t"] <= 80.0
+
+
+def test_a_big_order_gets_time_to_open_before_the_step_goes_elsewhere(monkeypatch, clock):
+    # MEASURED 2026-11-02 (runs 9f8ad3f6, 303476ba): a 40-line order took ~80s to open, so
+    # the step left for the calendar with the order about to appear.
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._booked_ticket = "5597"
+    fr._idb_els = lambda: ([{"id": "ORDER SUMMARY", "label": ""}] if clock["t"] > 80.0
+                           else [{"id": "homeBtn", "label": ""}])
+    fr._too_early_toast = lambda els=None: False
+    fr._table_modal_up = lambda: False
+    fr._note_ticket = lambda notes: None
+    notes = []
+    assert fr._reservation_opened(notes, "@open_event", "10:40", "My Orders panel") is True
+
+
+class LateFocus:
+    """A long-press whose redraw takes *lag* seconds; a second press turns the focus off."""
+
+    def __init__(self, clock, lag):
+        self.clock, self.lag, self.presses, self.at = clock, lag, 0, None
+
+    def describe_all(self, udid):
+        focused = self.presses % 2 == 1 and self.clock["t"] - self.at >= self.lag
+        rows = ["PennePollo"] if focused else ["PennePollo", "Fanta", "Sprite"]
+        return [el("Vya Business", 0, 0, 1210, 834, "Application")] + [
+            el(f"{r}card", 10, 100 + 50 * i, 300, 40) for i, r in enumerate(rows)]
+
+
+def test_a_slow_focus_is_not_toggled_off_by_a_second_press(monkeypatch, clock):
+    # MEASURED 2026-11-02 (run f5610b18, a big order right after opening): no focus for the
+    # step's whole 240s. A press 14s after the last undid a focus still on its way.
+    order = LateFocus(clock, lag=20.0)
+    install(monkeypatch, order)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._owner_lines = lambda *a, **k: ["PennePollo"]
+
+    def press(udid, who):
+        order.presses += 1
+        order.at = clock["t"]
+        return True
+
+    fr._long_press_card = press
+    notes = []
+    assert fr._focus_profile("IPAD", "Roopa D", "@w_split:x", notes) is not None, notes
+    assert order.presses == 1
+
+
+class OpeningOrder:
+    """An order that is still drawing its rows when it is first read."""
+
+    def __init__(self):
+        self.counts = iter([0, 7, 26, 26])
+        self.reads = 0
+
+    def describe_all(self, udid):
+        self.reads += 1
+        n = next(self.counts, 26)
+        return [el("Vya Business", 0, 0, 1210, 834, "Application"), el("5597", 900, 40)] + [
+            el(f"Dish{i}card", 10, 100 + i, 300, 1) for i in range(n)]
+
+
+def test_a_freshly_opened_order_settles_before_the_step_ends(monkeypatch):
+    order = OpeningOrder()
+    install(monkeypatch, order)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices, fr._booked_ticket = "IPAD", {}, "5597"
+    assert fr._own_ticket_open("@open_order", []) is True
+    assert order.reads == 4, "until the row count repeats"
+
+
+@pytest.mark.parametrize("step,limit", [
+    ("@w_comp:Pizza Salamees@Guest 4*all:100", 600), ("@w_split:Coca-Cola@Roopa D > Guest 2", 600),
+    ("@w_add:Penne Pollo*3 > split: Guest 1, Guest 2", 600), ("@w_move:Pizza@Guest 2 > Guest 1", 600),
+    ("@open_order", 600), ("@kitchen_ready", 600), ("click serveItemsBtn", 240),
+])
+def test_the_heavy_waiter_edits_get_a_longer_step_limit(step, limit):
+    # MEASURED 2026-11-02 (run 57cba64e): a 100 % comp of a 5-unit shared line finished
+    # after the 240s limit had already aborted the segment.
+    assert caf._step_limit(step) == limit
+
+
+
+def test_a_resumed_comp_sees_its_mark_on_the_units_own_row(monkeypatch):
+    # MEASURED 2026-11-02: the comped unit moved to its own row; the first row has no mark.
+    els = [el("Vya Business", 0, 0, 1210, 834, "Application"),
+           el("PizzaMargheritascard", 10, 440, 300, 30), el("22.66€", 700, 445, 60, 18),
+           el("PizzaMargheritascard", 10, 700, 300, 30), el("COMP", 620, 700, 40, 18),
+           el("10%", 662, 700, 30, 18)]
+    install(monkeypatch, types.SimpleNamespace(describe_all=lambda udid: els))
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices, fr._resume = "IPAD", {}, {"start_at": 10}
+    fr._list_view = lambda udid: True
+    fr._focus_profile = lambda udid, who, tag, notes: els
+    fr._unfocus_profile = lambda udid, tag, notes: None
+    notes = []
+    assert fr._w_comp("Pizza Margheritas@Guest 4*1:10", notes) is True
+    assert "already shows 'COMP 10%'" in notes[-1]
+
+
+class VoidedLinesOrder:
+    """Guest 1's card lists only the Coca-Cola; focused, the order also keeps their two
+    voided lines (struck through), and unfocused it lists everyone's 30 rows."""
+
+    ALL = ["Coca-Cola®Light1.0l"] * 14 + ["mushroombiryani"] * 5 + ["PizzaMargheritas"] * 6 + \
+        ["PennePollo", "PizzaSalamees", "TagliatelledelloChef", "SpaghettiBolognese", "x"]
+    FOCUSED = ["Coca-Cola®Light1.0l", "PennePollo", "PizzaSalamees"]
+
+    def __init__(self):
+        self.on, self.presses = False, 0
+
+    def describe_all(self, udid):
+        rows = self.FOCUSED if self.on else self.ALL
+        return [el("Vya Business", 0, 0, 1210, 834, "Application")] + [
+            el(f"{r}card", 10, 100 + 20 * i, 300, 18) for i, r in enumerate(rows)]
+
+
+def _voided(monkeypatch):
+    order = VoidedLinesOrder()
+    install(monkeypatch, order)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._owner_lines = lambda *a, **k: ["Coca-Cola®Light1.0l"]
+    fr._list_view = lambda udid: True
+
+    def press(udid, who):
+        order.presses += 1
+        order.on = not order.on
+        return True
+
+    fr._long_press_card = press
+    return order, fr
+
+
+def test_focus_counts_with_voided_lines_that_left_the_card(monkeypatch, clock):
+    # MEASURED 2026-11-02 (run of segment 11): Guest 1 focused showed Coca-Cola plus two
+    # struck-through voided lines; "does not show just their 1 line(s)", and a second press
+    # turned the focus off.
+    order, fr = _voided(monkeypatch)
+    notes = []
+    assert fr._focus_profile("IPAD", "Guest 1", "@w_comp:x", notes) is not None, notes
+    assert order.presses == 1 and order.on
+
+
+def test_unfocus_is_not_fooled_by_voided_lines(monkeypatch, clock):
+    order, fr = _voided(monkeypatch)
+    notes = []
+    fr._focus_profile("IPAD", "Guest 1", "@w_comp:x", notes)
+    fr._unfocus_profile("IPAD", "@w_comp:x", notes)
+    assert not order.on and order.presses == 2, notes
+
+
+
+class StalledIpad:
+    """idb times out (20s, no screen) until *until* seconds; after that a press focuses."""
+
+    def __init__(self, clock, until):
+        self.clock, self.until, self.on, self.presses = clock, until, False, 0
+
+    def readable(self):
+        return self.clock["t"] >= self.until
+
+    def describe_all(self, udid):
+        if not self.readable():
+            self.clock["t"] += 20.0
+            return []
+        self.clock["t"] += 3.0
+        rows = ["PizzaSalamees"] if self.on else ["PizzaSalamees", "Fanta", "Sprite"]
+        return [el("Vya Business", 0, 0, 1210, 834, "Application")] + [
+            el(f"{r}card", 10, 100 + 50 * i, 300, 40) for i, r in enumerate(rows)]
+
+
+def _stalled(monkeypatch, clock, until):
+    ipad = StalledIpad(clock, until)
+    install(monkeypatch, ipad)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._owner_lines = lambda *a, **k: ["PizzaSalamees"]
+
+    def press(udid, who):
+        if not ipad.readable():
+            return False                       # no card found on an unread screen
+        ipad.presses += 1
+        ipad.on = not ipad.on
+        return True
+
+    fr._long_press_card = press
+    return ipad, fr
+
+
+def test_time_the_ipad_could_not_be_read_does_not_use_up_the_focus_wait(monkeypatch, clock):
+    # MEASURED 2026-11-02 (run 28127405, order took 129s to open): "does not show just their
+    # 5 line(s) (it shows 0)" after 474s; by hand right after, the same focus took 30s.
+    ipad, fr = _stalled(monkeypatch, clock, until=200.0)
+    notes = []
+    assert fr._focus_profile("IPAD", "Guest 4", "@w_comp:x", notes) is not None, notes
+    assert ipad.presses == 1 and ipad.on
+
+
+def test_a_focus_on_an_ipad_that_never_reads_ends_and_says_why(monkeypatch, clock):
+    ipad, fr = _stalled(monkeypatch, clock, until=1e9)
+    notes = []
+    assert fr._focus_profile("IPAD", "Guest 4", "@w_comp:x", notes) is None
+    assert "could not be read" in notes[-1] and clock["t"] <= 420.0, (notes, clock)
+
+
+class StripeSheet:
+    """The Stripe sheet: only its Close shows until *ready* seconds, then 'Pay €108.50'."""
+
+    def __init__(self, clock, ready):
+        self.clock, self.ready, self.clicked = clock, ready, []
+
+    def find_elements(self, by, value):
+        self.clock["t"] += 2.0                 # a predicate lookup is not free
+        if self.clock["t"] < self.ready:
+            return []
+        sheet = self
+
+        class Btn:
+            def get_attribute(self, a):
+                return "Pay €108.50"
+
+            def is_displayed(self):
+                return True
+
+            def click(self):
+                sheet.clicked.append("Pay €108.50")
+        return [Btn()]
+
+
+def _stripe(clock, ready):
+    sheet = StripeSheet(clock, ready)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._read_bill_total = lambda r: 108.5
+    notes = []
+    ok = fr._pay_stripe(types.SimpleNamespace(d=sheet), notes)
+    return ok, sheet, notes
+
+
+def test_pay_stripe_waits_for_a_slow_stripe_sheet(clock):
+    # MEASURED 2026-11-02 (run b41372b7, participant's freshly booted iPhone): one look
+    # found only the sheet's Close; the screenshot right after showed 'Pay €108.50'.
+    ok, sheet, notes = _stripe(clock, ready=30.0)
+    assert ok and sheet.clicked == ["Pay €108.50"], notes
+
+
+def test_pay_stripe_still_fails_when_the_button_never_shows(clock):
+    ok, sheet, notes = _stripe(clock, ready=1e9)
+    assert not ok and "not found" in notes[-1] and clock["t"] <= 90.0
+
+
+def _got_it(clock, shows_at):
+    fr = FlowRunner.__new__(FlowRunner)
+    taps = []
+    fr._idb_els = lambda: ([{"label": "pickUpOrderConfirm", "cx": 200, "cy": 800}]
+                           if clock["t"] >= shows_at else [])
+    fr._idb_tap = lambda x, y: taps.append((x, y))
+    r = types.SimpleNamespace(d=types.SimpleNamespace(find_elements=lambda by, v: []))
+    notes = []
+    assert fr._got_it(r, notes)
+    return taps, notes
+
+
+def test_got_it_waits_for_a_confirmation_that_comes_late(clock):
+    # MEASURED 2026-11-02 (run e836f394): "no confirmation dialog present", and the
+    # screenshot a minute later showed Pre-Order Confirmed still up on the participant.
+    taps, notes = _got_it(clock, shows_at=20.0)
+    assert taps and "dismissed" in notes[-1]
+
+
+def test_got_it_passes_without_a_dialog_in_bounded_time(clock):
+    taps, notes = _got_it(clock, shows_at=1e9)
+    assert not taps and "no confirmation dialog" in notes[-1] and clock["t"] <= 60.0
+
+
+class LongListIpad(Ipad):
+    """The ADD NEW ITEM list is too long to reach a product unless the search took; the
+    first fill finds no field (an unread screen on a loaded Mac)."""
+
+    def __init__(self, fills_fail=1, reachable=True):
+        super().__init__()
+        self.fills, self.fills_fail, self.reachable, self.searched = 0, fills_fail, reachable, ""
+
+    def fill(self, udid, field, text, close_keyboard=True, info=None):
+        self.fills += 1
+        if text and self.fills <= self.fills_fail:
+            return False, ""
+        self.searched = text
+        return True, "idb"
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if caf._idbd.name(e).endswith("Item") and not (self.searched and self.reachable):
+            return False, "not reachable (covered or scrolled out)"
+        return super().tap_el(udid, e, els, scroll)
+
+
+def test_w_add_searches_again_when_the_first_search_did_not_take(ipad):
+    # MEASURED 2026-11-02 (run bc18b3b1): the wine with an empty search box, the whole list
+    # showing, and "could not tap ... not reachable (covered or scrolled out)".
+    s = LongListIpad(fills_fail=1)
+    ok, notes, _ = ipad("Penne Pollo*1 > assign: Guest 1", screen=s)
+    assert ok, notes
+    assert s.searched == "Penne Pollo" and "PennePolloItem" in s.taps
+
+
+def test_w_add_falls_back_to_appium_which_scrolls_the_product_into_view(monkeypatch, clock):
+    s = LongListIpad(fills_fail=0, reachable=False)
+    install(monkeypatch, s)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    clicked = []
+
+    class Item:
+        def click(self):
+            clicked.append(1)
+            s._press("PennePolloItem")
+
+    r = types.SimpleNamespace(d=types.SimpleNamespace(
+        find_elements=lambda by, ident: [Item()] if ident == "PennePolloItem" else []))
+    notes = []
+    assert fr._w_add_item(r, "Penne Pollo*1 > assign: Guest 1", notes), notes
+    assert clicked == [1]
+
+
+class InvoiceIpad:
+    """The order after the last payment: Close Table shows at *paid_at* s (the server's
+    payment_completed), and the event invoice draws *slow* s after Print Now."""
+
+    def __init__(self, clock, paid_at, slow):
+        self.clock, self.paid_at, self.slow = clock, paid_at, slow
+        self.grid = self.choice = self.sheet = False
+        self.printed_at = None
+
+    def describe_all(self, udid):
+        t = self.clock["t"]
+        out = [el("Vya Business", 0, 0, 1210, 834, "Application"), el("", 1100, 30, 30, 30)]
+        if t >= self.paid_at:
+            out.append(el("closeTableBtn", 900, 760, 200, 50))
+        if self.grid:
+            out.append(el("assignOrSplitBtn", 600, 700, 100, 50))
+        if self.choice:
+            out.append(el("eventInvoice", 500, 300, 200, 50))
+        if self.sheet:
+            out.append(el("assignProductsBtn", 500, 600, 200, 60))
+        return out
+
+    def tap(self, udid, ids, els=None):
+        self.choice |= ids == ["addItemsBtn"]
+        self.sheet |= ids == ["eventInvoice"]
+        return True, "idb"
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if e["AXLabel"] == "":
+            self.grid = True
+        if e["AXLabel"] == "assignProductsBtn" and self.printed_at is None:
+            # Print Now: the app refuses it until the payment is complete.
+            if self.clock["t"] >= self.paid_at:
+                self.printed_at = self.clock["t"]
+            self.choice = self.sheet = False
+        return True, "idb"
+
+    def up(self):
+        return self.printed_at is not None and self.clock["t"] >= self.printed_at + self.slow
+
+
+def _invoice(monkeypatch, clock, paid_at, slow):
+    pad = InvoiceIpad(clock, paid_at, slow)
+    install(monkeypatch, pad)
+    monkeypatch.setattr(caf._idbd, "app_size", lambda els: (1210, 834))
+    monkeypatch.setattr(caf._idbd, "tap_point", lambda *a, **k: True)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    fr._toast = lambda els: ""
+    fr._screen_toast = lambda udid: ""
+    fr._list_view = lambda udid: True
+    fr._check_invoice = lambda *a, **k: None
+    fr._invoice_up = lambda udid, box, els: pad.up()
+    fr._read_invoice = lambda udid, box, els: {"Total": "Total 322.29 €"} if pad.up() else {}
+    notes = []
+    return fr._w_invoice(notes), notes, pad
+
+
+def test_w_invoice_prints_only_once_the_payment_is_complete(monkeypatch, clock):
+    # The review of 2026-11-02: Print Now right after the last cash payment shows
+    # 'Payment Not Completed' (Modal/index.js:2530-2536); Close Table is the sign.
+    ok, notes, pad = _invoice(monkeypatch, clock, paid_at=20.0, slow=0.0)
+    assert ok, notes
+    assert pad.printed_at >= 20.0
+
+
+def test_w_invoice_waits_for_a_slow_invoice_sheet(monkeypatch, clock):
+    ok, notes, pad = _invoice(monkeypatch, clock, paid_at=0.0, slow=25.0)
+    assert ok, notes
+    assert "Total 322.29" in notes[-1]
+
+
+class DeafSelectAll:
+    """The order with unsent lines: the first Select All tap does not take."""
+
+    def __init__(self, deaf_taps=1):
+        self.deaf, self.selected = deaf_taps, False
+
+    def describe_all(self, udid):
+        out = [el("Vya Business", 0, 0, 1210, 834, "Application"), el("ORDER SUMMARY")]
+        if self.selected:
+            return out + [el("unSelectAll"), el("sendItemsBtn")]
+        return out + [el("selectAll")]
+
+    def tap(self, udid, names, els=None, scroll=True):
+        if names == ["selectAll"]:
+            if self.deaf:
+                self.deaf -= 1
+            else:
+                self.selected = True
+        return True, "idb"
+
+
+def test_send_if_any_taps_select_all_again_before_calling_it_nothing(monkeypatch, clock):
+    # MEASURED 2026-11-02 (run faa47a06): "nothing unsent" -- and the new dishes were
+    # unsent, found by the next segment's Select All.
+    pad = DeafSelectAll()
+    install(monkeypatch, pad)
+    sent = []
+    monkeypatch.setattr(FlowRunner, "_handle_special",
+                        lambda self, r, step, notes: sent.append(step) or True)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    fr._list_view = lambda udid: True
+    assert fr._send_if_any(None, [])
+    assert sent == ["@send_to_kitchen"]
+
+
+class BusyOrder(DeafSelectAll):
+    """A just-opened 45-line order with the diners' new dishes: the 'Order' badge
+    (OrderSummary.js:823-829, menu_ordered and not with the kitchen) on each."""
+
+    def describe_all(self, udid):
+        out = super().describe_all(udid)
+        if not self.selected:
+            out += [el("PizzaParmaeRucolacard", 123, 1651, 412, 16),
+                    el("Order", 563, 1652, 40, 16, "StaticText"),
+                    el("PennePollocard", 123, 2427, 412, 16),
+                    el("Pre-Order", 551, 2428, 60, 16, "StaticText")]
+        return out
+
+
+def _send_if_any(monkeypatch, pad):
+    install(monkeypatch, pad)
+    sent = []
+    monkeypatch.setattr(FlowRunner, "_handle_special",
+                        lambda self, r, step, notes: sent.append(step) or True)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    fr._list_view = lambda udid: True
+    notes = []
+    return fr._send_if_any(None, notes), notes, sent
+
+
+def test_send_if_any_keeps_tapping_while_a_diners_dish_shows_the_order_badge(monkeypatch, clock):
+    # MEASURED 2026-11-04 (run 4f64e3f3): two deaf taps right after @open_order, "nothing
+    # unsent" passed with four 'Order' rows; one tap a minute later offered SEND.
+    ok, notes, sent = _send_if_any(monkeypatch, BusyOrder(deaf_taps=4))
+    assert ok, notes
+    assert sent == ["@send_to_kitchen"]
+
+
+class LateSend(BusyOrder):
+    """Select All takes at once (Unselect), but SEND is drawn only once the screen's
+    btnState catches up (Event/index.js:357-370 computes it from the state before the
+    reload) -- MEASURED 2026-11-04 (run f0e40851): Unselect, no SEND; SEND a minute later."""
+
+    def __init__(self, clock, late=25.0):
+        super().__init__(deaf_taps=0)
+        self.clock, self.late, self.at, self.unselected = clock, late, None, 0
+
+    def describe_all(self, udid):
+        out = [el("Vya Business", 0, 0, 1210, 834, "Application"), el("ORDER SUMMARY"),
+               el("PizzaParmaeRucolacard", 123, 1651, 412, 16),
+               el("Order", 563, 1652, 40, 16, "StaticText")]
+        if not self.selected:
+            return out + [el("selectAll")]
+        out.append(el("unSelectAll"))
+        return out + ([el("sendItemsBtn")] if self.clock["t"] - self.at >= self.late else [])
+
+    def tap(self, udid, names, els=None, scroll=True):
+        if names == ["selectAll"] and not self.selected:
+            self.selected, self.at = True, self.clock["t"]
+        elif names == ["unSelectAll"]:
+            self.selected, self.unselected = False, self.unselected + 1
+        return True, "idb"
+
+
+def test_send_if_any_waits_for_send_while_the_dishes_stay_selected(monkeypatch, clock):
+    pad = LateSend(clock)
+    ok, notes, sent = _send_if_any(monkeypatch, pad)
+    assert ok, notes
+    assert sent == ["@send_to_kitchen"] and pad.unselected == 0
+    # The app bug it waited out is said in yellow (run_issues).
+    assert any(n.startswith("    [APP GLITCH] @send_if_any — SEND was not shown for ")
+               and "showed the 'Order' badge" in n for n in notes), notes
+
+
+def test_send_if_any_fails_rather_than_pass_with_unsent_dishes_left(monkeypatch, clock):
+    ok, notes, sent = _send_if_any(monkeypatch, BusyOrder(deaf_taps=99))
+    assert not ok and sent == []
+    assert "'Order'" in notes[-1] and "[FAIL]" in notes[-1]
+    assert clock["t"] <= 150
+
+
+def test_send_if_any_still_passes_when_nothing_is_unsent(monkeypatch, clock):
+    ok, notes, sent = _send_if_any(monkeypatch, DeafSelectAll(deaf_taps=99))
+    assert ok and sent == []
+    assert "nothing unsent" in notes[-1]
+    assert clock["t"] <= 40
+
+
+def test_the_watchdog_samples_the_steps_own_fresh_read(monkeypatch):
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid = "IPAD"
+    monkeypatch.setattr(caf._idb_fast, "recent_screen",
+                        lambda udid, age: '[{"AXLabel": "ORDER SUMMARY"}, {"AXLabel": ""}]')
+    fr._idb_els = lambda udid="": pytest.fail("read the screen again")
+    assert fr._watch_labels() == ["ORDER SUMMARY"]
+
+
+def test_the_watchdog_reads_itself_when_the_step_has_not(monkeypatch):
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid = "IPAD"
+    monkeypatch.setattr(caf._idb_fast, "recent_screen", lambda udid, age: None)
+    fr._idb_els = lambda udid="": [{"label": "Home"}, {"label": ""}]
+    assert fr._watch_labels() == ["Home"]
+
+
+def test_a_fresh_waiter_sign_in_relaunches_the_app_for_its_board(monkeypatch, clock):
+    # MEASURED 2026-11-04 (runs 77bafdb0, 2148c861): after the sign-in the bookings board
+    # stayed empty, 108s and 141s went on polling it before the relaunch found the booking.
+    import inspect
+    src = inspect.getsource(FlowRunner._login_business)
+    assert 'if account == "waiter":\n                            self._fresh_waiter_board(_note)' in src
+    fr = FlowRunner.__new__(FlowRunner)
+    calls = []
+    fr._relaunch_business = lambda notes, tag: calls.append(tag) or True
+    states = iter(["unknown", "unknown", "waiter"])
+    fr._biz_role_state = lambda: next(states, "waiter")
+    notes = []
+    fr._fresh_waiter_board(notes.append)
+    assert calls == ["sign-in"] and "relaunched the app" in notes[-1]
+
+
+class CrowdedWallet:
+    """The shared host account's Wallet with 7 folded NylaiKitchen2 events (MEASURED
+    2026-11-04: leftovers from earlier days, other diners' bookings, 11:44 and this run's
+    10:38). A card below the screen is reached only by scrolling; an open event hides
+    the list and folds again with RoopaDClose."""
+
+    def __init__(self, times=("13:50", "15:30", "10:40", "12:20", "11:44", "10:38", "09:15")):
+        self.times, self.open, self.offset, self.taps = list(times), None, 0, []
+
+    def describe_all(self, udid):
+        out = [{"AXLabel": "Vya Consumer", "type": "Application",
+                "frame": {"x": 0, "y": 0, "width": 390, "height": 844}},
+               el("walletUpcomingSearchInput", 67, 151, 260, 30)]
+        if self.open is not None:
+            return out + [el("RoopaDClose", 296, 207, 80, 30), el("TODAY", 153, 299, 40, 16),
+                          el(self.times[self.open], 217, 299, 40, 16)]
+        for i, _t in enumerate(self.times):
+            out.append(el("NylaiKitchen2Card", 20, 221 + 185 * i - self.offset, 350, 123,
+                          "Button"))
+        return out
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        n, y = e["AXLabel"], e["frame"]["y"]
+        if n == "RoopaDClose":
+            self.open = None
+            return True, "idb"
+        if not 0 <= y <= 844 - 100:
+            if not scroll:
+                self.taps.append("off screen")
+                return True, "idb"           # idb taps a point: nothing there
+            self.offset += y - 400           # brought into view
+            y = 400
+        self.open = int((y + self.offset - 221) // 185)
+        self.taps.append(self.times[self.open])
+        return True, "idb"
+
+
+class PrintedWallet(CrowdedWallet):
+    """The folded cards print their date and time, in the pixels only (the card is one
+    accessibility Button): 'TODAY 10:38', '03 NOV 2026 14:07' (MEASURED 2026-11-04)."""
+
+    DAYS = ("03 NOV 2026", "02 NOV 2026", "02 NOV 2026", "TODAY", "TODAY", "TODAY", "TODAY")
+
+    def read_text(self, udid, region=None, els=None, accurate=False):
+        out = []
+        for i, t in enumerate(self.times):
+            y = 221 + 185 * i - self.offset
+            if self.open is None and 0 <= y and y + 123 <= 844:
+                out += [(self.DAYS[i], 30, y + 80, 80, 14), (t, 30, y + 98, 40, 14)]
+        return out
+
+    def swipe(self, udid, x0, y0, x1, y1, duration=0.25):
+        self.offset = max(0, min(185 * len(self.times), self.offset + (y0 - y1)))
+
+
+def test_unfold_event_opens_the_card_printing_todays_slot_first_time(monkeypatch, clock):
+    # The user, 2026-11-04: "it must go to exact time". The 6th card is TODAY 10:38, below
+    # the screen; no other event is opened on the way.
+    from automation.scenarios import screen_text
+    w = PrintedWallet()
+    install(monkeypatch, w)
+    monkeypatch.setattr(screen_text, "read_text", w.read_text)
+    fr = FlowRunner.__new__(FlowRunner)
+    els = fr._unfold_event("IPHONE", "10:38", "roopad")
+    assert any(caf._idbd.name(e) == "10:38" for e in els)
+    assert w.taps == ["10:38"], w.taps
+
+
+class CheckoutWallet(PrintedWallet):
+    """The same Wallet after Notify Payment: an open event prints its ticket and has
+    Checkout (RoopaDfinishedCard); Checkout opens the payment sheet."""
+
+    def __init__(self):
+        super().__init__()
+        self.sheet = False
+
+    def describe_all(self, udid):
+        out = super().describe_all(udid)
+        if self.open is not None:
+            mine = self.times[self.open] == "10:38"
+            out += [el("TICKET: 5606" if mine else "TICKET: 5618", 200, 420, 120, 16),
+                    el("RoopaDfinishedCard", 20, 600, 362, 51)]
+        if self.sheet:
+            out += [el("Select Payment Method", 20, 300, 200, 20), el("ePayment", 20, 340)]
+        return out
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if e["AXLabel"] == "RoopaDfinishedCard":
+            self.sheet = True
+            return True, "idb"
+        return super().tap_el(udid, e, els, scroll)
+
+    def tap_point(self, udid, x, y):
+        return self.tap_el(udid, {"AXLabel": "NylaiKitchen2Card",
+                                  "frame": {"x": x, "y": y, "width": 1, "height": 1}})
+
+
+def test_checkout_opens_the_card_printing_todays_slot_not_every_event(monkeypatch, clock):
+    # The user, 2026-11-04: "why are you checking every event ... go to exact time card
+    # itself" (seg 17, run d855ca85: 79.5s opening and closing events).
+    from automation.scenarios import screen_text
+    w = CheckoutWallet()
+    install(monkeypatch, w)
+    monkeypatch.setattr(screen_text, "read_text", w.read_text)
+    monkeypatch.setattr(caf._idbd, "_probe", lambda udid, e: e)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr.devices = {"consumer": "IPHONE"}
+    fr._booked_slot, fr._booked_ticket = "10:38", "5606"
+    notes = []
+    assert fr._consumer_checkout(None, notes), notes
+    assert w.taps == ["10:38"], w.taps
+    assert w.sheet and "TODAY 10:38" in notes[-1]
+
+
+def test_unfold_event_reaches_this_runs_event_past_four_others(monkeypatch, clock):
+    # MEASURED 2026-11-04 (run 90c599ff): "no Menu button on the booking's Wallet card";
+    # only the first 4 events were tried and the 11:44 one (another diner's) was left open.
+    w = CrowdedWallet()
+    install(monkeypatch, w)
+    fr = FlowRunner.__new__(FlowRunner)
+    els = fr._unfold_event("IPHONE", "10:38", "roopad")
+    assert any(caf._idbd.name(e) == "10:38" for e in els), w.taps
+    assert "off screen" not in w.taps

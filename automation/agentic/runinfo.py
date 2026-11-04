@@ -83,7 +83,8 @@ def run_text(run_id: str) -> str:
                    f"(consumer {r.consumer_status}, business {r.business_status})")
         if r.error:
             out.append(f"error: {r.error}")
-        notes = [str(n) for n in (r.reasons or [])]
+        # '[calc] {…}' notes are the HTML report's tables; the sums are in the '·' lines.
+        notes = [str(n) for n in (r.reasons or []) if not str(n).startswith("[calc] ")]
         if len(notes) > 60:
             notes = notes[:10] + [f"… {len(notes) - 50} notes omitted …"] + notes[-40:]
         out.extend("  " + n[:400] for n in notes)

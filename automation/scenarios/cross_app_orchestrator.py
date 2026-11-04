@@ -262,7 +262,14 @@ def _options(udid: str, bundle_id: str, wda_port: int) -> XCUITestOptions:
     _wda.apply(o, udid=udid, wda_port=wda_port)
     # The Business app fires a native "Send You Notifications" permission alert on
     # launch that sits ON TOP of the login form and swallows every tap/keystroke.
-    o.set_capability("autoAcceptAlerts", True)
+    # autoAcceptAlerts clears it with WDA's alert watcher, which snapshots every active
+    # app every 2s for the whole session (FBAlertsMonitor.m). On a big order that kept
+    # the business app and WDA busy, and every idb read took 7-14s (MEASURED 2026-11-02,
+    # run 822ff575: a split took 595s of its 600). The phones' too: an idle host session
+    # kept its WDA at 55 % CPU through a waiter segment (MEASURED 2026-11-04). So no
+    # session runs the watcher: the business sessions accept that alert at sign-in, the
+    # phones when their session starts (accept_system_alert); setup pre-grants the
+    # privacy permissions (location, contacts, photos) that would otherwise ask mid-flow.
     # ── Anti-hang: the Vya RN apps animate constantly (spinners, loaders), so
     # XCUITest's default "wait for the app to be idle" before every command never
     # settles and each tap/find HANGS for minutes. Disable quiescence waiting and
@@ -294,6 +301,16 @@ def apply_flow_speed_settings(d) -> None:
         d.update_settings(FLOW_SPEED_SETTINGS)
     except Exception as e:
         logger.debug("flow speed settings not applied: %s", e)
+
+
+def accept_system_alert(d) -> bool:
+    """Accept a system alert if one is up (the business sessions run without
+    autoAcceptAlerts, see _options). False when there is none."""
+    try:
+        d.execute_script("mobile: alert", {"action": "accept"})
+        return True
+    except Exception:
+        return False
 
 
 def _fill_field(d, name: str, text: str) -> bool:
@@ -498,6 +515,7 @@ class CrossAppOrchestrator:
         Credentials come from the environment (VYA_BUSINESS_USER /
         VYA_BUSINESS_PASSWORD) — never hardcoded. Returns True when past login.
         """
+        accept_system_alert(r.d)                 # 'Send You Notifications', fresh install
         if not r._resolve([BIZ_SIGNIN_BTN]):
             return True                          # already logged in
         # Prefer the run's configured waiter credentials; fall back to env.

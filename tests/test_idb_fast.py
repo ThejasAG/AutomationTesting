@@ -82,3 +82,18 @@ def test_the_interpreter_comes_from_the_idb_shebang(tmp_path):
     idb.write_text(f"#!{py}\nimport sys\n")
     assert idb_fast._python_for(str(idb)) == str(py)
     assert idb_fast._python_for(str(tmp_path / "missing")) is None
+
+
+def test_the_latest_screen_read_is_kept_for_the_watchdog(monkeypatch):
+    # MEASURED 2026-11-04 (run 77520bbf): the UI watchdog's own full-screen reads every
+    # 6s ran beside the step's, and reads averaged 4.8s instead of 0.9s.
+    clock = {"t": 100.0}
+    monkeypatch.setattr(idb_fast.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(idb_fast, "_acquire", lambda: None)
+    monkeypatch.setattr(idb_fast, "_cli", lambda argv, timeout:
+                        subprocess.CompletedProcess(argv, 0, '[{"AXLabel": "x"}]', ""))
+    idb_fast.run(["ui", "describe-all", "--udid", "IPAD"])
+    assert idb_fast.recent_screen("IPAD", 8.0) == '[{"AXLabel": "x"}]'
+    assert idb_fast.recent_screen("PHONE", 8.0) is None
+    clock["t"] += 9.0
+    assert idb_fast.recent_screen("IPAD", 8.0) is None
