@@ -494,15 +494,15 @@ def cross_app_step_catalog(current_user=Depends(get_current_user)):
     """Step tokens the runner understands, for the editor's picker. Free text is still
     accepted (it falls through to the fuzzy click/type resolver) — this is a menu."""
     from automation.scenarios.cross_app_flows import STEP_CATALOG
-    return {"catalog": STEP_CATALOG, "roles": ["consumer", "waiter", "kitchen"]}
+    return {"catalog": STEP_CATALOG, "roles": ["consumer", "participant", "waiter", "kitchen"]}
 
 
 def _validate_segments(segments: List[FlowSegmentIn]) -> None:
     if not segments:
         raise HTTPException(400, "A flow needs at least one segment.")
     for i, s in enumerate(segments, 1):
-        if s.role not in ("consumer", "waiter", "kitchen"):
-            raise HTTPException(400, f"Segment {i}: role must be consumer, waiter or kitchen.")
+        if s.role not in ("consumer", "participant", "waiter", "kitchen"):
+            raise HTTPException(400, f"Segment {i}: role must be consumer, participant, waiter or kitchen.")
         if not [x for x in s.steps if x.strip()]:
             raise HTTPException(400, f"Segment {i} ('{s.name or s.role}') has no steps.")
 
@@ -589,29 +589,39 @@ def heal_after_run_all(done, created_by: str = ""):
     """When a Run all ends with failures, start an AI Agent heal session on exactly
     those runs (setting auto_heal_after_run_all). Not after a batch the user
     stopped, nor for runs the too-early toast stopped ("Waiting: …"). Returns the
-    session id, or None."""
+    session id, or None. Every outcome is recorded (session.note_hook) — MEASURED
+    2026-10-26: a batch ended with 9 failures and no session, and nothing said why."""
     from automation.agentic import settings as agent_settings
+    from automation.claude_code import session as agent_session
+    failed = [rid for _, rid, st in done if st == "failed"]
+    facts = {"runs": len(done), "failed": len(failed)}
+
+    def skip(why):
+        agent_session.note_hook("run_all", "skipped", why, **facts)
+        return None
+
     if not agent_settings.get().get("auto_heal_after_run_all"):
-        return None
+        return skip("auto-heal after Run all is switched off")
     if any(st == "cancelled" for _, _, st in done):
-        return None
+        return skip("the batch was cancelled")
     if done and done[-1][2] == "stopped":
         from automation.database.config import SessionLocal
         from automation.database.models import TestRun
         with SessionLocal() as db:
             last = db.query(TestRun).filter_by(id=done[-1][1]).first()
             if not (last and (last.error_message or "").startswith("Waiting:")):
-                return None                                   # the user pressed Stop
-    failed = [rid for _, rid, st in done if st == "failed"]
+                return skip("the batch was stopped by the user")
     if not failed:
-        return None
-    from automation.claude_code import session as agent_session
+        return skip("every flow passed")
     try:
-        return agent_session.create("heal", trigger="run_all", options={"run_ids": failed},
-                                    created_by=created_by)
+        sid = agent_session.create("heal", trigger="run_all", options={"run_ids": failed},
+                                   created_by=created_by)
     except (agent_session.Busy, agent_session.Refused, ValueError) as e:
         logger.warning("run-all: no heal session started: %s", e)
+        agent_session.note_hook("run_all", "refused", str(e), **facts)
         return None
+    agent_session.note_hook("run_all", "started", f"heal session {sid[:8]}", session_id=sid, **facts)
+    return sid
 
 
 def _run_all_then_heal(flow_ids, env, start, session_factory, created_by=""):
@@ -627,6 +637,11 @@ def _run_all_then_heal(flow_ids, env, start, session_factory, created_by=""):
                         sum(st == "failed" for _, _, st in done), sid[:8])
     except Exception as e:  # noqa: BLE001 — never let the hook break the batch's end
         logger.warning("run-all: heal hook failed: %s", e)
+        try:
+            from automation.claude_code import session as agent_session
+            agent_session.note_hook("run_all", "error", f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 
 @runs_router.post("/cross-app-flows/run-all")

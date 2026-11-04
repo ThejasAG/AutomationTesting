@@ -12,17 +12,19 @@ session runner, so nothing depends on the model having done what it said:
   on device    each flow whose steps changed, each new flow, and (for engine
                code) at least one flow the change reaches PASSED on the simulators
                after the last edit
-  size         the change is small enough to review (settings.max_changed_lines)
+  size         the change is small enough to review (settings.max_changed_lines,
+               plus LINES_PER_NEW_FLOW for each new flow)
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import py_compile
 import re
 import subprocess
 import sys
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from automation.agentic.runinfo import CHECK_STEP
 from automation.claude_code import impact
@@ -77,6 +79,8 @@ _DUMP = (
     "from automation.scenarios.cross_app_flows import FLOWS, FlowRunner\n"
     "print(json.dumps({'flows': {k: [s for seg in (f.get('segments') or [])"
     " for s in (seg.get('steps') or [])] for k, f in FLOWS.items()},"
+    " 'segments': {k: [list(seg.get('steps') or []) for seg in (f.get('segments') or [])]"
+    " for k, f in FLOWS.items()},"
     " 'aliases': dict(getattr(FlowRunner, '_PLAIN_STEP_TOKENS', {}))}))\n"
 )
 
@@ -140,9 +144,23 @@ _FAILED = re.compile(r"^(FAILED|ERROR) (\S+)", re.M)
 _COUNTS = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
 
+# The whole suite in parallel processes (pytest-xdist): MEASURED 2026-10-28, 1,875
+# tests in 2m01s with 4 workers against 5m45s in one, same 3 failures. Each worker
+# imports tests/conftest.py and so gets its own temporary database. 4, not every
+# core: a session's checks can run while the simulators are busy.
+UNIT_WORKERS = 4
+
+
+def _parallel_args(paths: Optional[List[str]]) -> List[str]:
+    if paths or importlib.util.find_spec("xdist") is None:
+        return []
+    return ["-n", str(UNIT_WORKERS)]
+
+
 def run_unit_tests(root: str, paths: Optional[List[str]] = None, timeout: int = 1500) -> Dict[str, Any]:
     """pytest in `root`. Returns {ok, failed: [nodeid], counts, tail}."""
-    cmd = [_PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rfE"] + (paths or ["tests"])
+    cmd = ([_PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rfE"] + _parallel_args(paths)
+           + (paths or ["tests"]))
     try:
         out = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=timeout,
                              env=dict(os.environ, PYTHONPATH=root))
@@ -208,12 +226,22 @@ def confirm_runs(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def device_gate(runs: List[Dict[str, Any]], last_edit: float, must_pass: Iterable[str],
-                any_of: Optional[List[str]]) -> Dict[str, Any]:
-    """`must_pass`: each needs a passing run started after `last_edit`.
-    `any_of`: at least one of these must have one ([impact.ALL] = any flow)."""
-    passed_after = {r["flow_id"] for r in runs
-                    if r.get("status") == "passed" and float(r.get("t0") or 0) >= last_edit}
-    problems = [f"{f}: no passing run after the last edit" for f in sorted(set(must_pass))
+                any_of: Optional[List[str]],
+                current: Optional[Callable[[Dict[str, Any]], Optional[bool]]] = None) -> Dict[str, Any]:
+    """`must_pass`: each needs a passing run of the code it has now.
+    `any_of`: at least one of these must have one ([impact.ALL] = any flow).
+
+    `current(run)` says whether a run executed the code its flow has now (from the
+    run's fingerprint, see fingerprint.py); a run it cannot judge (None) counts only
+    when it started after `last_edit`, the last change to any file."""
+    def counts(r: Dict[str, Any]) -> bool:
+        if r.get("status") != "passed":
+            return False
+        verdict = current(r) if current is not None else None
+        return verdict if verdict is not None else float(r.get("t0") or 0) >= last_edit
+
+    passed_after = {r["flow_id"] for r in runs if counts(r)}
+    problems = [f"{f}: no passing run after the last edit that reaches it" for f in sorted(set(must_pass))
                 if f not in passed_after]
     if any_of:
         ok_any = bool(passed_after) if impact.ALL in any_of else bool(passed_after & set(any_of))
@@ -225,6 +253,18 @@ def device_gate(runs: List[Dict[str, Any]], last_edit: float, must_pass: Iterabl
     return gate("on device", not problems, "\n".join(problems + [detail]))
 
 
-def size_gate(numstat: List[Dict[str, Any]], limit: int) -> Dict[str, Any]:
+# What one new scenario adds (its flow, handler and unit test): MEASURED over the
+# approved 'New scenarios' sessions 2026-10-26..28, 150-370 changed lines each. A
+# session makes one per ticked feature, so the limit grows with the ones it keeps.
+# MEASURED 2026-10-28: session 60f14a6c kept 3, passed every other check, and its
+# 961 lines against a flat 800 left it unapprovable.
+LINES_PER_NEW_FLOW = 400
+
+
+def size_gate(numstat: List[Dict[str, Any]], limit: int, new_flows: int = 0) -> Dict[str, Any]:
     total = sum(int(f.get("added") or 0) + int(f.get("removed") or 0) for f in numstat)
-    return gate("size", total <= limit, f"{total} changed lines (limit {limit})")
+    new_flows = max(0, int(new_flows or 0))
+    allowed = limit + LINES_PER_NEW_FLOW * new_flows
+    how = (f"limit {limit} + {new_flows} new scenario{'' if new_flows == 1 else 's'} × "
+           f"{LINES_PER_NEW_FLOW} = {allowed}") if new_flows else f"limit {limit}"
+    return gate("size", total <= allowed, f"{total} changed lines ({how})")

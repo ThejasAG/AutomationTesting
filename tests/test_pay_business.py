@@ -87,12 +87,14 @@ def pay(monkeypatch):
     monkeypatch.setattr(caf, "time", types.SimpleNamespace(
         time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
 
-    def go(screen, method="epay"):
+    def go(screen, method="epay", **state):
         monkeypatch.setattr(caf._idbd, "describe_all", screen.describe_all)
         monkeypatch.setattr(caf._idbd, "tap_el", screen.tap_el)
         monkeypatch.setattr(caf._idbd, "tap", screen.tap)
         runner = FlowRunner.__new__(FlowRunner)
         runner._cur_udid = "IPAD"
+        for k, v in state.items():
+            setattr(runner, k, v)
         notes = []
         return runner._pay_business(method, notes), notes
     return go
@@ -290,3 +292,201 @@ def test_close_table_never_repays_an_accepted_payment(monkeypatch):
     assert "accepted the payment of 85.80 €" in notes[-1]
     assert "staging ignores a payment equal to such a bill" in notes[-1]
     assert "Server bug, not the test" in notes[-1]
+
+
+def test_paying_for_others_tenders_one_cent_over_the_bill(pay):
+    """User decision 2026-10-27: staging ignores a pay-for-all E-Payment that EQUALS
+    the bill (known_issues.md) but settles any amount above it, so the payer who took
+    over the others' share pays the bill + 0.01 and the flow can pass."""
+    s = GuestCardBelow(total="85.80")
+    ok, notes = pay(s, _paid_for_others=["Guest 1", "Guest 2", "Guest 3"])
+    assert ok and s.inputs == [f"{85.80 + caf.PAY_FOR_OTHERS_OVER_BY:.2f}"] == ["85.81"]
+    assert "paying for others — 85.81 € for a bill of 85.80 €" in " ".join(notes)
+    assert "change 0.01 €" in notes[-1]
+
+
+def test_a_single_payer_still_pays_exactly_the_bill(pay):
+    s = GuestCardBelow(total="85.80")
+    ok, notes = pay(s)
+    assert ok and s.inputs == ["85.80"] and "change" not in notes[-1]
+
+
+class TwoOpenCards(PaymentScreen):
+    """The participant's card, paid a moment ago, still open ABOVE the next payer's
+    (Guest 5) on the panel: both show a cash button and a Confirm. The cards keep
+    their own open state (Components/Accordion/index.js:13-25), and a guest's buttons
+    are the paid* ones (PaymentDetails:3698-3829). The review of 2026-11-02."""
+
+    def describe_all(self, udid):
+        els = [e for e in super().describe_all(udid)
+               if "accordionCard" not in e["AXLabel"]]
+        els += [el("N NooluNagaaccordionCard ", 834, 146, 336, 49),
+                el("cashPaymentBtn", 950, 220), el("paymentConfirmBtn", 1000, 260, 170, 60),
+                el("G Guest5accordionCard ", 834, 290, 336, 49)]
+        if self.open:
+            els = [e for e in els if e["AXLabel"] not in ("epaymentBtn", "cashPaymentBtn",
+                                                          "foodVoucherBtn", "paymentConfirmBtn")
+                   or e["frame"]["y"] < 290]
+            els += [el("paidCashPaymentBtn", 950, 400)]
+            if any(e["AXLabel"] == "paymentConfirmBtn" and e["frame"]["y"] == 560
+                   for e in super().describe_all(udid)):
+                els.append(el("paymentConfirmBtn", 1000, 560, 170, 60))
+            els += [el("Total", 840, 363, 37, 18, "StaticText"),
+                    el(f"{self.total} €", 1108, 363, 58, 18, "StaticText")]
+        return els
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        n = e["AXLabel"]
+        if n == "paidCashPaymentBtn":
+            self.log.append(n)
+            self.pad = True
+            return True, "idb"
+        if n == "paymentConfirmBtn" and e["frame"]["y"] != 560:
+            self.log.append("Noolu's Confirm")
+            return True, "idb"
+        if n == "cashPaymentBtn":
+            self.log.append("Noolu's cash")
+            return True, "idb"
+        if "NooluNaga" in n:
+            self.log.append(n)
+            return True, "idb"
+        return super().tap_el(udid, e, els, scroll)
+
+
+def test_the_next_payer_pays_on_their_own_card_not_one_left_open_above(pay):
+    s = TwoOpenCards(total="20.00")
+    ok, notes = pay(s, "cash", _payer_card="Guest5accordionCard")
+    assert ok and s.paid, notes
+    assert "Noolu's cash" not in s.log and "Noolu's Confirm" not in s.log
+    assert "paidCashPaymentBtn" in s.log and s.log[-1] == "paymentConfirmBtn"
+
+
+class EmptyReadAfterConfirm(PaymentScreen):
+    """Confirm did not register, and the first read after it timed out ([])."""
+
+    def __init__(self):
+        super().__init__(confirm_works=False)
+        self.blank = False
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        out = super().tap_el(udid, e, els, scroll)
+        if e["AXLabel"] == "paymentConfirmBtn":
+            self.blank = True
+        return out
+
+    def describe_all(self, udid):
+        if self.blank:
+            self.blank = False
+            return []
+        return super().describe_all(udid)
+
+
+def test_an_empty_read_after_confirm_is_not_taken_for_accepted(pay):
+    ok, notes = pay(EmptyReadAfterConfirm())
+    assert "did not react in 45s" in notes[-1], notes[-1]
+
+
+class ReloadsAfterInput(PaymentScreen):
+    """A guest's Input reloads the panel: a spinner in place of every card for ~20s,
+    then the card back FOLDED (handlePayingForBusiness, PaymentDetails.js:4838)."""
+
+    def __init__(self, clock):
+        super().__init__(stays_open=False)
+        self.clock, self.spin_until = clock, None
+
+    def tap(self, udid, names, els=None, scroll=True):
+        out = super().tap(udid, names, els, scroll)
+        if names == ["userInputBtn"]:
+            self.spin_until = self.clock["t"] + 20.0
+        return out
+
+    def describe_all(self, udid):
+        if self.spin_until is not None and self.clock["t"] < self.spin_until:
+            return [el("Vya Business", 0, 0, 1210, 834, "Application"),
+                    el("", 900, 400, 40, 40, "ActivityIndicator")]
+        return super().describe_all(udid)
+
+
+def test_a_panel_reload_after_input_is_waited_out_and_the_card_reopened(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+    s = ReloadsAfterInput(clock)
+    for fn in ("describe_all", "tap_el", "tap"):
+        monkeypatch.setattr(caf._idbd, fn, getattr(s, fn))
+    runner = FlowRunner.__new__(FlowRunner)
+    runner._cur_udid = "IPAD"
+    notes = []
+    assert runner._pay_business("cash", notes), notes
+    assert s.paid and s.log[-1] == "paymentConfirmBtn"
+    assert any("folded — reopened it" in n for n in notes)
+
+
+class SlidRow(PaymentScreen):
+    """The card's tiles left slid sideways by the discount step: E-Payment at x 758, off a
+    card starting at 834 (MEASURED 2026-11-04, run ce8ba9e5). A tap there opens nothing."""
+
+    def __init__(self):
+        super().__init__()
+        self.open, self.shift = True, 89.5
+
+    def describe_all(self, udid):
+        els = super().describe_all(udid)
+        for e in els:
+            if e["AXLabel"] in ("epaymentBtn", "cashPaymentBtn", "foodVoucherBtn"):
+                e["frame"]["x"] -= self.shift
+        return els
+
+    def swipe(self, udid, x0, y0, x1, y1, duration=0.25):
+        self.shift = min(89.5, max(0.0, self.shift + (x0 - x1)))
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if e["AXLabel"] == "epaymentBtn" and e["frame"]["x"] < 834:
+            self.log.append("off the card")
+            return False, "not reachable (covered or scrolled out)"
+        return super().tap_el(udid, e, els, scroll)
+
+
+def test_a_payment_tile_slid_off_the_card_is_brought_back_before_the_tap(pay, monkeypatch):
+    s = SlidRow()
+    monkeypatch.setattr(caf._idbd, "swipe", s.swipe)
+    ok, notes = pay(s)
+    assert ok and s.paid, notes
+    assert "off the card" not in s.log and s.shift == 0
+
+
+class SlowPad(PaymentScreen):
+    """A loaded iPad: each read takes 10s, and the keypad shows from the second read
+    after the E-Payment tap (MEASURED 2026-11-04, run 9b339cbc: the keypad was up, the
+    8s wait had looked once)."""
+
+    def __init__(self, clock):
+        super().__init__()
+        self.clock, self.hidden = clock, 0
+
+    def describe_all(self, udid):
+        self.clock["t"] += 10.0
+        els = super().describe_all(udid)
+        if self.pad and self.hidden:
+            self.hidden -= 1
+            return [e for e in els if e["AXLabel"] not in ("userInputBtn", "userAmountInput")]
+        return els
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if e["AXLabel"] == "epaymentBtn":
+            self.hidden = 1
+        return super().tap_el(udid, e, els, scroll)
+
+
+def test_a_keypad_slower_than_one_read_is_still_found(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf, "time", types.SimpleNamespace(
+        time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
+    s = SlowPad(clock)
+    for fn in ("describe_all", "tap_el", "tap"):
+        monkeypatch.setattr(caf._idbd, fn, getattr(s, fn))
+    runner = FlowRunner.__new__(FlowRunner)
+    runner._cur_udid = "IPAD"
+    notes = []
+    assert runner._pay_business("epay", notes), notes
+    assert s.paid and "keypad did not open" not in " ".join(notes)

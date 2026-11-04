@@ -25,9 +25,12 @@ router = APIRouter(prefix="/reports", tags=["Test Reports"])
 
 
 def _scenarios(db: Session, run_id: str) -> List[ScenarioResult]:
-    return (db.query(ScenarioResult)
+    rows = (db.query(ScenarioResult)
             .filter(ScenarioResult.run_id == run_id)
             .order_by(ScenarioResult.scenario_num).all())
+    # scenario_num is text: '10' sorts before '2' -- order the segments as numbers.
+    return sorted(rows, key=lambda r: (0, int(r.scenario_num)) if str(r.scenario_num or "").isdigit()
+                  else (1, 0))
 
 
 def _fmt_duration(ms: Optional[int]) -> str:
@@ -69,7 +72,7 @@ def rich_report(run_id: str, screenshots: int = 1, db: Session = Depends(get_db)
     title = f"Vya Mobile Automation — {r.test_name or 'Test Report'}"
     html = render_run_report(
         records, title=title, subtitle="  ·  ".join(subtitle_bits),
-        duration=duration, validation_header="Bill &amp; VAT Validation",
+        duration=duration, validation_header="Bill, VAT &amp; Grand Total Validation",
         include_screenshots=bool(screenshots))
     return HTMLResponse(content=html)
 

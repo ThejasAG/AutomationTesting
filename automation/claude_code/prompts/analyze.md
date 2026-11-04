@@ -14,6 +14,21 @@ Follow `.claude/skills/analyze-apps/SKILL.md`:
    feature **covered / partial / missing**, with a **risk** (high: money,
    bookings, orders, payments, table status; medium: lists, filters, settings;
    low: cosmetic).
+
+   **Feature size and names must stay stable between analyses** — the team compares
+   one map with the next:
+   - one feature = one thing a tester checks: one user action and its outcome
+     ("Waiter voids a line item", "Waiter comps a line item", "Waiter splits a line
+     item" are three features, not one "assign/split/void/comp");
+   - start from the previous analysis's list below: keep each feature and its exact
+     name; add a feature only for a screen or capability it does not cover; drop
+     one only when its screens are gone from the source; never merge or rename
+     features for style. A previous feature that bundles several checks ("X / Y / Z")
+     is split into one feature per check, once. Say in `report.md` which features
+     were added, split or dropped, and why.
+
+   Previous analysis ($previous_count features):
+$previous_features
 4. Write `$session_dir/feature_map.json`:
 ```json
 {"generated": "$date", "mode": "$mode",

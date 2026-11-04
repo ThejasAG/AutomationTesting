@@ -11,8 +11,10 @@ matches one of these is reported as what it is; it is not re-investigated and no
   to the bill, the server answers 2xx and records nothing (`paidAmount 0,
   payment_completed false` in the C-App's `businessSidePay` log, logs/metro_8084.log).
   Overpaying settles; single-profile exact payments settle. Likely an unrounded float
-  sum (24.52+26.26+17.51+17.51 = 85.80000000000001 > 85.80). The flow fails with the
-  server-bug message on purpose. Do NOT overpay, re-pay or tap Confirm again.
+  sum (24.52+26.26+17.51+17.51 = 85.80000000000001 > 85.80). **Decision (user,
+  2026-10-27):** the suite pays the bill + €0.01 in that case (`PAY_FOR_OTHERS_OVER_BY`),
+  so the flow can pass; the exact-amount bug stays reported to the server team. Do not
+  change that amount, re-pay, or tap Confirm again.
 - A greyed-out **Confirm** on the B-App payment card takes taps silently (no
   accessibility state). Confirm is enabled only when the stored amount ≥ Σ finalTotal;
   check the amount label, not the tap result. "Due" is change owed back.
@@ -69,9 +71,9 @@ matches one of these is reported as what it is; it is not re-investigated and no
 
 ## Flow preconditions
 
-- **flow_kitchen_demo** needs an order already waiting in the kitchen queue. In a
-  Run all there usually is none: "no queued order has items" is an unmet
-  precondition, not a bug.
+- **flow_kitchen_demo** is self-contained since 2026-10-27 (user decision): it books
+  with Order later, the waiter sends the items, and the kitchen readies THIS run's
+  ticket. "Ticket X is not on the kitchen board" is a real failure now.
 
 ## Unit tests that fail on purpose today
 

@@ -71,21 +71,31 @@ def extract_js_errors(text: str, max_lines: int = 50) -> List[str]:
 
 
 def read_js_console(log_path: Optional[str], max_lines: int = 50,
-                    tail_bytes: int = 2_000_000) -> List[str]:
+                    tail_bytes: int = 2_000_000, since: Optional[int] = None) -> List[str]:
     """`extract_js_errors` over a log file, reading only its tail.
 
     A long-running bundler log is far too big to load whole; 2 MB covers well beyond
     any single run. Returns [] rather than raising — missing evidence must never be
     the thing that fails a run.
+
+    *since*: the log's size when the step being explained began — only lines written
+    after it are read. MEASURED 2026-10-27: without it, a "JavaScript heap out of
+    memory" line already in the log was attached to three unrelated failures as
+    their cause, and the AI Agent diagnosed a Metro crash that never happened.
+    A log smaller than *since* was rolled or truncated: read it from the start.
     """
     if not log_path or not os.path.isfile(log_path):
         return []
     try:
         size = os.path.getsize(log_path)
         with open(log_path, "rb") as f:
-            if size > tail_bytes:
-                f.seek(size - tail_bytes)
-                f.readline()          # drop the partial first line
+            start = since if since is not None and 0 <= since <= size else 0
+            if size - start > tail_bytes:
+                start = size - tail_bytes
+            if start:
+                f.seek(start)
+                if since is None or start != since:
+                    f.readline()      # drop the partial first line
             text = f.read().decode("utf-8", "replace")
     except OSError:
         return []

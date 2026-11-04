@@ -57,3 +57,15 @@ def test_a_cancel_ends_the_batch():
     start, session, started = _fakes({"a": ("cancelled", "")})
     run_flows_in_order(["a", "b"], "staging", start, session, sleep=lambda s: None)
     assert started == ["a"]
+
+
+def test_the_kitchen_demo_makes_its_own_order_first():
+    """User decision 2026-10-27: the kitchen demo failed in every Run all with an empty
+    kitchen queue; it now books, has the waiter send the items, then readies THIS
+    run's ticket (_kitchen_ready targets _booked_ticket)."""
+    from automation.scenarios.cross_app_flows import FLOWS
+    segs = FLOWS["flow_kitchen_demo"]["segments"]
+    assert [s["role"] for s in segs] == ["consumer", "waiter", "kitchen"]
+    assert "click orderLater" in segs[0]["steps"]
+    assert "click sendItemsBtn" in segs[1]["steps"]
+    assert segs[2]["steps"] == ["@kitchen_ready"]

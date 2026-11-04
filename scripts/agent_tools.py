@@ -7,11 +7,14 @@ project folder. Output is plain text.
   busy                              is a flow running on the simulators?
   preflight [--wait MIN]            Appium, simulators, staging; waits up to MIN for the rig
   flows                             every flow with its last results
+  green [--hours H]                 flows that passed in the last H h (8) on unchanged flow code — skip them
   show-flow FLOW                    the flow's segments and steps as they run now
+  steps                             every step form, @token (+ its handler) and shared block
   history FLOW                      the flow's last runs and where each failed
-  run FLOW [--resume RUN] [--label L] [--max SEC]
+  run FLOW [--resume RUN] [--label L] [--max SEC] [--until N]
                                     run one flow on the simulators, with THIS checkout's
-                                    code, and wait for it (one at a time)
+                                    code, and wait for it (one at a time); --until N stops
+                                    once segment N passed (resume it to go on)
   wait RUN [--max SEC]              keep waiting for a run `run` returned early on
   run-info RUN                      segments, errors, notes, rule verdict, screenshot files
   check-flows                       does cross_app_flows.py import, is every @token handled?
@@ -23,7 +26,7 @@ project folder. Output is plain text.
   app-changes                       new upstream commits in both app repos since the last analysis
   app-show APP PATH [--start N --end M]   a file as it is upstream (new code not checked out)
   app-grep APP PATTERN              git grep over the upstream code
-  screen consumer|waiter|kitchen    what the simulator shows now: element list + screenshot
+  screen consumer|participant|waiter|kitchen   what the simulator shows now: element list + screenshot
   recover wda|rig                   restart WebDriverAgent on both simulators / start the rig
 
 Flows run in a detached child process: if the calling command is killed (a Bash
@@ -59,7 +62,8 @@ STATE_FILE = os.path.join(MAIN_ROOT, "logs", "agent_sessions", "state.json")
 ENV = "staging"
 TERMINAL = ("passed", "failed", "error", "stopped", "cancelled", "canceled")
 DEFAULT_WAIT_S = 540          # under Claude Code's 10-minute Bash cap
-ROLE_DEVICE = {"consumer": "consumer", "waiter": "waiter", "kitchen": "kitchen"}
+ROLE_DEVICE = {"consumer": "consumer", "participant": "participant", "waiter": "waiter",
+               "kitchen": "kitchen"}
 
 
 def session_dir() -> str:
@@ -130,9 +134,115 @@ def cmd_flows(_a) -> int:
     return 0
 
 
+def cmd_green(a) -> int:
+    """Flows already proven: their latest run passed within the last `--hours` AND after
+    the newest commit to the flow code, so running them again would only repeat it.
+    A run-all skips these (a full pass, when asked for, runs everything)."""
+    import calendar
+    from automation.database.config import SessionLocal
+    from automation.database.models import TestRun
+    from automation.scenarios.cross_app_flows import list_flows
+    try:
+        code_ts = int(_git(CODE_ROOT, "log", "-1", "--format=%ct", "--", "automation").strip() or 0)
+    except (RuntimeError, subprocess.SubprocessError, ValueError):
+        code_ts = int(time.time())          # unknown → nothing counts as proven
+    since = max(time.time() - a.hours * 3600, code_ts)
+    green, rest = [], []
+    with SessionLocal() as db:
+        for f in list_flows():
+            last = (db.query(TestRun)
+                    .filter(TestRun.bot_type == "ios-crossapp-flow",
+                            TestRun.test_name.like(f"%{f['name']}"),
+                            TestRun.status.in_(TERMINAL))
+                    .order_by(TestRun.created_at.desc()).first())
+            done = last.completed_at if last else None
+            if last and last.status == "passed" and done and calendar.timegm(done.timetuple()) >= since:
+                ago = (time.time() - calendar.timegm(done.timetuple())) / 3600
+                green.append(f"{f['id']}  passed {ago:.1f} h ago (run {last.id[:8]})")
+            else:
+                rest.append(f["id"])
+    print(f"Proven (passed in the last {a.hours:g} h, after the last change to the flow code) — "
+          f"skip these and report them as passed earlier:")
+    print("\n".join("  " + g for g in green) or "  none")
+    print(f"Run these: {' '.join(rest) or 'none'}")
+    return 0
+
+
 def cmd_show_flow(a) -> int:
     from automation.agentic import runinfo
     print(runinfo.flow_text(a.flow))
+    return 0
+
+
+_BLOCK_ROLE = {"_C_": "consumer", "_W_": "waiter", "_K_": "kitchen"}
+
+
+def _token_methods(src: str) -> Dict[str, str]:
+    """{'@token' or '@prefix:': the FlowRunner method(s) its branch returns}, read
+    from _handle_special's source; '(inline)' when the branch does the work itself."""
+    lines = src.splitlines()
+    found: Dict[str, List[str]] = {}
+    for i, line in enumerate(lines):
+        toks = re.findall(r'"(@[a-z_]+:?)"', line)
+        if not toks:
+            continue
+        body = []
+        for nxt in lines[i + 1:]:
+            if nxt.strip().startswith("if step"):
+                break
+            body.append(nxt)
+        names = re.findall(r"return self\.(_\w+)\(", "\n".join(body))
+        for tok in toks:
+            found.setdefault(tok, [])
+            found[tok] += [n for n in names if n not in found[tok]]
+    return {tok: " / ".join(names) or "(inline)" for tok, names in found.items()}
+
+
+def _block_users(block: List[str], flows: Dict[str, Any]) -> List[str]:
+    n = len(block)
+    return [fid for fid, f in flows.items()
+            if any(s["steps"][i:i + n] == block for s in f.get("segments") or []
+                   for i in range(len(s["steps"]) - n + 1))]
+
+
+def cmd_steps(_a) -> int:
+    """What a flow step can be — read from the engine itself, so it is never stale:
+    the step forms, every @token with the handler method behind it, the plain steps
+    that are rewritten to a token, and the shared step blocks with the flows using
+    them. MEASURED 2026-10-27: a 'Create scenarios' session spent 23 of its 57
+    minutes in helper agents rediscovering exactly this from the 10k-line file."""
+    import inspect
+    from automation.agentic.runinfo import known_tokens
+    from automation.scenarios import cross_app_flows as caf
+    print("STEP FORMS — one string per step, run in order; a failing step ends the segment")
+    for row in caf.STEP_CATALOG.get("Common", []):
+        print(f"  {row['step']:<34} {row['help']}")
+    print(f"  {'?<step>':<34} optional: done when its target shows within ~6s, else skipped")
+    exact, prefixes = known_tokens()
+    methods = _token_methods(inspect.getsource(caf.FlowRunner._handle_special))
+    helps = {}
+    for rows in caf.STEP_CATALOG.values():
+        for row in rows:
+            tok = row["step"].split(":", 1)[0] + (":" if ":" in row["step"] else "")
+            helps.setdefault(tok, (row["step"], row["help"]))
+    print("\n@TOKENS — `_handle_special` dispatches these (method = the FlowRunner handler)")
+    for tok in sorted(exact | prefixes):
+        shown, help_ = helps.get(tok, (tok + ("<arg>" if tok.endswith(":") else ""), ""))
+        print(f"  {shown:<34} {methods.get(tok, '?'):<26} {help_}")
+    print("\nPLAIN STEPS rewritten to a token before they run")
+    for plain, tok in caf.FlowRunner._PLAIN_STEP_TOKENS.items():
+        print(f"  {plain:<34} -> {tok}")
+    print("\nSHARED STEP BLOCKS — reuse them (`_C_BOOK_PREFIX + [...]`); never edit one for a new flow")
+    flows = caf.FLOWS
+    for name, block in vars(caf).items():
+        role = next((r for p, r in _BLOCK_ROLE.items() if name.startswith(p)), None)
+        if not role or not isinstance(block, list) or not block or \
+                not all(isinstance(s, str) for s in block):
+            continue
+        users = _block_users(block, flows)
+        print(f"\n  {name}  ({role}; used by {len(users)} flow(s): {', '.join(users[:8]) or '-'})")
+        for st in block:
+            print(f"      {st}")
     return 0
 
 
@@ -154,7 +264,7 @@ def cmd_check_flows(_a) -> int:
         if f.get("id") != fid:
             problems.append(f"{fid}: its 'id' field says {f.get('id')!r}")
         for s in f.get("segments") or []:
-            if s.get("role") not in ("consumer", "waiter", "kitchen"):
+            if s.get("role") not in ("consumer", "participant", "waiter", "kitchen"):
                 problems.append(f"{fid} segment {s.get('num')}: unknown role {s.get('role')!r}")
             for st in s.get("steps") or []:
                 if not token_ok(st):
@@ -295,7 +405,20 @@ def _child(a) -> int:
                 plan["from_run"] = a.resume
         except ValueError:
             plan = None
+    try:        # what this run executes, for the session's on-device gate
+        from automation.claude_code import fingerprint
+        from automation.scenarios.cross_app_flows import resolve_flow
+        fp = fingerprint.take(CODE_ROOT, (resolve_flow(a.flow) or {}).get("segments") or [],
+                              start=(plan or {}).get("start_at") or 0,
+                              resumed_from=a.resume if plan else None)
+    except Exception:
+        fp = None
     rid = start_flow_run(a.flow, env=ENV, resume=plan)
+    if fp is not None:
+        try:
+            fingerprint.record(rid, fp)
+        except OSError:
+            pass
     tag = "claude-agent:" + (os.environ.get("AGENT_SESSION_ID") or "manual")[:36]
     with SessionLocal() as db:
         r = db.get(TestRun, rid)
@@ -319,6 +442,30 @@ def _child(a) -> int:
         f.write(rid)
     runinfo.wait_for(rid)
     return 0
+
+
+def _session_runs() -> List[Dict[str, Any]]:
+    out = []
+    try:
+        for line in open(os.path.join(session_dir(), "runs.jsonl"), encoding="utf-8"):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
+def _max_runs_per_flow() -> int:
+    """first + retry + the fix attempts + final. A flow that has not settled by then
+    only burns simulator time (one draft took 6 runs / 36 min on 2026-10-28)."""
+    try:
+        from automation.agentic import settings
+        fixes = int(settings.get().get("max_fix_attempts") or 2)
+    except Exception:
+        fixes = 2
+    return fixes + 3
 
 
 def _finish(run_id: str) -> None:
@@ -369,6 +516,13 @@ def cmd_run(a) -> int:
     if not resolve_flow(a.flow):
         print(f"REFUSED: no flow {a.flow!r} (see: flows)")
         return 1
+    limit = _max_runs_per_flow()
+    tried = sum(1 for r in _session_runs() if r.get("flow_id") == a.flow)
+    if tried >= limit:
+        print(f"REFUSED: {a.flow} already ran {tried} times in this session (limit {limit}: first, "
+              f"retry, the fix attempts, final). Stop on it: report a regression flow as "
+              f"needs_human, drop a draft — with what the runs showed.")
+        return 1
     runs_dir = os.path.join(session_dir(), "runs")
     os.makedirs(runs_dir, exist_ok=True)
     stamp = datetime.now().strftime("%H%M%S")
@@ -378,6 +532,8 @@ def cmd_run(a) -> int:
     if a.resume:
         cmd += ["--resume", a.resume]
     env = dict(os.environ, PYTHONPATH=CODE_ROOT)
+    if a.until:
+        env["FLOW_STOP_AFTER"] = str(a.until)
     t0 = time.time()
     proc = subprocess.Popen(cmd, cwd=CODE_ROOT, stdout=log, stderr=subprocess.STDOUT, env=env,
                             start_new_session=True)
@@ -613,6 +769,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--wait", type=float, default=0)
     s.set_defaults(fn=cmd_preflight)
     sub.add_parser("flows").set_defaults(fn=cmd_flows)
+    s = sub.add_parser("green")
+    s.add_argument("--hours", type=float, default=8)
+    s.set_defaults(fn=cmd_green)
+    sub.add_parser("steps").set_defaults(fn=cmd_steps)
     for name, fn in (("show-flow", cmd_show_flow), ("history", cmd_history), ("check-ids", cmd_check_ids)):
         s = sub.add_parser(name)
         s.add_argument("flow")
@@ -622,6 +782,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--resume")
     s.add_argument("--label", default="run")
     s.add_argument("--max", type=int, default=DEFAULT_WAIT_S)
+    s.add_argument("--until", type=int, default=0)
     s.set_defaults(fn=cmd_run)
     s = sub.add_parser("wait")
     s.add_argument("run_id")
@@ -652,7 +813,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("pattern")
     s.set_defaults(fn=cmd_app_grep)
     s = sub.add_parser("screen")
-    s.add_argument("role", choices=["consumer", "waiter", "kitchen"])
+    s.add_argument("role", choices=["consumer", "participant", "waiter", "kitchen"])
     s.set_defaults(fn=cmd_screen)
     s = sub.add_parser("recover")
     s.add_argument("what", choices=["wda", "rig"])

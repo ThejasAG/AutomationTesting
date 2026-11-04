@@ -8,6 +8,7 @@ import {
 import { getRuns, getRunnerState, setRunnerRunning } from '../api';
 import type { TestRun, RunnerState } from '../api';
 import { parseServerDate } from '../time';
+import { useLivePoll } from '../useLivePoll';
 
 /** Job queue — what is waiting, what is executing right now, and what finished.
  *
@@ -98,10 +99,7 @@ function AgentSwitch({ queued, onChange }: { queued: number; onChange: () => voi
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
-  useEffect(() => {
-    const t = window.setInterval(refresh, 5000);
-    return () => window.clearInterval(t);
-  }, [refresh]);
+  useLivePoll(refresh, { idleMs: 5000 });
 
   const toggle = async () => {
     if (busy || !state) return;
@@ -191,12 +189,9 @@ export default function JobQueuePage() {
   const inFlight = runs.some(r => GROUPS[0].states.concat(GROUPS[1].states)
     .includes(r.job_state || ''));
 
-  // Poll only while something is queued or running — a settled board does not need it.
-  useEffect(() => {
-    if (!inFlight) return;
-    const t = window.setInterval(load, 5000);
-    return () => window.clearInterval(t);
-  }, [inFlight, load]);
+  // Every 2.5 s while something is queued or running; every 8 s otherwise, so a job
+  // started elsewhere (another tab, the AI Agent, the nightly run) shows up by itself.
+  useLivePoll(load, { live: inFlight, liveMs: 2500, idleMs: 8000 });
 
   const bucket = (g: Group) => runs
     .filter(r => g.states.includes(r.job_state || ''))
@@ -211,7 +206,7 @@ export default function JobQueuePage() {
             <h1 className="page-title" style={{ margin: 0 }}>Job Queue</h1>
             <p className="page-subtitle" style={{ marginBottom: 0 }}>
               What is waiting, what is executing right now, and what finished.
-              {inFlight && ' Refreshing every 5s while work is in flight.'}
+              {' Updates live — no need to reload.'}
             </p>
           </div>
           <button className="btn" onClick={load}

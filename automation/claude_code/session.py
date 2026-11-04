@@ -179,6 +179,47 @@ def spawn_runner(sid: str) -> int:
     return proc.pid
 
 
+def continue_session(sid: str, by: str = "") -> str:
+    """Pick an interrupted session up where it stopped: same worktree and branch, same
+    Claude conversation. MEASURED 2026-10-27: the Mac was force-restarted at 17:58 in
+    the middle of a 'New scenarios' session (78c05dec) with two drafts already passing
+    on the simulators; without this, that work could only be thrown away."""
+    from automation.database.config import SessionLocal
+    from automation.database.models import AgentSession
+    s = get(sid)
+    if s is None:
+        raise ValueError("no such session")
+    if s["status"] != "interrupted":
+        raise Refused(f"only an interrupted session can be continued (this one is '{s['status']}')")
+    with SessionLocal() as db:
+        wt = db.get(AgentSession, sid).worktree or ""
+    branch = s.get("branch") or ""
+    if not (wt and os.path.isdir(wt) and branch and _git("branch", "--list", branch, check=False).strip()):
+        raise Refused("its worktree or branch is gone — start a new session instead")
+    cur = active()
+    if cur:
+        raise Busy(f"an AI Agent session is already {cur['status']} ({cur['kind']}, {cur['id'][:8]})")
+    st = claude_status()
+    if not (st["installed"] and st["logged_in"]):
+        raise Refused("Claude Code is not installed or not logged in on this Mac")
+    with SessionLocal() as db:
+        r = db.get(AgentSession, sid)
+        opts = dict(r.options or {})
+        opts["continued"] = int(opts.get("continued") or 0) + 1
+        if by:
+            opts["continued_by"] = by
+        r.options, r.stop_requested, r.error, r.finished_at = opts, False, None, None
+        r.phase = "continuing after the interruption"
+        db.commit()
+    spawn_runner(sid)          # sets the live pid first, so active() keeps the row
+    with SessionLocal() as db:
+        r = db.get(AgentSession, sid)
+        if r is not None and r.status == "interrupted":
+            r.status = "queued"
+            db.commit()
+    return sid
+
+
 def stop(sid: str) -> bool:
     from automation.database.config import SessionLocal
     from automation.database.models import AgentSession
@@ -191,6 +232,37 @@ def stop(sid: str) -> bool:
             r.status, r.finished_at, r.phase = "stopped", datetime.utcnow(), "stopped"
         db.commit()
     return True
+
+
+# ── what the automatic triggers did ──────────────────────────────────────────
+
+def _hooks_file() -> str:
+    return os.path.join(paths.SESSIONS_DIR, "hooks.jsonl")
+
+
+def note_hook(trigger: str, outcome: str, detail: str, **facts: Any) -> None:
+    """Record what an automatic trigger (Run all, the nightly clock) did and why —
+    shown on the AI Agent page, so a session that did not start is never a mystery."""
+    os.makedirs(paths.SESSIONS_DIR, exist_ok=True)
+    rec = {"at": datetime.now().isoformat(timespec="seconds"), "trigger": trigger,
+           "outcome": outcome, "detail": str(detail)[:500], **facts}
+    with open(_hooks_file(), "a") as f:
+        f.write(json.dumps(rec, default=str) + "\n")
+
+
+def recent_hooks(n: int = 10) -> List[Dict[str, Any]]:
+    try:
+        with open(_hooks_file()) as f:
+            lines = f.readlines()[-n:]
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
 
 
 # ── follow ───────────────────────────────────────────────────────────────────
@@ -299,6 +371,51 @@ def reject(sid: str, by: str = "") -> Dict[str, Any]:
     return {"rejected": True}
 
 
+def recheck_size(sid: str, by: str = "") -> Dict[str, Any]:
+    """Check the size again for a session whose ONLY failed check is size — the one
+    check that depends on a setting (max_changed_lines, plus the allowance per new
+    flow, gates.LINES_PER_NEW_FLOW). The other checks are not re-run: they stand as
+    the session's end left them. MEASURED 2026-10-28: session 60f14a6c kept 3 new
+    scenarios that passed every other check, but 961 lines against a flat 800 left it
+    unapprovable, and only Reject was offered."""
+    from automation.agentic import settings
+    from automation.claude_code import gates, runner
+    from automation.database.config import SessionLocal
+    from automation.database.models import AgentSession
+    s = get(sid)
+    if s is None:
+        raise ValueError("no such session")
+    if s["status"] != "gates_failed":
+        raise Refused(f"only a session whose size check failed can be checked again "
+                      f"(this one is '{s['status']}')")
+    failed = [g.get("name") for g in s["gates"] if not g.get("ok")]
+    if failed != ["size"]:
+        raise Refused("only the size check can be checked again; this session also failed: "
+                      + ", ".join(f for f in failed if f != "size"))
+    branch = s.get("branch") or ""
+    if not (s.get("base_commit") and branch and _git("branch", "--list", branch, check=False).strip()):
+        raise Refused("its branch is gone — start a new session instead")
+    before = runner.flows_at(s["base_commit"])
+    after = runner.flows_at(_git("rev-parse", branch).strip())
+    new = gates.flow_changes(before["flows"], after["flows"])[1] if before and after else []
+    g = gates.size_gate(s["files_changed"], int(settings.get().get("max_changed_lines") or 800), len(new))
+    if by:
+        g["detail"] += f" — checked again by {by}"
+    gl = [g if x.get("name") == "size" else x for x in s["gates"]]
+    status = "review" if g["ok"] else "gates_failed"
+    with SessionLocal() as db:
+        r = db.get(AgentSession, sid)
+        r.gates, r.status = gl, status
+        r.phase = "waiting for your approval" if g["ok"] else "a gate failed — see the checks"
+        db.commit()
+    try:
+        with open(os.path.join(paths.session_dir(sid), "gates.json"), "w") as f:
+            json.dump(gl, f, indent=1)
+    except OSError:
+        pass
+    return {"ok": g["ok"], "status": status, "detail": g["detail"], "new_flows": new}
+
+
 # ── the backend itself ───────────────────────────────────────────────────────
 
 def restart_backend_if_idle() -> Dict[str, Any]:
@@ -309,8 +426,10 @@ def restart_backend_if_idle() -> Dict[str, Any]:
     if busy:
         raise Busy(f"run {busy[0].id[:8]} '{busy[0].test_name}' is {busy[0].status} — "
                    "restart when it has finished")
-    if active():
-        raise Busy("an AI Agent session is in progress — restart when it has finished")
+    # An AI Agent session is NOT a reason to wait: its runner and its flows run in
+    # their own processes (from its worktree's code), and the startup reaper leaves
+    # its runs alone. MEASURED 2026-10-26: the button refused a restart after an
+    # approval just because a read-only analysis was running.
     try:
         from automation.api.v1.routers.jobs import run_all_in_progress
         if run_all_in_progress():

@@ -7,10 +7,19 @@ import type { TestRun, RCAReport, Evidence, ScenariosResponse, ScenarioResult,
   VisualRegressionItem, RiskPrediction, PerformanceResponse } from '../api';
 import { format } from 'date-fns';
 import { parseServerDate } from '../time';
-import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Clock, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown, SkipForward, StepForward, Wrench } from 'lucide-react';
+import { Square, ArrowLeft, AlertTriangle, CheckCircle2, Zap, GitBranch, GitCommit, FileCode2, Info, Activity, ChevronDown, ChevronRight, Smartphone, Users, Loader2, Image as ImageIcon, Sparkles, TrendingUp, RefreshCw, Gauge, Cpu, ArrowUp, ArrowDown, SkipForward, StepForward, Wrench } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip, ResponsiveContainer, Legend } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 import { agentApi } from '../agentApi';
+import { openRichReport } from '../richReport';
+
+// What a run saw that did NOT fail it — a crash it relaunched past, a spinner left up,
+// an error toast, an app bug worked around: yellow. The same tags as
+// automation/scenarios/run_issues.py KINDS.
+const ISSUE_RE = /^\s*(\[(APP CRASH|APP ERROR|LOADING|STUCK LOADING|NO UI PROGRESS|PARTIAL LOAD|LOADING ISSUE|APP GLITCH|warn)\]|⚡ flaky:)/;
+// Slowness is not shown (the user, 2026-11-04: "dont mention slow steps"); nor are the
+// '[calc] {…}' notes, which are the report's tables (Report button), not steps.
+const HIDDEN_NOTE_RE = /^\s*(\[calc\] |\[SLOW LOAD\]|\[SLOW \/ RECOVERED\]|\[SLOW SCREEN\])/;
 
 // ── Scenarios Tab (Android cross-app: Consumer + Business) ───────────────────
 
@@ -70,8 +79,10 @@ function ScenarioRow({ s }: { s: ScenarioResult }) {
         <tr style={{ background: 'rgba(0,0,0,0.2)' }}>
           <td colSpan={9} style={{ padding: '10px 40px 14px' }}>
             <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.7 }}>
-              {(s.reasons && s.reasons.length ? s.reasons : [s.error || '']).filter(Boolean).map((r, i) => (
-                <li key={i}>{r}</li>
+              {(s.reasons && s.reasons.length ? s.reasons : [s.error || ''])
+                .filter(r => r && !HIDDEN_NOTE_RE.test(r)).map((r, i) => (
+                <li key={i} style={r.startsWith('[mismatch]') ? { color: 'var(--danger)', fontWeight: 600 }
+                  : ISSUE_RE.test(r) ? { color: 'var(--warning)' } : undefined}>{r}</li>
               ))}
             </ul>
             {s.screenshot && (
@@ -312,7 +323,8 @@ function LiveView({ runId, jobState }: LiveViewProps) {
             const staleRunning = !isActive && !done
               && (s.status || '').toLowerCase() === 'running';
             const isLast = i === scenarios.length - 1;
-            const steps = (s.reasons || []).filter(r => !/↳ (screen ids|on screen):/.test(r));
+            const steps = (s.reasons || []).filter(r => !/↳ (screen ids|on screen):/.test(r)
+                                                   && !HIDDEN_NOTE_RE.test(r));
             // Which app/role this stage runs on → node icon + chip.
             const role = /kitchen/i.test(s.scenario_name)
               ? { icon: '🍳', label: 'Kitchen', tint: '#f59e0b' }
@@ -395,22 +407,28 @@ function LiveView({ runId, jobState }: LiveViewProps) {
                         const fail = /^\s*\[FAIL\]/i.test(line);
                         // A step that did not apply (optional, or nothing left to do).
                         const skip = /^\s*\[skip\]/i.test(line);
+                        // A sum that did not match: red, but the steps went on.
+                        const mismatch = /^\s*\[mismatch\]/i.test(line);
+                        // A problem that did not fail the step: yellow.
+                        const issue = ISSUE_RE.test(line);
                         const now = /^\s*▶/.test(line);       // step currently executing
-                        const text = line.replace(/^\s*(\[(ok|FAIL|skip)\]|▶)\s*/i, '');
+                        const text = line.replace(/^\s*(\[(ok|FAIL|skip|mismatch)\]|▶)\s*/i, '');
                         return (
                           <div key={j} style={{ position: 'relative', display: 'flex', alignItems: 'flex-start', gap: 7,
                             fontSize: '0.76rem', lineHeight: 1.7,
-                            color: fail ? 'var(--danger)' : now ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                            fontWeight: now ? 600 : 400,
+                            color: fail || mismatch ? 'var(--danger)' : now ? 'var(--accent-primary)'
+                              : issue ? 'var(--warning)' : 'var(--text-secondary)',
+                            fontWeight: now || mismatch ? 600 : 400,
                           }}>
                             {/* little branch stub from the guide line to this step's marker */}
                             <span style={{ position: 'absolute', left: -14, top: 11, width: 10, height: 1, background: 'var(--border-color)' }} />
                             {ok ? <CheckCircle2 size={13} color="var(--success)" style={{ flexShrink: 0, marginTop: 3 }} />
-                              : fail ? <AlertTriangle size={13} color="var(--danger)" style={{ flexShrink: 0, marginTop: 3 }} />
+                              : fail || mismatch ? <AlertTriangle size={13} color="var(--danger)" style={{ flexShrink: 0, marginTop: 3 }} />
+                              : issue ? <AlertTriangle size={13} color="var(--warning)" style={{ flexShrink: 0, marginTop: 3 }} />
                               : skip ? <SkipForward size={13} color="var(--text-muted)" style={{ flexShrink: 0, marginTop: 3 }} />
                               : now ? <Loader2 size={13} className="spin" color="var(--accent-primary)" style={{ flexShrink: 0, marginTop: 3 }} />
                               : <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--border-color)', flexShrink: 0, marginTop: 6 }} />}
-                            <span style={{ fontFamily: 'monospace' }}>{now ? `running: ${text}` : skip ? `skipped: ${text}` : text}</span>
+                            <span style={{ fontFamily: 'monospace' }}>{now ? `running: ${text}` : skip ? `skipped: ${text}` : mismatch ? `calculation mismatch: ${text}` : text}</span>
                           </div>
                         );
                       })}
@@ -824,8 +842,6 @@ export default function RunDetails() {
   if (loading) return <div className="page-header"><h1 className="page-title animate-fade-in">Loading Analysis...</h1></div>;
   if (!run) return <div>Run not found</div>;
 
-  const timeline = run.timeline ? JSON.parse(run.timeline) : [];
-
   return (
     <div className="animate-fade-in">
       <Link to="/" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', textDecoration: 'none', marginBottom: '24px', fontWeight: 500 }}>
@@ -902,6 +918,19 @@ export default function RunDetails() {
                 : <><StepForward size={15} /> Resume from failure</>}
             </button>
           )}
+          <button
+            onClick={() => id && openRichReport(id)}
+            title="Open this run's report: every segment, each calculation against what the app displayed, and what did not match"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              padding: '9px 16px', fontSize: '0.88rem', fontWeight: 600,
+              fontFamily: 'inherit', borderRadius: 8, cursor: 'pointer',
+              border: '1px solid var(--border-color)', background: 'transparent',
+              color: 'var(--text-primary)',
+            }}
+          >
+            <FileCode2 size={15} /> Report
+          </button>
           {run.status === 'failed' && (
             <button
               onClick={onFixWithClaude}
@@ -1013,7 +1042,7 @@ export default function RunDetails() {
       {id && <AISummaryCard runId={id} />}
       {id && <RiskPredictions runId={id} />}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: '24px', alignItems: 'start' }}>
+      <div>
         <div>
           {evidence && evidence.git_commit && (
         <div className="card" style={{ marginBottom: '24px', padding: '16px 24px', display: 'flex', gap: '24px', background: 'var(--bg-tertiary)' }}>
@@ -1143,39 +1172,6 @@ export default function RunDetails() {
       )}
       </div>
       
-      {/* Sidebar Timeline */}
-      <div className="card" style={{ position: 'sticky', top: '24px' }}>
-        <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '24px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
-          <Clock size={18} color="var(--primary)" /> Execution Timeline
-        </h3>
-        
-        {run.timeline ? (
-          <div className="timeline">
-            {timeline.map((event: any, idx: number) => (
-              <div key={idx} style={{ display: 'flex', gap: '16px', marginBottom: '16px', position: 'relative' }}>
-                <div style={{ minWidth: '65px', fontSize: '0.8rem', color: 'var(--text-secondary)', paddingTop: '2px' }}>
-                  {event.time}
-                </div>
-                <div style={{ 
-                  position: 'absolute', left: '76px', top: '6px', bottom: '-16px', width: '2px', 
-                  background: idx === timeline.length - 1 ? 'transparent' : 'var(--border-color)' 
-                }}></div>
-                <div style={{ 
-                  width: '10px', height: '10px', borderRadius: '50%', background: 'var(--primary)', 
-                  position: 'absolute', left: '72px', top: '6px', zIndex: 1
-                }}></div>
-                <div style={{ marginLeft: '24px', fontSize: '0.9rem', color: event.event.includes('Failed') ? 'var(--danger)' : 'var(--text-primary)' }}>
-                  {event.event}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', textAlign: 'center', padding: '24px 0' }}>
-            No timeline data available for this run.
-          </p>
-        )}
-      </div>
     </div>
       </>
       )}

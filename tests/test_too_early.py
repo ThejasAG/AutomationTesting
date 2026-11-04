@@ -89,6 +89,43 @@ def test_the_run_ends_stopped_with_the_time_and_can_be_resumed(db, monkeypatch):
         assert "Stopped: booking 4905" in run.timeline
         plan = resume_plan(FLOW, list(rows.values()))
     assert plan["start_at"] == 1 and plan["booked_slot"] == "12:00"
+    assert plan["retry"] is True, "segment 2 was tried (STOPPED): part of it may be done"
+
+
+def test_a_run_asked_to_stop_after_a_segment_ends_stopped_and_resumes_at_the_next(db,
+                                                                                  monkeypatch):
+    ran = []
+
+    def segment(self, seg):
+        ran.append(seg["num"])
+        self._persist(seg, "PASS", ["[ok] @first_time_slot — selected slot '12:00'"], 60.0)
+        return True
+
+    monkeypatch.setattr(FlowRunner, "_run_segment", segment)
+    monkeypatch.setenv("FLOW_STOP_AFTER", "1")
+    FlowRunner("run1", FLOW, {}, {}).run()
+    assert ran == ["1"]
+    with db() as s:
+        run = s.query(TestRun).filter_by(id="run1").one()
+        rows = {r.scenario_num: r for r in s.query(ScenarioResult).filter_by(run_id="run1")}
+        assert run.status == "stopped", "stopping where asked is not a failure"
+        assert "after segment 1" in run.error_message
+        assert rows["2"].status == "SKIPPED" and "after segment 1" in rows["2"].reasons[0]
+        plan = resume_plan(FLOW, list(rows.values()))
+    assert plan["start_at"] == 1 and plan["booked_slot"] == "12:00"
+    assert plan["retry"] is False, "segment 2 was not reached: a first attempt"
+
+
+def test_a_run_asked_to_stop_after_its_last_segment_just_passes(db, monkeypatch):
+    def segment(self, seg):
+        self._persist(seg, "PASS", ["[ok] done"], 1.0)
+        return True
+
+    monkeypatch.setattr(FlowRunner, "_run_segment", segment)
+    monkeypatch.setenv("FLOW_STOP_AFTER", "3")
+    FlowRunner("run1", FLOW, {}, {}).run()
+    with db() as s:
+        assert s.query(TestRun).filter_by(id="run1").one().status == "passed"
 
 
 def test_the_segment_marks_it_stopped_not_failed():
@@ -156,3 +193,39 @@ def test_the_window_rule_matches_the_app(monkeypatch):
     assert runner._window_not_open("12:00")          # opens 11:30
     assert not runner._window_not_open("11:30")      # opened at 11:00
     assert not runner._window_not_open("11:15")
+
+
+def test_time_the_ipad_cannot_be_read_does_not_count_against_the_wait(monkeypatch):
+    # MEASURED 2026-11-02 (run 34bf4868): right after the participant's iPhone shut down,
+    # "tapped the 15:30 row ... but the reservation did not open"; the order was open.
+    order = [{"id": "ORDER SUMMARY", "label": "ORDER SUMMARY", "cy": 58}]
+    runner, clock = _reads(monkeypatch, [])
+    reads = iter([[]] * 8 + [order])
+
+    def read():
+        frame = next(reads, order)
+        clock["t"] += 30.0 if not frame else 3.0      # an unread screen: idb's 30s timeout
+        return frame
+    monkeypatch.setattr(runner, "_idb_els", read, raising=False)
+    monkeypatch.setattr(runner, "_note_ticket", lambda notes: None, raising=False)
+    notes = []
+    assert runner._reservation_opened(notes, "@open_order", "15:30", "My Orders panel")
+    assert "opened the 15:30 booking" in notes[-1]
+
+
+def test_an_unreadable_ipad_still_gives_up_in_bounded_time(monkeypatch):
+    runner, clock = _reads(monkeypatch, [])
+
+    def read():
+        clock["t"] += 30.0
+        return []
+    monkeypatch.setattr(runner, "_idb_els", read, raising=False)
+    monkeypatch.setattr(runner, "_window_not_open", lambda slot: False, raising=False)
+    notes = []
+    assert not runner._reservation_opened(notes, "@open_order", "15:30", "My Orders panel")
+    assert clock["t"] <= 340.0
+
+
+def test_opening_an_order_gets_the_long_step_limit():
+    assert caf._step_limit("@open_order") == caf.STEP_TIMEOUT_HEAVY
+    assert caf._step_limit("@open_event") == caf.STEP_TIMEOUT_HEAVY

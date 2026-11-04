@@ -165,8 +165,9 @@ export async function getGoldenRun(): Promise<{ run_id: string | null; report_ur
 export interface SimDevice { udid: string; name: string; state: string; ios: string; apps?: string[] | null; }
 export interface CrossAppConfig {
     simulators: SimDevice[];
-    devices: { consumer: string; waiter: string; kitchen: string };
-    credentials: Record<'consumer' | 'waiter' | 'kitchen', { email: string; has_password: boolean }>;
+    devices: { consumer: string; participant?: string; waiter: string; kitchen: string };
+    credentials: Record<'consumer' | 'waiter' | 'kitchen', { email: string; has_password: boolean }>
+      & { participant?: { email: string; has_password: boolean } };
 }
 
 export async function getCrossAppConfig(): Promise<CrossAppConfig> {
@@ -412,8 +413,8 @@ export async function getEvidence(id: string): Promise<Evidence | null> {
     return data.evidence;
 }
 
-export async function getTrends(): Promise<Trends> {
-    const res = await fetch(`${API_BASE}/trends`, { headers: getHeaders() });
+export async function getTrends(days = 30): Promise<Trends> {
+    const res = await fetch(`${API_BASE}/trends?days=${days}`, { headers: getHeaders() });
     return await handleResponse(res);
 }
 

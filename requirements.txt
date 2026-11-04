@@ -58,6 +58,7 @@ pillow>=12.0
 
 # ── Tests ───────────────────────────────────────────────────────────────────
 pytest>=9.1
+pytest-xdist>=3.6        # the session checks run the suite in parallel (gates.UNIT_WORKERS)
 
 # Deliberately NOT listed:
 #   graphify        optional (PyPI name 'graphifyy'); hybrid_impact_analyzer.py guards

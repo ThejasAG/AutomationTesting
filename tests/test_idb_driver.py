@@ -217,6 +217,20 @@ def test_idb_unavailable_is_a_clean_miss(monkeypatch):
     assert dv.describe_all("U") == []
 
 
+def test_a_slow_screen_read_is_waited_for(monkeypatch):
+    # MEASURED 2026-11-02 (run of 18:05, load 15-40): a ~380-element order read in 9s and
+    # more; at 20s reads timed out, the worker was killed and restarted, and a step spent
+    # 277s on reads that each would have finished.
+    seen = {}
+
+    def idb(args, timeout=20.0):
+        seen["timeout"] = timeout
+        return "[]"
+    monkeypatch.setattr(dv, "_idb", idb)
+    dv.describe_all("U")
+    assert seen["timeout"] >= 40.0
+
+
 # -- typing credentials efficiently (asked 2026-10-01: "too many attempts") --------
 
 def test_a_field_that_already_holds_the_text_is_not_retyped(screen):
@@ -293,3 +307,19 @@ def test_tap_without_wait_does_not_poll(screen, monkeypatch):
     real = dv.describe_all
     monkeypatch.setattr(dv, "describe_all", lambda u: reads.__setitem__("n", reads["n"] + 1) or real(u))
     assert dv.tap("U", ["saveBtn"]) == (False, "not on screen") and reads["n"] == 1
+
+
+def test_a_buttons_own_caption_is_part_of_it_not_something_over_it():
+    # MEASURED 2026-11-04 (host phone, Wallet): a hit on 'RoopaDClose' returned its
+    # caption, StaticText 'Close', and the event could not be folded ("not reachable").
+    btn = {"AXLabel": "RoopaDClose", "type": "Button",
+           "frame": {"x": 296, "y": 207, "width": 86, "height": 30}}
+    cap = {"AXLabel": "Close", "type": "StaticText",
+           "frame": {"x": 332, "y": 214, "width": 40, "height": 16}}
+    assert dv._is_target(cap, btn)
+    # ... but a named element that is not its caption still covers it.
+    card = {"AXLabel": "NylaiKitchen2Card", "type": "Button",
+            "frame": {"x": 20, "y": 700, "width": 350, "height": 260}}
+    tab = {"AXLabel": "Wallet", "type": "StaticText",
+           "frame": {"x": 150, "y": 790, "width": 60, "height": 20}}
+    assert not dv._is_target(tab, card)

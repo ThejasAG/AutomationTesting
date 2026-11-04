@@ -1,23 +1,50 @@
 import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
+import { Suspense, lazy, useEffect } from 'react';
 import type { ReactElement } from 'react';
-import { Boxes, LayoutDashboard, Settings, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Workflow, Clapperboard, Crosshair, Bot} from 'lucide-react';
+import { Boxes, LayoutDashboard, Settings, Code2, MessageSquare, FolderGit2, GitBranch, GitPullRequest, ListChecks, FileText, Workflow, Clapperboard, Crosshair, Bot, Loader2} from 'lucide-react';
 import DashboardHome from './pages/DashboardHome';
-import ScenariosPage from './pages/ScenariosPage';
-import InspectorPage from './pages/InspectorPage';
-import ReportsPage from './pages/ReportsPage';
-import ProjectsPage from './pages/ProjectsPage';
-import GraphPage from './pages/GraphPage';
-import RunDetails from './pages/RunDetails';
-import SettingsPage from './pages/SettingsPage';
-import PullRequestsPage from './pages/PullRequestsPage';
 import { LoginPage } from './pages/LoginPage';
-import ScriptEditorPage from './pages/ScriptEditorPage';
-import ChatPage from './pages/ChatPage';
-import WorkflowPage from './pages/WorkflowPage';
 import BuildUpdateBell from './components/BuildUpdateBell';
-import JobQueuePage from './pages/JobQueuePage';
-import AgentPage from './pages/AgentPage';
 import { getAuthToken, getGoldenRun } from './api';
+
+// Every page but the landing ones loads on first visit, so the dashboard opens
+// without first downloading the charts, the code editor and the graph library.
+// Once the app is up they are fetched in the background, so moving between pages
+// stays instant.
+const PAGES = {
+  scenarios: () => import('./pages/ScenariosPage'),
+  inspector: () => import('./pages/InspectorPage'),
+  reports: () => import('./pages/ReportsPage'),
+  projects: () => import('./pages/ProjectsPage'),
+  graph: () => import('./pages/GraphPage'),
+  run: () => import('./pages/RunDetails'),
+  settings: () => import('./pages/SettingsPage'),
+  prs: () => import('./pages/PullRequestsPage'),
+  scripts: () => import('./pages/ScriptEditorPage'),
+  chat: () => import('./pages/ChatPage'),
+  workflow: () => import('./pages/WorkflowPage'),
+  queue: () => import('./pages/JobQueuePage'),
+  agent: () => import('./pages/AgentPage'),
+};
+const ScenariosPage = lazy(PAGES.scenarios);
+const InspectorPage = lazy(PAGES.inspector);
+const ReportsPage = lazy(PAGES.reports);
+const ProjectsPage = lazy(PAGES.projects);
+const GraphPage = lazy(PAGES.graph);
+const RunDetails = lazy(PAGES.run);
+const SettingsPage = lazy(PAGES.settings);
+const PullRequestsPage = lazy(PAGES.prs);
+const ScriptEditorPage = lazy(PAGES.scripts);
+const ChatPage = lazy(PAGES.chat);
+const WorkflowPage = lazy(PAGES.workflow);
+const JobQueuePage = lazy(PAGES.queue);
+const AgentPage = lazy(PAGES.agent);
+
+const PageLoading = () => (
+  <div style={{ color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+    <Loader2 size={16} className="spin" /> Loading…
+  </div>
+);
 
 const ProtectedRoute = ({ children }: { children: ReactElement }) => {
   const token = getAuthToken();
@@ -114,13 +141,18 @@ const ProtectedLayout = ({ children }: { children: ReactElement }) => {
       </nav>
     </aside>
     <main className="main-content">
-      {children}
+      <Suspense fallback={<PageLoading />}>{children}</Suspense>
     </main>
   </div>
   );
 };
 
 function App() {
+  useEffect(() => {
+    const t = window.setTimeout(() => Object.values(PAGES).forEach(load => load().catch(() => {})), 1500);
+    return () => window.clearTimeout(t);
+  }, []);
+
   return (
     <Router>
       <Routes>

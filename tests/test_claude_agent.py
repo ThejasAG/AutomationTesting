@@ -197,6 +197,15 @@ def test_size_gate():
     assert not gates.size_gate([{"added": 700, "removed": 200}], 800)["ok"]
 
 
+def test_the_size_limit_grows_with_each_new_scenario():
+    """MEASURED 2026-10-28: session 60f14a6c kept 3 new scenarios, 961 lines."""
+    files = [{"added": 952, "removed": 9}]
+    assert not gates.size_gate(files, 800)["ok"]
+    g = gates.size_gate(files, 800, new_flows=3)
+    assert g["ok"] and g["detail"] == "961 changed lines (limit 800 + 3 new scenarios × 400 = 2000)"
+    assert gates.size_gate(files, 800, new_flows=1)["detail"].endswith("1 new scenario × 400 = 1200)")
+
+
 # ── impact ───────────────────────────────────────────────────────────────────
 
 _SRC = '''
@@ -254,7 +263,8 @@ def test_impact_on_the_real_engine():
     src = open(os.path.join(paths.MAIN_ROOT, impact.FLOWS_FILE), encoding="utf-8").read()
     flows = {k: [st for s in v["segments"] for st in s["steps"]] for k, v in FLOWS.items()}
     hit = impact.flows_for_functions(flows, src, ["_accept_appointment"], FlowRunner._PLAIN_STEP_TOKENS)
-    assert set(hit) == {"flow5", "flow6"}
+    # The full event's participant accepts the host's invitation too.
+    assert set(hit) == {"flow5", "flow6", "flow_full_event", "flow_full_event_eve"}
 
 
 # ── transcript events ────────────────────────────────────────────────────────
@@ -518,7 +528,7 @@ def test_an_old_claude_code_falls_back_to_a_model_it_supports(monkeypatch):
     model; version 2.1.280 or newer is required') — the session must not die of it."""
     calls = []
 
-    def once(sid, sdir, wt, prompt, model, s, deadline, name, mode):
+    def once(sid, sdir, wt, prompt, model, s, deadline, name, mode, resume=None):
         calls.append((model, mode))
         if model == "opus":
             return {"is_error": True, "turns": 1, "result": "API Error: 400 Claude Code 2.1.205 does not "
@@ -531,7 +541,7 @@ def test_an_old_claude_code_falls_back_to_a_model_it_supports(monkeypatch):
     assert calls == [("opus", "w"), ("sonnet", "a")]
     assert info["turns"] == 30 and info["model_fallback"]["used"] == "sonnet"
     monkeypatch.setattr(runner, "_run_claude_once",
-                        lambda *a: {"is_error": True, "turns": 40, "result": "does not support this model"})
+                        lambda *a, **k: {"is_error": True, "turns": 40, "result": "does not support this model"})
     assert "model_fallback" not in runner.run_claude("s", "/s", "/wt", "p", {"model": "opus", "effort": "high"},
                                                      None, "n")
 
@@ -583,3 +593,125 @@ def test_a_usage_limit_is_not_retried_in_a_loop(monkeypatch):
     info = runner.run_claude("s", "/s", "/wt", "t", {"model": "sonnet", "effort": "high"},
                              datetime.now() + timedelta(hours=1), "n")
     assert calls == [1] and "resumed_after" not in info
+
+
+# ── automatic triggers leave a trace; the nightly clock ──────────────────────
+
+@pytest.fixture(autouse=True)
+def _private_sessions_dir(tmp_path, monkeypatch):
+    """No test writes into the real logs/agent_sessions (hooks.jsonl, baselines…)."""
+    monkeypatch.setattr(paths, "SESSIONS_DIR", str(tmp_path / "agent_sessions"))
+
+
+def test_every_run_all_hook_outcome_is_recorded(monkeypatch):
+    """MEASURED 2026-10-26: a Run all ended with 9 failures, no heal session started,
+    and nothing anywhere said why."""
+    from automation.api.v1.routers import jobs
+    monkeypatch.setattr(session, "create", lambda kind, **kw: "sid-12345678")
+    jobs.heal_after_run_all([("flow1", "r1", "passed")])
+    jobs.heal_after_run_all([("flow1", "r1", "failed")])
+
+    def busy(kind, **kw):
+        raise session.Busy("an AI Agent session is already running (heal, abcd1234)")
+
+    monkeypatch.setattr(session, "create", busy)
+    jobs.heal_after_run_all([("flow1", "r1", "failed")])
+    got = [(h["outcome"], h["detail"]) for h in session.recent_hooks()]
+    assert got == [("refused", "an AI Agent session is already running (heal, abcd1234)"),
+                   ("started", "heal session sid-1234"),
+                   ("skipped", "every flow passed")]
+
+
+def _nightly_settings(**kw):
+    from automation.agentic import settings
+    settings.update({"nightly_enabled": True, "nightly_time": "13:15", **kw})
+
+
+def test_the_nightly_is_due_once_inside_its_window():
+    from datetime import datetime
+    from automation.claude_code import schedule
+    from automation.agentic import settings
+    _nightly_settings()
+    s = settings.get()
+    day = datetime(2026, 10, 26)
+    assert schedule.due(s, day.replace(hour=13, minute=10)) is None          # too early
+    assert schedule.due(s, day.replace(hour=13, minute=20)) is not None
+    assert schedule.due(s, day.replace(hour=16, minute=20)) is None          # window over
+    settings.update({"nightly_enabled": False})
+    assert schedule.due(settings.get(), day.replace(hour=13, minute=20)) is None
+
+
+def test_the_clock_starts_one_nightly_and_waits_while_busy(monkeypatch):
+    from datetime import datetime
+    from automation.claude_code import schedule
+    _nightly_settings(nightly_time=datetime.now().strftime("%H:%M"))
+    monkeypatch.setitem(schedule._state, "last_try", 0.0)
+    monkeypatch.setitem(schedule._state, "last_error", "")
+
+    def busy(kind, **kw):
+        raise session.Busy("an AI Agent session is already running")
+
+    monkeypatch.setattr(session, "create", busy)
+    assert schedule.tick() is None
+    assert session.recent_hooks()[0]["outcome"] == "waiting"
+    assert schedule.tick() is None                     # retried only after RETRY_S
+    started = []
+    monkeypatch.setitem(schedule._state, "last_try", 0.0)
+    monkeypatch.setattr(session, "create", lambda kind, **kw: started.append((kind, kw)) or "sid-nightly1")
+    assert schedule.tick() == "sid-nightly1"
+    assert started[0][0] == "nightly" and started[0][1]["trigger"] == "nightly"
+
+
+def test_the_clock_never_touches_launchd_from_tests(monkeypatch):
+    from automation.claude_code import schedule
+    called = []
+    monkeypatch.setattr(schedule, "remove_legacy_launchd", lambda: called.append(1))
+    schedule.start()
+    assert called == [] and schedule._state["thread"] is None
+
+
+def test_an_analysis_starts_from_the_previous_feature_list(monkeypatch):
+    """MEASURED 2026-10-26: two analyses grouped the same screens into 44 and 24
+    features; the map could not be compared from one run to the next."""
+    from automation.agentic import settings
+    from automation.claude_code import prompts
+    monkeypatch.setattr(session, "latest_feature_map", lambda: {"apps": {
+        "business": [{"feature": "Waiter voids a line item", "role": "waiter"}],
+        "consumer": [{"feature": "Diner books a table", "role": "consumer"}]}})
+    text = prompts.build("analyze", {"mode": "full"}, _ctx(), settings.get())
+    assert "Previous analysis (2 features)" in text
+    assert "[business/waiter] Waiter voids a line item" in text
+    assert "one feature = one thing a tester checks" in text
+    nightly = prompts.build("nightly", {"mode": "full"}, _ctx(), settings.get())
+    assert "Waiter voids a line item" in nightly
+
+
+def test_the_clock_stays_off_in_tests_even_when_app_env_says_dev(monkeypatch):
+    """MEASURED 2026-10-26: .env's APP_ENV=dev leaked into an agent session's pytest."""
+    from automation.claude_code import schedule
+    monkeypatch.setenv("APP_ENV", "dev")
+    called = []
+    monkeypatch.setattr(schedule, "remove_legacy_launchd", lambda: called.append(1))
+    schedule.start()
+    assert called == [] and schedule._state["thread"] is None
+    assert schedule.sync({"nightly_enabled": True})["skipped"] == "test environment"
+
+
+def test_a_running_agent_session_does_not_block_the_backend_restart(monkeypatch, tmp_path):
+    """MEASURED 2026-10-26: after approving a change, 'Restart backend' refused only
+    because a read-only analysis session was running."""
+    import signal as _signal
+    monkeypatch.setattr(runner, "active_runs", lambda: [])
+    monkeypatch.setattr(session, "active", lambda: {"id": "x", "kind": "analyze", "status": "running"})
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "supervisor.pid").write_text(str(os.getpid()))
+    monkeypatch.setattr(paths, "MAIN_ROOT", str(tmp_path))
+    fired = []
+    import threading as _threading
+    monkeypatch.setattr(_threading, "Timer", lambda s, fn: type("T", (), {"start": lambda self: fired.append(fn)})())
+    assert session.restart_backend_if_idle() == {"restarting": True}
+    assert len(fired) == 1                                   # scheduled, not run
+    monkeypatch.setattr(runner, "active_runs", lambda: [type("R", (), {"id": "abcdef12", "test_name": "flow1",
+                                                                         "status": "running"})()])
+    with pytest.raises(session.Busy, match="is running"):
+        session.restart_backend_if_idle()

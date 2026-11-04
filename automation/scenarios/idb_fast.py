@@ -154,6 +154,19 @@ def _trace(argv: Sequence[str], t0: float, how: str) -> None:
         pass
 
 
+# udid -> (when, stdout) of its latest successful `ui describe-all`, for a reader that
+# only needs A recent screen (the UI watchdog) instead of paying for another full read:
+# MEASURED 2026-11-04 (run 77520bbf) its own reads every 6s, beside the step's, took the
+# iPad's reads from 0.9s to 4.8s on average.
+_LAST_SCREEN: dict = {}
+
+
+def recent_screen(udid: str, max_age: float) -> Optional[str]:
+    """The latest describe-all output for *udid* if it is under *max_age* s old."""
+    hit = _LAST_SCREEN.get(udid)
+    return hit[1] if hit and time.time() - hit[0] <= max_age else None
+
+
 def run(argv: Sequence[str], timeout: float = 20.0) -> subprocess.CompletedProcess:
     """`idb <argv>` -- same result and exceptions as subprocess.run(text=True)."""
     t0 = time.time()
@@ -163,6 +176,10 @@ def run(argv: Sequence[str], timeout: float = 20.0) -> subprocess.CompletedProce
         _trace([str(a) for a in argv], t0, "TIMEOUT")
         raise
     _trace([str(a) for a in argv], t0, "idb")
+    argv = [str(a) for a in argv]
+    if argv[:2] == ["ui", "describe-all"] and "--udid" in argv and res.returncode == 0 \
+            and (res.stdout or "").lstrip().startswith("["):
+        _LAST_SCREEN[argv[argv.index("--udid") + 1]] = (time.time(), res.stdout)
     return res
 
 

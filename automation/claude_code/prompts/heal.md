@@ -23,5 +23,3 @@ failure. In short:
 4. When every failure is handled, re-run once each flow you changed to be sure the
    final code passes, then write the report.
 
-`flow_kitchen_demo` needs an order already waiting in the kitchen; "no order"
-there is an unmet precondition, not a bug.

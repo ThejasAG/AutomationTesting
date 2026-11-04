@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from string import Template
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -52,7 +52,7 @@ def describe_runs(run_ids: List[str]) -> List[str]:
     return out
 
 
-def _run_scope(options: Dict[str, Any], s: Dict[str, Any]) -> str:
+def _run_scope(options: Dict[str, Any], s: Dict[str, Any], kind: str = "heal") -> str:
     ids = options.get("run_ids") or []
     if ids:
         return ("A dashboard **Run all** just finished. These runs failed — investigate exactly "
@@ -62,28 +62,88 @@ def _run_scope(options: Dict[str, Any], s: Dict[str, Any]) -> str:
     only = options.get("flow_ids") or []
     if only:
         return "Run these flows, one by one, in this order: " + ", ".join(f"`{f}`" for f in only) + "."
-    return f"Run every flow from `flows`, one by one, in that order ({demos})."
+    if kind == "nightly":
+        # A flow proven green on this very code a few hours ago would only repeat itself;
+        # skipping those is most of a night's run time when the day's Run all was green.
+        return (f"Run the flows from `flows` that `green` does not list as proven, one by one, in "
+                f"that order ({demos}); report the proven ones as passed earlier")
+    return f"Run every flow from `flows`, one by one, in that order ({demos}) — a full pass."
+
+
+def _latest_map() -> Optional[Dict[str, Any]]:
+    try:
+        from automation.claude_code import session
+        return session.latest_feature_map()
+    except Exception:
+        return None
+
+
+def _feature_entry(line: str, fmap: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The feature-map entry a picked line names. The Feature map sends
+    '[app] <feature>: <gap>', and a feature name can itself contain ': '."""
+    best, best_len = None, 0
+    for app, feats in ((fmap or {}).get("apps") or {}).items():
+        for f in feats or []:
+            key = f"[{app}] {f.get('feature')}"
+            if (line == key or line.startswith(key + ":")) and len(key) > best_len:
+                best, best_len = f, len(key)
+    return best
+
+
+def _feature_block(line: str, f: Optional[Dict[str, Any]]) -> str:
+    """One feature to cover, with what the analysis already found about it.
+    MEASURED 2026-10-27: given only the line, a session spent 12 minutes in helper
+    agents finding the screens and ids the feature map already listed."""
+    out = [f"- {line}"]
+    if f:
+        if f.get("role"):
+            out.append(f"  role: {f['role']}")
+        if f.get("screens"):
+            out.append("  screens: " + ", ".join(f["screens"]))
+        if f.get("ids"):
+            out.append("  ids: " + ", ".join(f["ids"]))
+        if f.get("covered_by"):
+            out.append("  closest flows: " + ", ".join(f["covered_by"][:4]))
+        if f.get("scenario"):
+            out.append(f"  scenario idea: {f['scenario']}")
+    return "\n".join(out)
 
 
 def _focus(options: Dict[str, Any]) -> str:
     if options.get("features"):
-        return "\n".join(f"- {f}" for f in options["features"])
+        fmap = _latest_map()
+        return "\n".join(_feature_block(line, _feature_entry(line, fmap))
+                         for line in options["features"])
     if (options.get("focus") or "").strip():
         return options["focus"].strip()
+    fmap = _latest_map()
+    gaps = []
+    for app, feats in ((fmap or {}).get("apps") or {}).items():
+        for f in feats or []:
+            if f.get("status") in ("missing", "partial") and f.get("risk") == "high":
+                line = f"[{app}] {f.get('feature')}: {f.get('gap') or f.get('scenario') or ''}"
+                gaps.append(_feature_block(line, f))
+    if gaps:
+        return "The high-risk gaps from the latest analysis:\n" + "\n".join(gaps[:15])
+    return ("No analysis yet: run `coverage`, and pick the highest-risk screens no flow drives "
+            "(payments, bookings, orders first).")
+
+
+def previous_features() -> Dict[str, Any]:
+    """The latest feature map's feature names per app — the baseline the next analysis
+    keeps (MEASURED 2026-10-26: two analyses grouped the same screens into 44 and 24
+    features, so the map could not be compared from one run to the next)."""
     try:
         from automation.claude_code import session
         fmap = session.latest_feature_map()
     except Exception:
         fmap = None
-    gaps = []
+    lines, n = [], 0
     for app, feats in ((fmap or {}).get("apps") or {}).items():
         for f in feats or []:
-            if f.get("status") in ("missing", "partial") and f.get("risk") == "high":
-                gaps.append(f"- [{app}] {f.get('feature')}: {f.get('gap') or f.get('scenario') or ''}")
-    if gaps:
-        return "The high-risk gaps from the latest analysis:\n" + "\n".join(gaps[:15])
-    return ("No analysis yet: run `coverage`, and pick the highest-risk screens no flow drives "
-            "(payments, bookings, orders first).")
+            n += 1
+            lines.append(f"   - [{app}/{f.get('role') or app}] {f.get('feature')}")
+    return {"count": str(n), "text": "\n".join(lines) or "   (none yet — this is the first analysis)"}
 
 
 def build(kind: str, options: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, Any]) -> str:
@@ -91,8 +151,14 @@ def build(kind: str, options: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, 
     max_new = int(options.get("max_new") or s.get("max_new_scenarios") or 3)
     if kind == "nightly" and mode == "full":
         max_new *= 2
+    if kind == "generate" and not options.get("max_new"):
+        # Ticking 10 gaps in the Feature map means 10 scenarios, not the default 3.
+        max_new = max(max_new, len(options.get("features") or []))
+    prev = previous_features() if kind in ("analyze", "nightly") else {"count": "0", "text": ""}
     values = {
         **ctx,
+        "previous_count": prev["count"],
+        "previous_features": prev["text"],
         "title": TITLES.get(kind, kind),
         "max_fix_attempts": str(s.get("max_fix_attempts") or 2),
         "max_new": str(max_new),
@@ -102,7 +168,7 @@ def build(kind: str, options: Dict[str, Any], ctx: Dict[str, str], s: Dict[str, 
         "generate_hint": ("New scenarios are written in a separate 'Create scenarios' session, "
                           "after a person picks the gaps."),
         "focus": _focus(options) if kind == "generate" else "",
-        "run_scope": _run_scope(options, s) if kind in ("heal", "nightly") else "",
+        "run_scope": _run_scope(options, s, kind) if kind in ("heal", "nightly") else "",
         "run_list": "\n".join(describe_runs(options.get("run_ids") or [])) if kind == "fix_run" else "",
     }
     task = Template(_read(f"{kind}.md")).safe_substitute(values)

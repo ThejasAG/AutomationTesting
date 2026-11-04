@@ -28,7 +28,8 @@ def get_status():
     except Exception as e:  # noqa: BLE001 — launchctl missing on a non-Mac
         sched = {"installed": False, "error": str(e)}
     return {"claude": session.claude_status(), "active": session.active(), "settings": s,
-            "schedule": sched, "secrets": settings.secrets_status(), "apps": sources.apps_available()}
+            "schedule": sched, "secrets": settings.secrets_status(), "apps": sources.apps_available(),
+            "hooks": session.recent_hooks(5)}
 
 
 class SettingsIn(BaseModel):
@@ -154,6 +155,28 @@ def get_diff(sid: str):
 @router.post("/sessions/{sid}/stop", dependencies=[_admin])
 def stop_session(sid: str):
     return {"stopping": session.stop(sid)}
+
+
+@router.post("/sessions/{sid}/continue", dependencies=[_admin])
+def continue_session(sid: str, current_user=Depends(get_current_user)):
+    try:
+        return {"id": session.continue_session(sid, _who(current_user))}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except session.Busy as e:
+        raise HTTPException(409, str(e))
+    except session.Refused as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/sessions/{sid}/recheck-size", dependencies=[_admin])
+def recheck_session_size(sid: str, current_user=Depends(get_current_user)):
+    try:
+        return session.recheck_size(sid, _who(current_user))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except session.Refused as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/sessions/{sid}/approve", dependencies=[_admin])

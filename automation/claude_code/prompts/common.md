@@ -29,7 +29,7 @@ will answer questions — decide, act, verify, and write down what you did.
   `.venv/bin/python scripts/agent_tools.py <subcommand> ...`
   plus read-only `git diff`, `git status`, `git log`, `git show`.
   Run the tools with `--help` once. The subcommands:
-  `busy`, `preflight --wait 15`, `flows`, `show-flow F`, `history F`,
+  `busy`, `preflight --wait 15`, `flows`, `steps`, `show-flow F`, `history F`,
   `run F --label L [--resume RUN]`, `wait RUN`, `run-info RUN`,
   `check-flows`, `check-ids F`, `impacted FUNC...`, `unit-tests [tests/x.py ...]`,
   `coverage`, `apps`, `app-changes`, `app-show APP PATH`, `app-grep APP PATTERN`,

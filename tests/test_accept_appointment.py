@@ -259,3 +259,34 @@ def test_without_the_slot_on_screen_a_dead_invitation_still_fails(monkeypatch):
     notes = []
     assert fr._accept_appointment(None, notes) is False
     assert "never opened" in joined(notes)
+
+
+class OneOldInvite(TwoInvites):
+    """Only ANOTHER run's invitation (10:55) is pending; this run's (11:20) was
+    accepted by the run being resumed."""
+
+    def els(self, udid=""):
+        if self.state == "list":
+            return [e for e in super().els() if e["cy"] != 420]
+        return super().els()
+
+
+def test_a_resumed_run_never_accepts_another_runs_invitation(monkeypatch):
+    """MEASURED 2026-10-29 (flow_full_event run 8ac098d4, the participant): 11:55 had
+    been accepted, the only pending card was an older 11:45 event, and the step
+    accepted it -- 'one pending' was taken to mean 'this run's'."""
+    from automation.scenarios import screen_text
+    fr = object.__new__(F.FlowRunner)
+    scr = OneOldInvite()
+    fr._idb_els = scr.els
+    fr._idb_tap = scr.tap
+    fr._clear_logbox = lambda *a, **k: 0
+    fr._smart_click = scr.smart_click
+    fr._booked_slot = "11:20"
+    monkeypatch.setattr(screen_text, "read_text", lambda udid, *a, **k: [
+        ("TODAY", 36, 515, 40, 12), ("11:20", 36, 535, 40, 12),
+        ("RESERVATION", 107, 535, 90, 12)])
+    notes = []
+    assert fr._accept_appointment(None, notes) is True, notes
+    assert not hasattr(scr, "accepted"), "the 10:55 invitation must stay pending"
+    assert "already accepted" in notes[-1]

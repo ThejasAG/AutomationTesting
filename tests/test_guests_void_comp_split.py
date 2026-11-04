@@ -869,3 +869,21 @@ def test_waiter_board_goes_home_from_a_leftover_order_screen(monkeypatch):
     assert r._waiter_board(notes)
     assert state["home"] and "went Home" in notes[-1]
     assert caf._W_CREATE_APPT[0] == "@waiter_board"
+
+
+def test_notify_payment_waits_for_the_order_to_reload_after_serving(runner):
+    # The waiter serves and notifies in one segment (the user's call, 2026-11-02): the
+    # served order reloads through the server first (60-130s on this rig).
+    class Reloading(Order):
+        def __init__(self):
+            super().__init__(served=True)
+
+        def describe_all(self, udid):
+            caf.time.sleep(3.0)                    # a read takes ~3s on the iPad
+            els = super().describe_all(udid)
+            return els if caf.time.time() >= 60.0 else [e for e in els
+                                                        if e["AXLabel"] != "notifyPaymentBtn"]
+    s = Reloading()
+    notes = []
+    assert runner(s)._notify_payment(notes), notes
+    assert s.taps[:2] == ["notifyPaymentBtn", "Yes"] and s.notified

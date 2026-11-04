@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useLivePoll } from '../useLivePoll';
 import ReactMarkdown from 'react-markdown';
 import {
   FileText, X, Loader2, Download, Sparkles, CheckCircle2, AlertTriangle, Clock, Smartphone, Bug, FileDown,
 } from 'lucide-react';
-import { getReports, getReport, generateReport, getReportTrends, getReportConfig, fileJira, API_BASE, getHeaders } from '../api';
+import { getReports, getReport, generateReport, getReportTrends, getReportConfig, fileJira } from '../api';
+import { openRichReport } from '../richReport';
 import type { ReportRow, FullReport, ReportTrends } from '../api';
 import ModalPortal from '../components/ModalPortal';
 import { formatDistanceToNow } from 'date-fns';
@@ -36,20 +38,6 @@ function VerdictBadge({ verdict }: { verdict: string }) {
   return <span className={`badge ${statusColor(verdict)}`}>{verdict}</span>;
 }
 
-// The rich report endpoint requires a login. window.open() performs a plain
-// browser navigation with no Authorization header, so it 401s — fetch the HTML
-// with credentials and open that instead of leaving the endpoint unprotected.
-async function openRichReport(runId: string) {
-    const tab = window.open('', '_blank');
-    try {
-        const res = await fetch(`${API_BASE}/reports/${runId}/rich`, { headers: getHeaders() });
-        if (!res.ok) throw new Error(`Report failed to load (${res.status})`);
-        const html = await res.text();
-        if (tab) { tab.document.open(); tab.document.write(html); tab.document.close(); }
-    } catch (e) {
-        if (tab) tab.document.body.innerText = `Could not open the report: ${(e as Error).message}`;
-    }
-}
 
 export default function ReportsPage() {
   const [rows, setRows] = useState<ReportRow[]>([]);
@@ -57,10 +45,18 @@ export default function ReportsPage() {
   const [open, setOpen] = useState<string | null>(null);
   const [trends, setTrends] = useState<ReportTrends | null>(null);
 
-  useEffect(() => {
-    getReports().then(setRows).catch(() => {}).finally(() => setLoading(false));
-    getReportTrends(30).then(setTrends).catch(() => {});
+  const refresh = useCallback(async () => {
+    await Promise.all([
+      getReports().then(setRows).catch(() => {}),
+      getReportTrends(30).then(setTrends).catch(() => {}),
+    ]);
+    setLoading(false);
   }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  // New reports appear by themselves: every 5 s while a run is going, 20 s otherwise
+  // (the report list takes ~0.4 s to build, so it is not polled faster).
+  const live = rows.some(r => r.status === 'running' || r.status === 'queued');
+  useLivePoll(refresh, { live, liveMs: 5000, idleMs: 20000 });
 
   return (
     <div className="animate-fade-in">

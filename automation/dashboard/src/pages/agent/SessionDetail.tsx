@@ -84,6 +84,40 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
     }
   };
 
+  // Size is the one check that depends on a setting: when it is the only one that
+  // failed, it can be checked again with the current limit.
+  const onlySizeFailed = s.status === 'gates_failed'
+    && s.gates.filter(g => !g.ok).map(g => g.name).join() === 'size';
+  const recheckSize = async () => {
+    setBusy('recheck');
+    setActErr('');
+    try {
+      const out = await agentApi.recheckSize(s.id);
+      if (!out.ok) setActErr(`Still too big: ${out.detail}. Raise "Largest change it may propose" in the settings, or reject it.`);
+      setReload(n => n + 1);
+      onChanged();
+    } catch (e) {
+      setActErr((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const resume = async () => {
+    if (!window.confirm('Continue this session where it stopped (same worktree, same Claude conversation)?')) return;
+    setBusy('continue');
+    setActErr('');
+    try {
+      await agentApi.continueSession(s.id);
+      setReload(n => n + 1);
+      onChanged();
+    } catch (e) {
+      setActErr((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
   return (
     <div style={section}>
       <h3 style={h3}><FileText size={18} /> {KIND[s.kind] ?? s.kind}
@@ -119,6 +153,23 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
         )}
       </div>
 
+      {/* ── interrupted: pick it up again ── */}
+      {s.status === 'interrupted' && (
+        <div className="card" style={{ ...card, borderColor: `${AMBER}66` }}>
+          <div style={{ fontWeight: 600, display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+            <AlertTriangle size={18} color={AMBER} /> This session was interrupted
+          </div>
+          <p style={{ ...muted, marginBottom: 12 }}>
+            Its process ended (the Mac restarted or the platform was stopped). Continue picks it up where
+            it stopped: same worktree, same edits and runs, same Claude conversation.
+          </p>
+          <button className="btn" disabled={!!busy} onClick={resume}>
+            {busy === 'continue' ? <Loader2 size={16} className="spin" /> : <RotateCw size={16} />} Continue where it stopped
+          </button>
+          {actErr && <div style={{ color: RED, fontSize: '0.85rem', marginTop: 10, ...wrapText }}>{actErr}</div>}
+        </div>
+      )}
+
       {/* ── review ── */}
       {inReview && (
         <div className="card" style={{ ...card, borderColor: s.status === 'review' ? `${AMBER}66` : `${RED}66` }}>
@@ -129,7 +180,9 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
           <p style={{ ...muted, marginBottom: 12 }}>
             {s.status === 'review'
               ? 'Every check passed. Approve merges the session\'s branch into the checkout the backend runs from.'
-              : 'Reject it to delete the branch, or start a new session.'}
+              : onlySizeFailed
+                ? 'Only the size check failed. Check it again with the current limit (AI Agent settings; it grows with each new scenario), or reject it to delete the branch.'
+                : 'Reject it to delete the branch, or start a new session.'}
           </p>
           <Gates s={s} />
           <Change s={s} />
@@ -137,6 +190,12 @@ export default function SessionDetail({ id, onChanged, restart, onRestart }: {
             {s.status === 'review' && (
               <button className="btn" disabled={!!busy} onClick={() => decide('approve')}>
                 {busy === 'approve' ? <Loader2 size={16} className="spin" /> : <GitMerge size={16} />} Approve &amp; merge
+              </button>
+            )}
+            {onlySizeFailed && (
+              <button className="btn" disabled={!!busy} onClick={recheckSize}
+                      title="Only the size failed: check it again with the current limit (it grows with each new scenario)">
+                {busy === 'recheck' ? <Loader2 size={16} className="spin" /> : <ShieldCheck size={16} />} Check the size again
               </button>
             )}
             <button style={ghost} disabled={!!busy} onClick={() => decide('reject')}>
@@ -328,17 +387,17 @@ function Summary({ summary, patches }: { summary: SessionSummary; patches: { nam
           <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
               <thead><tr>
-                <th style={th}>Flow</th><th style={th}>Result</th><th style={th}>Category</th>
-                <th style={th}>What happened</th><th style={th}>Action</th><th style={th}>Runs</th>
+                <th style={th}>Flow</th><th style={th}>Result</th><th style={{ ...th, whiteSpace: 'nowrap' }}>Category</th>
+                <th style={th}>What happened</th><th style={{ ...th, whiteSpace: 'nowrap' }}>Action</th><th style={th}>Runs</th>
               </tr></thead>
               <tbody>
                 {flows.map((f, i) => (
                   <tr key={i}>
                     <td style={{ ...td, ...mono }}>{f.flow_id}</td>
                     <td style={td}>{chip(f.final_status || '—', runColor(f.final_status))}</td>
-                    <td style={td}>{f.category || '—'}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>{f.category || '—'}</td>
                     <td style={{ ...td, color: 'var(--text-secondary)' }}>{f.root_cause || '—'}</td>
-                    <td style={td}>{(f.action || '—').replace(/_/g, ' ')}</td>
+                    <td style={{ ...td, whiteSpace: 'nowrap' }}>{(f.action || '—').replace(/_/g, ' ')}</td>
                     <td style={td}><span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {arr<string>(f.runs).filter(Boolean).map(r => <RunLink key={r} id={r} />)}</span></td>
                   </tr>
@@ -444,7 +503,7 @@ function Runs({ runs }: { runs: RunRow[] }) {
   if (!runs.length) return null;
   return (
     <Block icon={<ListChecks size={16} />} title={`Runs (${runs.length})`}>
-      <div style={{ overflowX: 'auto', maxWidth: '100%' }}>
+      <div className="scroll-box" style={{ maxWidth: '100%' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.84rem' }}>
           <thead><tr>
             <th style={th}>Flow</th><th style={th}>Attempt</th><th style={th}>Status</th><th style={th}>Time</th>
