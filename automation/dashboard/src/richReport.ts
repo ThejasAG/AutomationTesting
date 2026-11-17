@@ -14,3 +14,13 @@ export async function openRichReport(runId: string) {
         if (tab) tab.document.body.innerText = `Could not open the report: ${(e as Error).message}`;
     }
 }
+
+// The full report as HTML (calculation tables, red sums, yellow notes) for a download, no
+// screenshots. The user, 2026-11-05, of the old export: "most of the areas is not filled";
+// and then "dont give summery": no AI summary in it.
+export async function fetchRichReport(runId: string): Promise<string> {
+    const res = await fetch(`${API_BASE}/reports/${runId}/rich?screenshots=0`,
+                            { headers: getHeaders() });
+    if (!res.ok) throw new Error(`Report failed to load (${res.status})`);
+    return await res.text();
+}

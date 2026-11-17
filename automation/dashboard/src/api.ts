@@ -1116,9 +1116,11 @@ export interface ReportRow {
 export interface ReportScenario {
     scenario_num: string | null; scenario_name: string | null; status: string;
     consumer_status: string | null; business_status: string | null; error: string | null; role: string | null;
+    detail?: string | null; seconds?: number | null;
 }
 export interface FullReport extends ReportRow {
     error_message: string | null; report_summary: string | null; report_generated_at: string | null;
+    devices?: string | null; carried_over?: number | null;
     scenarios: ReportScenario[];
     rca: { root_cause: string | null; suggested_fix: string | null; summary: string | null; llm_provider: string | null } | null;
 }

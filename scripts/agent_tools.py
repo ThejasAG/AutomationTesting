@@ -440,7 +440,18 @@ def _child(a) -> int:
     threading.Thread(target=watch_db_stop, daemon=True).start()
     with open(a.id_file, "w") as f:
         f.write(rid)
-    runinfo.wait_for(rid)
+    # 15 minutes per segment still to run (at least 60): the END TO END's 21 segments
+    # take hours, and a flat hour stopped it mid-way (run cf1f3ec2, 2026-11-05).
+    try:
+        from automation.scenarios.cross_app_flows import resolve_flow as _resolve
+        start = int((plan or {}).get("start_at") or 0)
+        left = len((_resolve(a.flow) or {}).get("segments") or []) - start
+        until = int(os.environ.get("FLOW_STOP_AFTER") or 0)       # --until N
+        if until:
+            left = min(left, until - start)
+    except Exception:
+        left = 0
+    runinfo.wait_for(rid, runinfo.run_timeout_s(left))
     return 0
 
 

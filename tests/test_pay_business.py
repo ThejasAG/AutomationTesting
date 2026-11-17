@@ -490,3 +490,35 @@ def test_a_keypad_slower_than_one_read_is_still_found(monkeypatch):
     notes = []
     assert runner._pay_business("epay", notes), notes
     assert s.paid and "keypad did not open" not in " ".join(notes)
+
+
+class RedrawingCard(PaymentScreen):
+    """MEASURED 2026-11-05 (run e07ec401): right after the discount the card was still
+    redrawing and E-Payment took no tap ('not reachable (covered or scrolled out)');
+    the same tile hit-tested fine at rest."""
+
+    def __init__(self, refusals):
+        super().__init__()
+        self.refusals = refusals
+
+    def tap_el(self, udid, e, els=None, scroll=True):
+        if e["AXLabel"] == "epaymentBtn" and self.refusals:
+            self.refusals -= 1
+            self.log.append("epaymentBtn refused")
+            return False, "not reachable (covered or scrolled out)"
+        return super().tap_el(udid, e, els, scroll)
+
+
+def test_a_tile_the_redrawing_card_refused_is_tapped_again(pay):
+    s = RedrawingCard(refusals=2)
+    ok, notes = pay(s)
+    assert ok and s.paid, notes
+    assert s.log.count("epaymentBtn refused") == 2 and s.inputs == ["36.05"]
+    assert sum("trying again" in n for n in notes) == 2
+
+
+def test_a_tile_that_never_takes_a_tap_fails_after_three(pay):
+    s = RedrawingCard(refusals=99)
+    ok, notes = pay(s)
+    assert not ok and not s.paid
+    assert "3 times" in notes[-1] and s.log.count("epaymentBtn refused") == 3

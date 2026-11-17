@@ -487,7 +487,11 @@ def test_w_add_splits_with_the_right_button(ipad):
     ok, notes, s = ipad("Penne Pollo*3 > split: Guest 1, Guest 2")
     assert ok, notes
     assert "Split" in s.taps and len(s.rows) == 2
-    assert "split among Guest 1, Guest 2" in notes[-1]
+    done = next(n for n in notes if n.startswith("[ok] @w_add:"))
+    assert "split among Guest 1, Guest 2" in done
+    # Then each member's share is read off their card -- evidence only: this fake iPad
+    # draws no payment cards, so it says so and the step still passes.
+    assert "could not be read on their card" in notes[-1]
 
 
 def test_w_add_lists_the_offered_options_for_an_unknown_one(ipad):
@@ -853,7 +857,9 @@ def _runner_with_cards(monkeypatch, cards, resumed=True):
     if resumed:
         fr._resume = {"start_at": 5}
     monkeypatch.setattr(FlowRunner, "_owner_lines",
-                        lambda self, udid, who, raw=False: cards.get(who, []))
+                        lambda self, udid, who, raw=False, priced=False:
+                        [(t, None) for t in cards.get(who, [])] if priced
+                        else cards.get(who, []))
     monkeypatch.setattr(caf._idbd, "describe_all",
                         lambda udid: pytest.fail("must decide from the cards alone"))
     return fr
@@ -1341,9 +1347,11 @@ def test_focus_presses_again_when_the_order_pane_really_is_empty(monkeypatch, cl
     assert order.presses == 2
 
 
-def test_the_more_orders_segment_only_sends_and_can_be_re_run():
-    # The user's call, 2026-11-02: "just send new items to kitchen thats it".
-    assert caf._W_FULL_EVENT_MORE_SEND == ["@open_order", "@send_if_any"]
+def test_the_more_orders_segment_only_sends():
+    # The user's call, 2026-11-02: "just send new items to kitchen thats it"; as plain
+    # Select All + SEND since 2026-11-05 ("that will be more clear").
+    assert caf._W_FULL_EVENT_MORE_SEND == ["@open_order", "@select_all_items",
+                                           "@send_to_kitchen"]
 
 
 class AvatarRow:
@@ -2493,7 +2501,7 @@ def test_send_if_any_fails_rather_than_pass_with_unsent_dishes_left(monkeypatch,
     ok, notes, sent = _send_if_any(monkeypatch, BusyOrder(deaf_taps=99))
     assert not ok and sent == []
     assert "'Order'" in notes[-1] and "[FAIL]" in notes[-1]
-    assert clock["t"] <= 150
+    assert clock["t"] <= FlowRunner._SEND_WAIT_S + 60
 
 
 def test_send_if_any_still_passes_when_nothing_is_unsent(monkeypatch, clock):
@@ -2659,3 +2667,587 @@ def test_unfold_event_reaches_this_runs_event_past_four_others(monkeypatch, cloc
     els = fr._unfold_event("IPHONE", "10:38", "roopad")
     assert any(caf._idbd.name(e) == "10:38" for e in els), w.taps
     assert "off screen" not in w.taps
+
+
+# ── the cart before payment (pre-payment, set beside the invoice after the event) ──────
+def _cart_screen(coupon=False):
+    def txt(t, x, y):
+        return el(t, x, y, w=120, h=20, kind="StaticText")
+    rows = [txt("Penne Pollo", 30, 300), txt("14.50 €", 300, 300)]       # a dish: not read
+    y = 520
+    if coupon:
+        rows += [txt("Total", 30, 480), txt("300.00 €", 300, 480),
+                 txt("Discount", 30, 500), txt("30.00 €", 300, 500)]
+    for rate, vat in (("VAT 3%", "1.11€"), ("VAT 14%", "3.13€"), ("VAT 17%", "25.68€")):
+        rows += [txt(rate, 30, y), txt(vat, 300, y)]
+        y += 22
+    rows += [txt("Total", 30, 620), txt("270.00 €" if coupon else "273.57 €", 300, 620)]
+    return rows
+
+
+def test_the_cart_rows_are_its_vat_and_totals_not_its_dishes():
+    assert FlowRunner._cart_rows(_cart_screen()) == [
+        ("VAT 3%", 1.11), ("VAT 14%", 3.13), ("VAT 17%", 25.68), ("Total", 273.57)]
+    rows = FlowRunner._cart_rows(_cart_screen(coupon=True))
+    assert rows[:2] == [("Total", 300.0), ("Discount", 30.0)] and rows[-1] == ("Total", 270.0)
+    joined = [el("VAT 3%, 1.11€", 30, 520, kind="StaticText"),
+              el("Total", 30, 620, kind="StaticText"), el("273.57 €", 300, 620, kind="StaticText")]
+    assert FlowRunner._cart_rows(joined) == [("VAT 3%", 1.11), ("Total", 273.57)]
+
+
+def test_the_cart_is_written_for_the_report_and_its_total_is_the_bill(monkeypatch, clock):
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: _cart_screen())
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr._cur_role = "PHONE", "consumer"
+    notes = []
+    fr._read_cart(notes)
+    table = caf.invoice_check.calc_of(notes[-1])
+    assert table["t"] == "Cart before payment (host)"
+    assert table["r"] == [["VAT 3%", "1.11", None], ["VAT 14%", "3.13", None],
+                          ["VAT 17%", "25.68", None], ["Total", "273.57", None]]
+    assert fr._cart_total == 273.57
+    # The Stripe sheet's amount is then checked against the cart's Total.
+    sheet = StripeSheet(clock, ready=0.0)
+    fr._read_bill_total = lambda r: (_ for _ in ()).throw(AssertionError("not needed"))
+    assert fr._pay_stripe(types.SimpleNamespace(d=sheet), notes)
+    assert "(bill €273.57)" in [n for n in notes if n.startswith("[ok] @pay_stripe")][0]
+    paid = next(t for t in map(caf.invoice_check.calc_of, notes)
+                if t and t["t"] == "Pre-order payment (host)")
+    assert paid["r"][0][:2] == ["273.57", "108.50"] and paid["r"][0][-1] is False
+    assert notes[-1].startswith("[mismatch] @pay_stripe — Pre-order payment (host): bill "
+                                "displayed €273.57 but charged by stripe €108.50")
+    assert fr._cart_total is None, "one cart's Total is one payment's bill"
+
+
+def test_a_cart_that_cannot_be_read_does_not_fail_the_checkout(monkeypatch, clock):
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: [el("cartCheckout")])
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr._cur_role = "PHONE", "participant"
+    notes = []
+    fr._read_cart(notes)
+    assert notes == ["    · @to_checkout: the cart's Total and VAT rows could not be read"]
+    assert fr._cart_total is None
+
+
+# ── a split's shares, read off every member's card (the user's split sample, 2026-11-05) ─
+def test_a_card_line_takes_the_price_level_with_it():
+    fr = FlowRunner.__new__(FlowRunner)
+    line = el("Pizza Salamees x 6/2", x=900, y=500, w=200, h=18)
+    els = [line, el("83.40 €", x=1150, y=500, w=60, h=18),
+           el("12.20 €", x=1150, y=540, w=60, h=18),     # the next line's
+           el("99.00 €", x=400, y=500, w=60, h=18)]      # the order pane, left of it
+    assert fr._card_line_price(els, line, top=450, bottom=700) == 83.40
+    assert fr._card_line_price(els, line, top=520, bottom=700) is None   # another card
+
+
+def _runner_with_priced_cards(monkeypatch, cards):
+    fr = FlowRunner.__new__(FlowRunner)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    monkeypatch.setattr(FlowRunner, "_owner_lines",
+                        lambda self, udid, who, raw=False, priced=False: cards.get(who, []))
+    return fr
+
+
+PENNE_SPLIT = "@w_add:Penne Pollo*3 > split: Guest 1, Guest 2"
+
+
+def test_shares_a_cent_apart_that_add_up_are_written_and_not_flagged(monkeypatch):
+    fr = _runner_with_priced_cards(monkeypatch, {
+        "Guest 1": [("Penne Pollo x 3/2", 26.27)], "Guest 2": [("Penne Pollo x 3/2", 26.26)]})
+    notes = []
+    fr._split_evidence("IPAD", PENNE_SPLIT, "Penne Pollo", ["Guest 1", "Guest 2"], notes,
+                       total=52.53, qty=3)
+    assert len(notes) == 1
+    t = caf.invoice_check.calc_of(notes[0])
+    assert t["t"] == "Split shares — " + PENNE_SPLIT and t["total"] == 52.53 and t["qty"] == 3
+    assert t["r"] == [["Guest 1", "Penne Pollo x 3/2", "26.27", None],
+                      ["Guest 2", "Penne Pollo x 3/2", "26.26", None]]
+
+
+@pytest.mark.parametrize("prices,words", [((26.27, 26.27), "add up to 52.54"),
+                                          ((26.30, 26.23), "differ by 0.07")])
+def test_shares_that_do_not_add_up_or_differ_more_are_a_mismatch(monkeypatch, prices, words):
+    fr = _runner_with_priced_cards(monkeypatch, {
+        "Guest 1": [("Penne Pollo x 3/2", prices[0])],
+        "Guest 2": [("Penne Pollo x 3/2", prices[1])]})
+    notes = []
+    fr._split_evidence("IPAD", PENNE_SPLIT, "Penne Pollo", ["Guest 1", "Guest 2"], notes,
+                       total=52.53, qty=3)
+    assert notes[-1].startswith(caf.invoice_check.MISMATCH_PREFIX + PENNE_SPLIT)
+    assert words in notes[-1]
+
+
+def test_a_member_in_two_splits_of_one_dish_gives_the_share_of_this_one(monkeypatch):
+    # Guest 3 holds 1/5 of the five Coca-Colas and now half of Noolu Naga's.
+    fr = _runner_with_priced_cards(monkeypatch, {
+        "Noolu Naga": [("Coca-Cola® Light 1.0l x 2/2", 6.10)],
+        "Guest 3": [("Coca-Cola® Light 1.0l x 5/5", 6.10), ("Coca-Cola® Light 1.0l x 2/2", 6.10),
+                    ("Pizza Margheritas x 2", 45.16)]})
+    shares = fr._split_shares("IPAD", "Coca-Cola® Light 1.0l", ["Noolu Naga", "Guest 3"], 12.20)
+    assert shares == [("Noolu Naga", "Coca-Cola® Light 1.0l x 2/2", 6.10),
+                      ("Guest 3", "Coca-Cola® Light 1.0l x 2/2", 6.10)]
+
+
+def test_a_share_that_cannot_be_read_is_noted_and_never_fails_the_step(monkeypatch):
+    fr = _runner_with_priced_cards(monkeypatch, {"Guest 1": [("Penne Pollo x 3/2", 26.27)]})
+    notes = []
+    fr._split_evidence("IPAD", PENNE_SPLIT, "Penne Pollo", ["Guest 1", "Guest 2"], notes,
+                       total=52.53, qty=3)
+    assert caf.invoice_check.calc_of(notes[0])["r"][1] == ["Guest 2", "—", "—", None]
+    assert "Guest 2's line of Penne Pollo could not be read" in notes[-1]
+    assert not any(n.startswith(caf.invoice_check.MISMATCH_PREFIX) for n in notes)
+
+    def broken(self, udid, who, raw=False, priced=False):
+        raise RuntimeError("idb timed out")
+    monkeypatch.setattr(FlowRunner, "_owner_lines", broken)
+    notes = []
+    fr._split_evidence("IPAD", PENNE_SPLIT, "Penne Pollo", ["Guest 1", "Guest 2"], notes,
+                       total=52.53, qty=3)
+    assert notes == [f"    · {PENNE_SPLIT}: could not read the members' lines (idb timed out)"]
+
+
+# ── a session Appium ended while the run worked on another device ───────────────────
+class _Dead:
+    def query_app_state(self, bundle):
+        raise Exception("Message: A session is either terminated or not started")
+
+    def quit(self):
+        raise Exception("already gone")
+
+
+class _Live:
+    def __init__(self):
+        self.activated = []
+
+    def query_app_state(self, bundle):
+        return 4
+
+    def activate_app(self, bundle):
+        self.activated.append(bundle)
+
+
+def _runner_with_session(monkeypatch, old):
+    fr = FlowRunner.__new__(FlowRunner)
+    fr.consumer_bundle, fr.business_bundle = "consumer.app", "business.app"
+    fr._con_metro_ready, fr._biz_metro_ready = {"PHONE"}, True
+    fr._sessions, fr._runners = {"PHONE": old}, {"PHONE": "old runner"}
+    monkeypatch.setattr(FlowRunner, "_role_udid", lambda self, role: "PHONE")
+    monkeypatch.setattr(FlowRunner, "_wait_app_ready", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(FlowRunner, "_clear_logbox", lambda self, udid=None: None)
+    monkeypatch.setattr(caf, "apply_flow_speed_settings", lambda d: None)
+    monkeypatch.setattr(caf, "accept_system_alert", lambda d: None)
+    monkeypatch.setattr(caf, "_options", lambda *a: None)
+    monkeypatch.setattr(caf, "ScenarioRunner", lambda d, bundle, screenshot_dir=None: ("runner", d))
+    new = _Live()
+    monkeypatch.setattr(caf.webdriver, "Remote", lambda url, options=None: new)
+    return fr, new
+
+
+def test_a_session_appium_ended_is_replaced_not_failed(monkeypatch):
+    # MEASURED 2026-11-05, run 651a9252: the host's iPhone sat idle ~30 min while
+    # segments 3-11 ran on the iPad, and segment 12's first step failed on it.
+    fr, new = _runner_with_session(monkeypatch, _Dead())
+    assert fr._session_for("consumer") == ("runner", new)
+    assert fr._sessions["PHONE"] is new and new.activated == ["consumer.app"]
+    assert "had ended" in fr._session_note
+
+
+def test_a_live_session_is_kept(monkeypatch):
+    live = _Live()
+    fr, new = _runner_with_session(monkeypatch, live)
+    assert fr._session_for("consumer") == "old runner"
+    assert fr._sessions["PHONE"] is live and not getattr(fr, "_session_note", None)
+
+
+def test_a_session_call_that_fails_for_another_reason_keeps_the_session():
+    class Busy:
+        def query_app_state(self, bundle):
+            raise Exception("Message: timed out waiting for WDA")
+    assert FlowRunner._session_alive(Busy(), "x") is True
+    assert FlowRunner._session_alive(_Dead(), "x") is False
+
+
+# ── segments 9 and 10 only when segment 8 sent something (the user, 2026-11-05) ─────
+def _seg_runner(monkeypatch, sent):
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._sent_if_any = sent
+    saved = []
+    monkeypatch.setattr(FlowRunner, "_persist",
+                        lambda self, seg, status, notes, secs, screenshot=None:
+                        saved.append((seg["num"], status, list(notes))))
+    monkeypatch.setattr(FlowRunner, "_metro_log_sizes", lambda self: {})
+
+    class Ran(Exception):
+        pass
+
+    asked = []
+
+    def session(self, role):
+        asked.append(role)
+        raise Ran(role)
+    monkeypatch.setattr(FlowRunner, "_session_for", session)
+    return fr, saved, asked
+
+
+def test_the_split_follow_up_segments_pass_at_once_when_nothing_was_sent(monkeypatch):
+    fr, saved, asked = _seg_runner(monkeypatch, sent=False)
+    seg = next(s for s in caf.FLOWS["flow_full_event"]["segments"] if s["num"] == "9")
+    assert seg.get("only_if_sent")
+    assert fr._run_segment(seg) is True
+    num, status, notes = saved[-1]
+    assert (num, status) == ("9", "PASS") and "not needed" in notes[-1]
+    assert asked == []             # no kitchen login at all
+
+
+@pytest.mark.parametrize("sent", [True, None])        # sent, or a resumed run: unknown
+def test_the_split_follow_up_segments_run_when_something_was_or_may_have_been_sent(
+        monkeypatch, sent):
+    fr, saved, asked = _seg_runner(monkeypatch, sent=sent)
+    seg = next(s for s in caf.FLOWS["flow_full_event"]["segments"] if s["num"] == "10")
+    try:
+        fr._run_segment(seg)
+    except Exception:
+        pass                       # this bare runner cannot go further; it got that far
+    assert asked == ["waiter"]     # it went on to the waiter's session: the segment ran
+
+
+def test_only_the_split_follow_ups_are_conditional():
+    conditional = [s["num"] for s in caf.FLOWS["flow_full_event"]["segments"]
+                   if s.get("only_if_sent")]
+    assert conditional == ["9", "10"]
+
+
+# ── SEND drawn late on an order just opened (MEASURED 2026-11-05, run 6958f3fe) ──────
+def _order_screen(selected=False, send=False):
+    row = {"AXLabel": "PennePollocard", "type": "Button", "frame": {"x": 100, "y": 300, "width": 400, "height": 40}}
+    badge = {"AXLabel": "Order", "type": "StaticText", "frame": {"x": 520, "y": 302, "width": 50, "height": 20}}
+    sel = {"AXLabel": "unSelectAll" if selected else "selectAll", "type": "Button",
+           "frame": {"x": 900, "y": 100, "width": 80, "height": 30}}
+    out = [row, badge, sel]
+    if send:
+        out.append({"AXLabel": "sendItemsBtn", "type": "Button",
+                    "frame": {"x": 100, "y": 700, "width": 300, "height": 60}})
+    return out
+
+
+def _send_runner(monkeypatch, screens):
+    fr = FlowRunner.__new__(FlowRunner)
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(caf.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    taps = []
+    state = {"i": 0}
+
+    def now():
+        return screens[min(state["i"], len(screens) - 1)]
+
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: now())
+    monkeypatch.setattr(caf._idbd, "tap", lambda udid, ids, els=None, **k: taps.append(ids[0]) or (True, "idb"))
+
+    def wait_els(self, udid, pick, secs, reads=3):
+        clock["t"] += secs
+        state["i"] += 1
+        return now(), pick(now())
+    monkeypatch.setattr(FlowRunner, "_wait_els", wait_els)
+    return fr, taps, clock
+
+
+def test_send_drawn_late_is_waited_for_with_the_order_kept_selected(monkeypatch):
+    screens = [_order_screen(selected=True)] * 3 + [_order_screen(selected=False)] \
+        + [_order_screen(selected=True, send=True)]
+    fr, taps, clock = _send_runner(monkeypatch, screens)
+    notes = []
+    els = fr._wait_for_send("IPAD", "send to kitchen", notes)
+    assert els is not None and any(caf._idbd.name(e) == "sendItemsBtn" for e in els)
+    assert taps == ["selectAll"]            # once, when a redraw cleared the selection
+    assert "SEND was not shown for 40s while 1 line(s)" in notes[-1]
+
+
+def test_send_never_drawn_gives_up_after_the_wait(monkeypatch):
+    fr, taps, clock = _send_runner(monkeypatch, [_order_screen(selected=True)])
+    assert fr._wait_for_send("IPAD", "send to kitchen", []) is None
+    assert clock["t"] >= FlowRunner._SEND_WAIT_S
+
+
+def test_send_to_kitchen_waits_for_a_late_send_then_sends(monkeypatch):
+    sent = _order_screen(selected=False)[:2] + [{"AXLabel": "selectAll", "type": "Button",
+                                                "frame": {"x": 900, "y": 100, "width": 80, "height": 30}}]
+    screens = [_order_screen(selected=True)] * 4 + [_order_screen(selected=True, send=True)] \
+        + [sent] * 20
+    fr, taps, clock = _send_runner(monkeypatch, screens)
+    fr._cur_udid = "IPAD"
+    monkeypatch.setattr(FlowRunner, "_select_all_items", lambda self, notes, wait=8.0: True)
+
+    def describe(udid):
+        # After SEND is tapped the screen redraws without it.
+        return sent if "sendItemsBtn" in taps else screens[min(len(screens) - 1, int(clock["t"] // 10))]
+    monkeypatch.setattr(caf._idbd, "describe_all", describe)
+    notes = []
+    assert fr._send_to_kitchen(notes)
+    assert taps[-1] == "sendItemsBtn" and notes[-1].startswith("[ok] send to kitchen — tapped SEND")
+
+
+def test_the_new_dishes_are_sent_with_plain_steps():
+    seg = next(s for s in caf.FLOWS["flow_full_event"]["segments"] if s["num"] == "14")
+    assert seg["steps"] == ["@open_order", "@select_all_items", "@send_to_kitchen"]
+
+
+def test_a_resumed_send_with_nothing_unsent_passes(monkeypatch):
+    nothing = [{"AXLabel": "PennePollocard", "type": "Button",
+                "frame": {"x": 100, "y": 300, "width": 400, "height": 40}},
+               {"AXLabel": "unSelectAll", "type": "Button",
+                "frame": {"x": 900, "y": 100, "width": 80, "height": 30}}]
+    fr, taps, clock = _send_runner(monkeypatch, [nothing])
+    fr._cur_udid, fr._resume = "IPAD", {"start_at": 13}
+    monkeypatch.setattr(FlowRunner, "_select_all_items", lambda self, notes, wait=8.0: True)
+    notes = []
+    assert fr._send_to_kitchen(notes)
+    assert "nothing unsent" in notes[-1] and taps == ["unSelectAll"]
+    fr._resume = {}                                    # a fresh run must send something
+    monkeypatch.setattr(caf._idbd, "tap", lambda udid, ids, els=None, **k: (
+        (True, "idb") if any(caf._idbd.name(e) == ids[0] for e in nothing)
+        else (False, "not on screen")))
+    notes = []
+    assert not fr._send_to_kitchen(notes) and "could not tap SEND" in notes[-1]
+
+
+# ── the tip keypad (MEASURED 2026-11-05, run 981e90eb: it stayed open reading '30 €') ─
+@pytest.mark.parametrize("got,text,ok", [("3 €", "3", True), ("3,00€", "3", True),
+                                         ("30 €", "3", False), ("88.31 €", "88.31", True),
+                                         ("88,31 €", "88.31", True), (None, "3", False),
+                                         ("0 €", "3", False)])
+def test_the_keypad_must_read_the_amount_itself_not_contain_it(got, text, ok):
+    assert FlowRunner._keypad_reads(got, text) is ok
+
+
+def _tip_runner(monkeypatch, closes_after):
+    """Input closes the keypad only on the given press (1st, 2nd, never: 0)."""
+    from automation.scenarios import screen_text
+    monkeypatch.setattr(screen_text, "read_text", lambda *a, **k: [("", 1108, 535, 30, 15)])
+    presses, typed, closed = [], [], []
+
+    def tap(udid, names, *a, **k):
+        presses.append(names[0])
+        return True, "idb"
+    monkeypatch.setattr(caf._idbd, "tap", tap)
+    monkeypatch.setattr(caf._idbd, "tap_el", lambda *a, **k: (True, "idb"))
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._cur_udid, fr.devices = "IPAD", {}
+    btn = el("tipBtn", 850, 400, 80, 30)
+    card = el("N NooluNagaaccordionCard", 834, 146, 336, 49)
+    fr._open_card = lambda udid, who, ident: ([btn], card, btn)
+    fr._profile_region = lambda es, who: (card, 140, 800)
+    fr._keypad_type = lambda udid, text: typed.append(text) or "3 €"
+    totals = iter([100.0])
+    fr._payer_card_total = lambda es, c: next(totals, 103.0)
+
+    def wait_els(udid, pick, secs, reads=3):
+        inputs = presses.count("userInputBtn")
+        is_open = not (closes_after and inputs >= closes_after)
+        els = [el("userInputBtn"), el("numberPadClose"), el("30 €" if inputs else "3 €")] \
+            if is_open else [card]
+        if is_open:
+            els[2] = dict(el("userAmountInput"), AXValue="30 €")
+        return els, pick(els)
+    fr._wait_els = wait_els
+    return fr, presses, typed
+
+
+def test_a_tip_keypad_left_open_is_retyped_and_input_again(monkeypatch, clock):
+    fr, presses, typed = _tip_runner(monkeypatch, closes_after=2)
+    notes = []
+    assert fr._w_tip("Noolu Naga 3", notes), notes
+    assert presses.count("userInputBtn") == 2 and typed == ["3", "3"]
+    assert any("left the keypad open reading '30 €'" in n for n in notes)
+
+
+def test_a_tip_keypad_that_never_closes_fails_and_is_closed(monkeypatch, clock):
+    fr, presses, typed = _tip_runner(monkeypatch, closes_after=0)
+    notes = []
+    assert not fr._w_tip("Noolu Naga 3", notes)
+    assert "stayed open" in notes[-1] and presses[-1] == "numberPadClose"
+
+
+def test_a_card_step_closes_a_keypad_an_earlier_step_left_open(monkeypatch):
+    pad = [el("numberPadClose"), el("userInputBtn")]
+    taps = []
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: [] if taps else pad)
+    monkeypatch.setattr(caf._idbd, "tap", lambda udid, names, *a, **k: taps.append(names[0]) or (True, "idb"))
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._wait_els = lambda udid, pick, secs, reads=3: ([], None)
+    fr._profile_region = lambda es, who: (None, 0, 0)
+    fr._open_card("IPAD", "Noolu Naga", "payForBtn")
+    assert taps == ["numberPadClose"]
+
+
+# ── a Finished event that opens slowly is not tapped shut (run c37f494f, 2026-11-05) ──
+def test_a_finished_event_opening_late_is_not_closed_by_a_second_tap(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(caf.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(caf.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    state = {"open": False, "opened_at": None, "taps": 0}
+
+    def screen(udid=None):
+        if state["opened_at"] is not None and clock["t"] >= state["opened_at"]:
+            state["open"], state["opened_at"] = True, None
+        off = state.get("scrolled", 0)
+        out = [el("Vya Consumer", 0, 0, 402, 874, "Application"), el("finishedBlock"),
+               el("walletFinishedSearchInput"),
+               el(FlowRunner._RESTAURANT_CARD, 35, 200 - off, 300, 40),
+               el("TODAY", 35, 290 - off, 60, 18), el("11:44", 35, 318 - off, 25, 18)]
+        if state["open"]:
+            out += [el("INVOICE: 5626", 261, 413 - off, 98, 17),
+                    el("finishedRebook", 32, 1828 - off, 159, 49),
+                    el("finishedViewPdf", 211, 1828 - off, 159, 49),
+                    el("TODAY", 35, 2018 - off, 40, 21), el("11:33", 35, 2039 - off, 23, 18)]
+        return out
+
+    def tap_point(udid, x, y):
+        state["taps"] += 1
+        if state["open"]:
+            state["open"] = False                       # the row toggles
+        else:
+            state["opened_at"] = clock["t"] + 9.0       # opens after 9 s (the wait was 6)
+        return True, "idb"
+
+    def wait_els(self, udid, pick, secs, reads=3):
+        end = clock["t"] + secs
+        while clock["t"] < end:
+            clock["t"] += 1.0
+            if pick(screen()):
+                return screen(), True
+        return screen(), False
+
+    monkeypatch.setattr(caf._idbd, "describe_all", screen)
+    monkeypatch.setattr(caf._idbd, "tap", lambda *a, **k: (True, "idb"))
+    monkeypatch.setattr(caf._idbd, "tap_point", tap_point)
+    monkeypatch.setattr(caf._idbd, "swipe", lambda udid, x0, y0, x1, y1, d=0.25:
+                        state.__setitem__("scrolled", state.get("scrolled", 0) + (y0 - y1)))
+    monkeypatch.setattr(FlowRunner, "_wait_els", wait_els)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._booked_slot = "11:44"
+    els = fr._c_finished_card("PHONE", [], "@c_invoice")
+    assert state["taps"] == 1                       # opened once, never tapped shut
+    pdf = next(e for e in els if caf._idbd.name(e) == "finishedViewPdf")
+    assert 100 < caf._idbd.frame(pdf)[1] < 874 - 100     # scrolled down to View PDF
+
+
+def test_an_open_finished_event_is_known_by_its_receipt_before_view_pdf_shows(monkeypatch):
+    # The Finished tab already showing: it is not tapped (that reloads the list).
+    taps = []
+    shown = [el("Vya Consumer", 0, 0, 402, 874, "Application"), el("finishedBlock"),
+             el("walletFinishedSearchInput"), el(FlowRunner._RESTAURANT_CARD, 35, 200, 300, 40),
+             el("TODAY", 35, 290, 60, 18), el("11:44", 35, 318, 25, 18),
+             el("INVOICE: 5626", 261, 413, 98, 17), el("TICKET: 5626", 269, 434, 90, 17)]
+    monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: shown)
+    monkeypatch.setattr(caf._idbd, "tap", lambda udid, ids, *a, **k: taps.append(ids) or (True, "idb"))
+    monkeypatch.setattr(caf._idbd, "tap_point", lambda *a: taps.append("row") or (True, "idb"))
+    monkeypatch.setattr(caf._idbd, "swipe", lambda *a, **k: None)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._booked_slot = "11:44"
+    fr._c_finished_card("PHONE", [], "@c_invoice")
+    assert taps == []                               # open already, and no tab reload
+
+
+def test_an_open_finished_event_scrolled_up_is_scrolled_back_to_not_away_from(monkeypatch):
+    # MEASURED 2026-11-05 on the host's phone: the open card's header is a close button
+    # and the name as text (no NylaiKitchen2Card id), and it sat above the screen; the
+    # old search did not know it and scrolled the list DOWN, away from it.
+    state = {"off": 0, "row_taps": 0}
+
+    def screen(udid=None):
+        o = state["off"]
+        return [el("Vya Consumer", 0, 0, 402, 874, "Application"), el("finishedBlock", 174, 88),
+                el("walletFinishedSearchInput", 40, 151),
+                el(" finishedCardclose", 330, -1672 + o, 30, 30),
+                el("Nylai Kitchen2", 120, -1622 + o, 200, 24), el("TODAY", 35, -1568 + o, 40, 21),
+                el("11:44", 35, -1547 + o, 25, 18), el("INVOICE: 5626", 261, -1467 + o, 98, 17),
+                el("finishedRebook", 32, -52 + o, 159, 49), el("finishedViewPdf", 211, -52 + o, 159, 49),
+                el("Nylai Kitchen2", 120, 85 + o, 200, 24), el("TODAY", 35, 139 + o, 40, 21),
+                el("11:33", 35, 160 + o, 23, 18)]
+
+    def swipe(udid, x0, y0, x1, y1, d=0.25):
+        state["off"] += (y1 - y0)                     # finger down: the list scrolls up
+
+    monkeypatch.setattr(caf._idbd, "describe_all", screen)
+    monkeypatch.setattr(caf._idbd, "swipe", swipe)
+    monkeypatch.setattr(caf._idbd, "tap", lambda *a, **k: (True, "idb"))
+    monkeypatch.setattr(caf._idbd, "tap_point",
+                        lambda *a: state.__setitem__("row_taps", state["row_taps"] + 1) or (True, "idb"))
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    fr = FlowRunner.__new__(FlowRunner)
+    fr._booked_slot = "11:44"
+    els = fr._c_finished_card("PHONE", [], "@c_invoice")
+    assert state["row_taps"] == 0 and state["off"] > 0          # scrolled UP, never tapped shut
+    pdf = next(e for e in els if caf._idbd.name(e) == "finishedViewPdf")
+    assert 100 < caf._idbd.frame(pdf)[1] < 874 - 100
+
+
+def test_a_share_price_missing_from_the_tree_is_read_off_the_screen(monkeypatch):
+    # MEASURED 2026-11-05 (run 3b33a2fe): every split line read, no price beside any.
+    from automation.scenarios import screen_text
+    fr = FlowRunner.__new__(FlowRunner)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    monkeypatch.setattr(FlowRunner, "_owner_lines",
+                        lambda self, udid, who, raw=False, priced=False:
+                        [("Penne Pollo x 3/2", None)])
+    card = el("G Guest1accordionCard", 834, 140, 336, 49)
+    line = el("Penne Pollo x 3/2", 850, 400, 200, 16)
+    monkeypatch.setattr(caf._idbd, "describe_all",
+                        lambda udid: [el("Vya Business", 0, 0, 1210, 834, "Application"), card, line])
+    monkeypatch.setattr(FlowRunner, "_profile_region", lambda self, es, who: (card, 140, 800))
+    monkeypatch.setattr(FlowRunner, "_panel_into_view", lambda self, udid, es, e, again: (es, e))
+    regions = []
+    monkeypatch.setattr(screen_text, "read_text", lambda udid, region=None, els=None, accurate=False:
+                        regions.append(region) or [("Penne Pollo x 3/2", 850, 400, 200, 16),
+                                                   ("26.27€", 1120, 400, 50, 16)])
+    shares = fr._split_shares("IPAD", "Penne Pollo", ["Guest 1", "Guest 2"], 52.53)
+    assert shares[0] == ("Guest 1", "Penne Pollo x 3/2", 26.27)
+    assert regions[0][1] < 400 < regions[0][3]            # the line's own row only
+
+
+# ── the menu search (MEASURED 2026-11-05, run bf1fc30a: '…Chianti C5lj', keys lost) ──
+@pytest.mark.parametrize("product,typed", [
+    ("2020 Bonacci Chianti Classico Riserva 0,75lj", "2020 Bonacci"),
+    ("Coca-Cola® Light 1.0l", "Coca-Cola"), ("Penne Pollo", "Penne Pollo"),
+    ("Pizza Margheritas", "Pizza Margheritas"), ("Spaghetti Bolognese", "Spaghetti Bolognese"),
+    ("Tagliatelle dello Chef", "Tagliatelle"), ("Pizza Parma e Rucola", "Pizza Parma")])
+def test_the_search_types_a_short_start_of_the_name(product, typed):
+    assert FlowRunner._search_text(product) == typed
+
+
+def test_a_search_typed_wrong_is_cleared_and_typed_again_in_pieces(monkeypatch):
+    fr = FlowRunner.__new__(FlowRunner)
+    monkeypatch.setattr(caf.time, "sleep", lambda s: None)
+    state = {"value": "", "typed": []}
+
+    def screen(udid=None):
+        out = [el("Vya Consumer", 0, 0, 402, 874, "Application"),
+               dict(el("Search for an item", 40, 60, 300, 30, "TextField"), AXValue=state["value"]),
+               el(FlowRunner._SEARCH_CLEAR, 360, 60, 20, 20)]
+        if state["value"] == "2020 Bonacci":
+            out.append(el("2020BonacciChiantiClassicoRiserva0,75ljInc", 300, 200))
+        return out
+
+    def idb(args, timeout=20.0):
+        if args[:2] == ["ui", "text"]:
+            chunk = args[-1]
+            state["typed"].append(chunk)
+            # the first, whole-word typing loses keys; the pieces land
+            state["value"] += "20 Bonac" if len(state["typed"]) == 1 else chunk
+        return ""
+
+    def tap_el(udid, e, els=None, scroll=True):
+        if caf._idbd.name(e) == FlowRunner._SEARCH_CLEAR:
+            state["value"] = ""
+        return True, "idb"
+
+    monkeypatch.setattr(caf._idbd, "describe_all", screen)
+    monkeypatch.setattr(caf._idbd, "_idb", idb)
+    monkeypatch.setattr(caf._idbd, "tap_el", tap_el)
+    monkeypatch.setattr(FlowRunner, "_wait_els",
+                        lambda self, udid, pick, secs, reads=3: (screen(), pick(screen())))
+    els = fr._menu_search("PHONE", "2020 Bonacci Chianti Classico Riserva 0,75lj", screen())
+    assert state["typed"] == ["2020 Bonacci", "2020", " Bon", "acci"]
+    assert any(caf._idbd.name(e).endswith("Inc") for e in els)

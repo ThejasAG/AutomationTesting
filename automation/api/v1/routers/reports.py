@@ -48,8 +48,8 @@ def _fmt_duration(ms: Optional[int]) -> str:
 
 
 @router.get("/{run_id}/rich", response_class=HTMLResponse)
-def rich_report(run_id: str, screenshots: int = 1, db: Session = Depends(get_db),
-                current_user=Depends(get_current_user)):
+def rich_report(run_id: str, screenshots: int = 1, summary: int = 0,
+                db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Standalone, styled HTML report for a run — summary cards, per-scenario
     rows, and the pre/post-payment VAT tables parsed from each scenario's
     validation reasons. Print-to-PDF from the browser (matches the sample).
@@ -63,9 +63,10 @@ def rich_report(run_id: str, screenshots: int = 1, db: Session = Depends(get_db)
     rows = _scenarios(db, run_id)
     records = records_from_rows(rows)
 
-    device = r.device_name or "—"
+    from automation.reporting import run_facts
+    device = run_facts.devices(rows, r.device_name or "—")
     platform = r.platform or "—"
-    duration = _fmt_duration(r.duration_ms)
+    duration = _fmt_duration(run_facts.effective_duration_ms(r.duration_ms, rows))
     subtitle_bits = [f"Device: {device}", f"Platform: {platform}", f"Duration: {duration}"]
     if r.branch:
         subtitle_bits.append(f"Branch: {r.branch}")
@@ -73,7 +74,8 @@ def rich_report(run_id: str, screenshots: int = 1, db: Session = Depends(get_db)
     html = render_run_report(
         records, title=title, subtitle="  ·  ".join(subtitle_bits),
         duration=duration, validation_header="Bill, VAT &amp; Grand Total Validation",
-        include_screenshots=bool(screenshots))
+        include_screenshots=bool(screenshots),
+        summary=(r.report_summary or "") if summary else "")
     return HTMLResponse(content=html)
 
 
@@ -91,6 +93,11 @@ def _verdict(status: str, scenarios_total: int) -> str:
     return s or "unknown"
 
 
+def _duration_ms(r: TestRun, scs) -> int:
+    from automation.reporting import run_facts
+    return run_facts.effective_duration_ms(r.duration_ms, scs)
+
+
 def _run_summary(db: Session, r: TestRun) -> Dict[str, Any]:
     scs = _scenarios(db, r.id)
     passed = sum(1 for s in scs if (s.status or "").upper() in ("PASS", "PASSED"))
@@ -105,7 +112,7 @@ def _run_summary(db: Session, r: TestRun) -> Dict[str, Any]:
         "branch": r.branch,
         "commit_sha": r.commit_sha,
         "triggered_by": r.triggered_by,
-        "duration_ms": r.duration_ms,
+        "duration_ms": _duration_ms(r, scs),
         "created_at": r.created_at.isoformat() if r.created_at else None,
         "scenarios_total": len(scs),
         "scenarios_passed": passed,
@@ -224,8 +231,11 @@ def get_report(run_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="Run not found")
     scs = _scenarios(db, run_id)
     rca = db.query(RCAReport).filter(RCAReport.run_id == run_id).first()
+    from automation.reporting import run_facts
     return {
         **_run_summary(db, r),
+        "devices": run_facts.devices(scs, r.device_name or ""),
+        "carried_over": run_facts.carried_over(scs),
         "error_message": r.error_message,
         "report_summary": r.report_summary,
         "report_generated_at": r.report_generated_at.isoformat() if r.report_generated_at else None,
@@ -234,6 +244,7 @@ def get_report(run_id: str, db: Session = Depends(get_db),
             "status": s.status, "consumer_status": getattr(s, "consumer_status", None),
             "business_status": getattr(s, "business_status", None),
             "error": getattr(s, "error", None), "role": getattr(s, "role", None),
+            "detail": run_facts.segment_detail(s), "seconds": getattr(s, "launch_time", None),
         } for s in scs],
         "rca": None if not rca else {
             "root_cause": rca.root_cause, "suggested_fix": rca.suggested_fix,
@@ -305,12 +316,21 @@ def generate_report(run_id: str, db: Session = Depends(get_db),
     scs = _scenarios(db, run_id)
     rca = db.query(RCAReport).filter(RCAReport.run_id == run_id).first()
 
+    from automation.reporting import run_facts
     passed = sum(1 for s in scs if (s.status or "").upper() in ("PASS", "PASSED"))
+    carried = run_facts.carried_over(scs)
     lines = [
         f"Test: {r.test_name}", f"Suite: {r.test_suite}", f"Overall status: {r.status}",
-        f"Device: {r.device_name} ({r.platform})",
+        f"Devices (iOS simulators, one per role): {run_facts.devices(scs, r.device_name or '-')}",
         f"Branch: {r.branch or '-'}  Commit: {(r.commit_sha or '-')[:10]}",
-        f"Duration: {round((r.duration_ms or 0)/1000, 1)}s",
+        f"Duration: {round(_duration_ms(r, scs) / 1000 / 60, 1)} min of device time across its "
+        f"segments (each segment's own run time, summed)",
+        (f"Run history: this run resumed one booking; {carried} segment(s) passed in earlier "
+         f"runs of the same booking and were carried over, not run again. That is how this "
+         f"platform runs a long scenario, not a sign that nothing was tested." if carried else
+         "Run history: every segment ran in this run."),
+        "A [mismatch] is a sum the app printed that did not add up: reported red, the run "
+        "goes on (an app finding, not a test failure).",
         (f"Scenarios executed: {passed}/{len(scs)} passed" if scs else
          "Scenarios executed: 0 — NOTHING WAS ACTUALLY TESTED. The run may have only "
          "built the app. This is NOT a validated pass; report it as such."),
@@ -320,8 +340,10 @@ def generate_report(run_id: str, db: Session = Depends(get_db),
     if scs:
         lines.append("Per-scenario results:")
         for s in scs[:60]:
-            det = f" — {s.error[:160]}" if getattr(s, "error", None) else ""
-            lines.append(f"  [{s.status}] {s.scenario_num or ''} {s.scenario_name or ''}{det}")
+            steps = run_facts.segment_steps(s)
+            lines.append(f"  [{s.status}] {s.scenario_num or ''} {s.scenario_name or ''} — "
+                         f"{run_facts.segment_detail(s)}"
+                         + (f"; steps: {', '.join(steps)}" if steps else ""))
     if rca and (rca.root_cause or getattr(rca, "summary", None)):
         lines.append(f"Root cause analysis: {rca.root_cause or ''} {getattr(rca, 'summary', '') or ''}")
         if rca.suggested_fix:

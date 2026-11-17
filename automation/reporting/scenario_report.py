@@ -35,8 +35,10 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from automation.reporting.step_tables import tables_of
-from automation.scenarios.invoice_check import MISMATCH_PREFIX
+from automation.reporting import invoice_section
+from automation.reporting.step_tables import prepost, run_context, steps_table, tables_of
+from automation.scenarios.invoice_check import (MISMATCH_PREFIX, PRINTED_PAYMENTS_NOTE,
+                                                is_printed_payments_gap)
 from automation.scenarios.run_issues import issues_of
 
 # ── HTML shell ─────────────────────────────────────────────────────────────
@@ -85,11 +87,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .td-bill { padding: 16px 20px; font-size: 15px; line-height: 2.0; text-align: center; }
     .muted { color: #999; }
     tr:hover td { background: #f7fafc; }
+    /* Long words ('@invoice_verdict', amounts) wrap inside their column, never over the
+       next one (the user's PDF, 2026-11-05: Failed At ran over the Status column). */
+    td { overflow-wrap: break-word; }
+    td.failed-at { overflow-wrap: anywhere; }
+    @page { size: A4 landscape; margin: 10mm; }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     @media print {
       body { background: #fff; padding: 0; }
       .card { box-shadow: none; border-radius: 0; max-width: none; }
       .printbtn { display: none; }
       tr:hover td { background: transparent; }
+      thead th { padding: 8px 6px; font-size: 12px; }
+      td { padding: 8px 6px; font-size: 11px; }
+      .td-bill { padding: 8px 6px; font-size: 11px; line-height: 1.5; }
+      .td-bill table td, .td-bill table th { padding: 3px 4px !important; font-size: 10px !important; }
+      .stat .val { font-size: 20px; }
+      tr { page-break-inside: auto; }
+      .td-bill table { page-break-inside: avoid; }
     }
   </style>
 </head>
@@ -110,10 +125,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div class="stat"><div class="val" style="color:#805ad5">__PASS_RATE__%</div><div class="lbl">Pass Rate</div></div>
     </div>
 
+    __SUMMARY__
     <table class="main">
       <colgroup>
-        <col style="width:13%"><col style="width:7%"><col style="width:8%">
-        <col style="width:55%"><col style="width:17%">
+        <col style="width:12%"><col style="width:9%"><col style="width:9%">
+        <col style="width:52%"><col style="width:18%">
       </colgroup>
       <thead>
         <tr>
@@ -142,8 +158,8 @@ def _esc(text: Any) -> str:
 
 
 def _status_badge(status: str) -> str:
-    base = ("padding:4px 14px;border-radius:20px;color:#fff;"
-            "font-size:11px;font-weight:700;letter-spacing:.5px")
+    base = ("display:inline-block;padding:4px 10px;border-radius:20px;color:#fff;"
+            "font-size:11px;font-weight:700;letter-spacing:.5px;white-space:nowrap")
     if status == "PASS":
         return f'<span style="background:#27ae60;{base}">PASSED</span>'
     if status == "FAIL":
@@ -261,37 +277,331 @@ def _render_vat_table(vat_rows: List[Dict[str, Any]]) -> str:
 
 
 _CELL = 'border:1px solid #ccc;padding:4px 7px;text-align:center'
+_NOWRAP = ';white-space:nowrap'
+
+
+# ── How a table reads for the people the report goes to ─────────────────────────────
+# The user, 2026-11-05, of segment 17's tables ('Coupon 10% (host)', 'Tip 2.00 (host)'):
+# "this is a perfect report ... headings on middle ... names like this, understandable ...
+# for higher officials". Every table is drawn that way: a short centred title 'Name (who)',
+# short column names, plain row labels, the numbers alone in the cells; where a figure
+# came from goes in one grey line under the table. Applied when drawn, so every run's
+# report reads the same; the sample reports' own names stay (Pre-payment Total, ATI Sum,
+# Direct Split, Per-member split check, …).
+_TITLES = [
+    (r"^Pre-payment (Total|VAT) — (\w+)( \(from the (\w+)'s invoice, Pre-Order block\))?$",
+     lambda m: f"Pre-payment {m.group(1)} ({m.group(2).lower()})",
+     lambda m: f"Source: the {m.group(4)}'s invoice, Pre-Order section." if m.group(3) else ""),
+    (r"^Post-payment (Total|VAT) — (\w+) \(the (\w+)'s invoice, Pre-Order block\)$",
+     lambda m: f"Post-payment {m.group(1)} ({m.group(2).lower()})",
+     lambda m: f"Source: the {m.group(3)}'s invoice, Pre-Order section."),
+    (r"^Post-payment (Total|VAT) — every diner's pre-order \(the event invoice, Pre-Order block\)$",
+     lambda m: f"Post-payment {m.group(1)} (all diners)",
+     lambda m: "Source: the event invoice, Pre-Order section."),
+    (r"^ATI Sum — every diner's pre-order$", lambda m: "ATI Sum (all diners)", None),
+    (r"^ATI Sum — (\w+)$", lambda m: f"ATI Sum ({m.group(1).lower()})", None),
+    (r"^Pre vs Post VAT Comparison — every diner's pre-order$",
+     lambda m: "Pre vs Post VAT (all diners)", None),
+    (r"^Pre vs Post VAT Comparison — (\w+)$", lambda m: f"Pre vs Post VAT ({m.group(1).lower()})", None),
+    (r"^Pre vs Post — every diner's pre-order$", lambda m: "Pre vs Post (all diners)", None),
+    (r"^Pre vs Post — (\w+)$", lambda m: f"Pre vs Post ({m.group(1).lower()})", None),
+    (r"^Pre-payments of every diner$", lambda m: "Pre-payments (all diners)", None),
+    (r"^Added by the waiter — amount and each person's share$", lambda m: "Items Added (waiter)", None),
+    (r"^Comps$", lambda m: "Comps (waiter)", None),
+    (r"^Comps — Final Summary$", lambda m: "Comps Summary", None),
+    (r"^Payment by E-Payment \((.+)\)$", lambda m: f"E-Payment ({m.group(1)})", None),
+    (r"^Payment by Cash \((.+)\)$", lambda m: f"Cash Payment ({m.group(1)})", None),
+    (r"^Payment by Food Voucher \((.+)\)$", lambda m: f"Food Voucher Payment ({m.group(1)})", None),
+    (r"^Event invoice \(iPad\) — (Pre-Order|On Premises): (totals|VAT)$",
+     lambda m: f"Event Invoice {'Totals' if m.group(2) == 'totals' else 'VAT'} "
+               f"({m.group(1).lower().replace('-', ' ')})", None),
+    (r"^Event invoice \(iPad\) — whole invoice$", lambda m: "Event Invoice Summary", None),
+    (r"^Invoice of the (\w+) \(phone\) — (Pre-Order|On Premises): (totals|VAT)$",
+     lambda m: f"{m.group(1).title()} Invoice {'Totals' if m.group(3) == 'totals' else 'VAT'} "
+               f"({m.group(2).lower().replace('-', ' ')})", None),
+    (r"^Invoice of the (\w+) \(phone\) — whole invoice$",
+     lambda m: f"{m.group(1).title()} Invoice Summary", None),
+    (r"^Calculation checks of the whole run$", lambda m: "All Calculations", None),
+]
+_COLUMNS = {
+    "Excl. Tax + VAT": "Excl. + VAT", "Most VAT at the rate": "Max VAT",
+    "Pre-Payment (charged)": "Pre-payment", "Post-Payment (invoice)": "Post-payment",
+    "Post VAT (invoice)": "Post VAT", "Δ VAT": "Diff",
+    "Assign / Split": "Type", "To": "Guests", "Added to the order": "Amount",
+    "Each person": "Per guest", "Units comped": "Units", "Comp": "Comp %",
+    "Expected line after": "Expected after", "Displayed line after": "Displayed after",
+    "Comped line should read": "Comped line", "Tendered": "Paid",
+    "Confirm Payment": "Result", "How": "Calculation", "Block": "Section",
+    "Total displayed": "Total shown",
+}
+_ROWS = {
+    "grand total": "Grand total", "dishes": "Dishes", "payments": "Payment lines",
+    "against the payments": "Paid in the run", "Tip against the tips given": "Tips",
+    "discount": "Discount", "All blocks": "Whole invoice", "Cart Total (displayed)": "Cart total",
+    "Calculated Total (the VAT rows' ATI)": "Calculated total",
+    "Calculated Total (the VAT rows' ATI + tip)": "Calculated total (with tip)",
+    "settled": "Settled",
+}
+_NOTE_TAILS = [   # explanations moved out of a cell into the note under its table
+    "; " + PRINTED_PAYMENTS_NOTE,
+]
+
+
+def _presentable(table: Dict[str, Any]) -> Dict[str, Any]:
+    """*table* as the report shows it (see _TITLES): its title, columns and row labels in
+    plain words, explanations in table['note']."""
+    t = dict(table)
+    notes = [table.get("note")] if table.get("note") else []
+    title = str(t.get("t") or "")
+    for pat, name, note in _TITLES:
+        m = re.match(pat, title)
+        if m:
+            t["t"] = name(m)
+            extra = note(m) if note else ""
+            if extra:
+                notes.append(extra)
+            break
+    pre_src = next((h for h in (t.get("h") or []) if str(h).startswith("Pre VAT (")), None)
+    if pre_src:
+        notes.append(f"Pre VAT: from the {pre_src[len('Pre VAT ('):-1]}.")
+    t["h"] = ["Pre VAT" if h == pre_src else _COLUMNS.get(h, h) for h in (t.get("h") or [])]
+    if "Max VAT" in t["h"]:
+        notes.append("Max VAT: the most VAT the rate allows on that ATI (size prices carry "
+                     "none, so a VAT row may be lower, never higher).")
+    rows = []
+    for r in t.get("r") or []:
+        if not isinstance(r, list) or not r:
+            rows.append(r)
+            continue
+        r = list(r)
+        if isinstance(r[0], str):
+            r[0] = _ROWS.get(r[0], r[0])
+        for i, c in enumerate(r):
+            if isinstance(c, str):
+                for tail in _NOTE_TAILS:
+                    if tail in c:
+                        r[i] = c.replace(tail, "")
+                        line = ("Payment lines: only the diners' own payments are printed, not "
+                                "those booked on guests (paid for them by another diner, or "
+                                "their own cash).")
+                        if line not in notes:
+                            notes.append(line)
+                if i and r[i] == "settled":
+                    r[i] = "Settled"
+        rows.append(r)
+    t["r"] = rows
+    t["note"] = " ".join(n for n in notes if n)
+    return t
 
 
 def _render_calc_table(table: Dict[str, Any]) -> str:
     """One '[calc]' table: its title, its head, a row per sum. A row's last value is
     True / False / None (matches, does not, information); only the False rows are red."""
+    table = _presentable(table)
     rows = [r for r in (table.get('r') or []) if isinstance(r, list) and r]
-    graded = any(isinstance(r[-1], bool) for r in rows)
+    # 'plain': no Status column (a wrong row is still red); 'sc': only the Status cell is
+    # coloured; 'cap': the title is a caption with 'b' in bold -- the split sample's
+    # 'Per-member split check — <b>Item</b> split 2 ways'.
+    plain, status_only = bool(table.get('plain')), bool(table.get('sc'))
+    graded = not plain and any(isinstance(r[-1], bool) for r in rows)
     head = list(table.get('h') or []) + (['Status'] if graded else [])
-    html = (f'<div style="font-weight:700;color:#1a202c;margin:14px 0 6px;'
-            f'border-top:1px solid #cbd5e1;padding-top:10px">{_esc(table.get("t"))}</div>'
-            '<table style="border-collapse:collapse;font-size:13px;margin:0 auto 16px">'
-            '<tr>' + ''.join(f'<th style="{_CELL};background:#f7f7f7;font-weight:600;'
-                             f'">{_esc(h)}</th>' for h in head) + '</tr>')
+    title = _esc(table.get("t"))
+    bold = _esc(table.get('b') or '')
+    if bold and bold in title:
+        title = title.replace(bold, f'<b>{bold}</b>', 1)
+    html = ((f'<div style="font-size:13px;text-align:center;margin:14px 0 4px;'
+             f'color:#334155">{title}</div>') if table.get('cap') else
+            (f'<div style="font-weight:700;color:#1a202c;margin:14px 0 6px;'
+             f'border-top:1px solid #cbd5e1;padding-top:10px">{title}</div>'))
+    html += ('<table style="border-collapse:collapse;font-size:13px;margin:0 auto 16px">'
+             '<tr>' + ''.join(f'<th style="{_CELL};background:#f7f7f7;font-weight:600;'
+                              f'">{_esc(h)}</th>' for h in head) + '</tr>')
+    head0 = list(table.get('h') or [])
     for r in rows:
         status = r[-1] if isinstance(r[-1], bool) or r[-1] is None else None
         cells = r[:-1] if (isinstance(r[-1], bool) or r[-1] is None) else r
+        if "Displayed" in head0 and status is None:
+            # 'dishes' on an invoice that prints no dish total: nothing to compare.
+            at = head0.index("Displayed")
+            cells = [("not printed on this invoice" if i == at else "no check")
+                     if c in ("—", "-") and i >= at else c for i, c in enumerate(cells)]
         color = '#e74c3c' if status is False else '#15803d' if status else '#333'
-        weight = ';font-weight:600' if status is False else ''
+        if status_only or (plain and status):
+            color = '#333'
+        weight = ';font-weight:600' if status is False and not status_only else ''
         html += f'<tr style="color:{color}{weight}">' + ''.join(
-            f'<td style="{_CELL}">{_esc(c)}</td>' for c in cells)
+            f'<td style="{_CELL}{_NOWRAP if len(str(c)) <= 14 else ""}">{_esc(c)}</td>'
+            for c in cells)
         if graded:
             mark = ('PASS &#10003;' if status else 'FAIL &#10007;' if status is False else '')
-            html += f'<td style="{_CELL}">{mark}</td>'
+            mark_color = ('#15803d' if status else '#b91c1c' if status is False else '#333')
+            html += (f'<td style="{_CELL}{_NOWRAP};color:{mark_color}">{mark}</td>'
+                     if status_only else f'<td style="{_CELL}{_NOWRAP}">{mark}</td>')
         html += '</tr>'
-    return html + '</table>'
+    html += '</table>'
+    if table.get('note'):
+        html += (f'<div style="font-size:12px;color:#718096;text-align:center;margin:-10px auto '
+                 f'14px;max-width:90%;line-height:1.5">{_esc(table["note"])}</div>')
+    return html
+
+
+# ── The one invoice, element for element as the user's invoice sample ─────────────
+# (invoice_section.py; the sample's 'Event PDF vs Stored Payments' / 'Individual PDF vs
+# RoopaD', 2026-11-05: "see how structure this pdf report is ... create a invoice like
+# this structured"). Its styles are the sample's own.
+_IN_HEAD = ('margin:10px 0 4px;font-size:15px;font-weight:700;color:#1a202c;'
+            'border-bottom:2px solid #e2e8f0;padding-bottom:4px')
+_IN_TABLE = ('margin:6px auto;border-collapse:collapse;font-size:13px;text-align:center;'
+             'border:1px solid #ccc')
+_IN_TH = 'padding:5px 10px;white-space:nowrap;border:1px solid #ccc'
+_IN_TD = 'padding:5px 10px;border:1px solid #ccc'
+
+
+def _in_mark(ok: Optional[bool]) -> str:
+    """The sample's marks: a green tick, a red cross, a grey NA (here 'info')."""
+    if ok is True:
+        return '<span style="color:#27ae60;font-size:16px;font-weight:bold">&#10003;</span>'
+    if ok is False:
+        return '<span style="color:#e74c3c;font-size:16px;font-weight:bold">&#10007;</span>'
+    return '<span style="color:#95a5a6">info</span>'
+
+
+def _in_eur(v: Optional[float]) -> str:
+    return '&mdash;' if v is None else f'&euro;{v:.2f}'
+
+
+def _in_diff(a: Optional[float], b: Optional[float]) -> str:
+    if a is None or b is None:
+        return ''
+    d = round(a - b, 2) + 0.0
+    color = '#27ae60' if abs(d) <= 0.011 else '#e74c3c'
+    return f'<span style="color:{color};font-weight:600">diff &euro;{d:+.2f}</span>'
+
+
+def _in_money(cell: Any) -> str:
+    try:
+        return f'&euro;{float(str(cell).replace("€", "")):.2f}'
+    except ValueError:
+        return _esc(cell)
+
+
+def _in_calc(a: Any, b: Any, sign: int) -> str:
+    """a + b (sign 1) or a - b (sign -1), from the invoice's own cells."""
+    try:
+        x = float(str(a).replace("€", "")) + sign * float(str(b).replace("€", ""))
+    except ValueError:
+        return '&mdash;'
+    return f'&euro;{x:.2f}'
+
+
+def _render_invoice(s: Dict[str, Any]) -> str:
+    out = [f'<div style="{_IN_HEAD}">{_esc(s["title"])}</div>']
+    t = s["total"]
+    stored = (_in_eur(t["stored"]) if t["stored"] is not None
+              else 'N/A (the run’s payments are not known)')
+    out.append(f'<b>Invoice Total vs Stored Total:</b> {_in_mark(t["ok"])} Invoice = '
+               f'{_in_eur(t["invoice"])} | Stored = {stored} | '
+               f'{_in_diff(t["invoice"], t["stored"])}<br>')
+
+    pr = s["printed"]
+    out.append(f'<b>Paid for (Invoice):</b> '
+               f'{_in_mark(False if pr["over"] else None if pr["short"] else True)}<br>')
+    if s["paid_for"]:
+        out.append(f'&nbsp;&nbsp;Expected {s["guests"]}: ' + ', '.join(
+            f'{_esc(others)} (by {_esc(who.replace(" (participant)", ", participant"))})'
+            for others, who in s["paid_for"]) + '<br>')
+    else:
+        out.append('&nbsp;&nbsp;Expected 0: none (paid own share only)<br>')
+    if pr["total"] is None:
+        out.append('&nbsp;&nbsp;Invoice shows: no payment lines<br>')
+    elif pr["short"]:
+        out.append(f'&nbsp;&nbsp;Invoice shows: payment lines {_in_eur(pr["total"])} of '
+                   f'{_in_eur(pr["of"])} — not printed: {_in_eur(round(pr["of"] - pr["total"], 2))} '
+                   f'booked on guests (paid for them by another diner, or their own cash)<br>')
+    else:
+        out.append(f'&nbsp;&nbsp;Invoice shows: payment lines {_in_eur(pr["total"])} of '
+                   f'{_in_eur(pr["of"])}<br>')
+
+    if s["vat"]:
+        ok = False if any(r[-1] is False for _, rows in s["vat"] for r in rows) else True
+        out.append(f'<b>VAT (Invoice vs Calculated):</b> {_in_mark(ok)}<br>')
+        head = ["Rate", "Invoice Excl", "Calc Excl", "Invoice VAT", "Calc VAT", "Invoice ATI",
+                "Calc ATI", "Status"]
+        html = (f'<table style="{_IN_TABLE}"><tr style="background:#f7f7f7">'
+                + ''.join(f'<th style="{_IN_TH}">{h}</th>' for h in head) + '</tr>')
+        for part, rows in s["vat"]:
+            if len(s["vat"]) > 1:
+                html += (f'<tr><td colspan="{len(head)}" style="{_IN_TD};font-weight:700;'
+                         f'background:#fbfbfb">{_esc(part)}</td></tr>')
+            for r in rows:
+                rate, excl, vat, ati = r[0], r[1], r[2], r[3]
+                color = '#e74c3c' if r[-1] is False else '#333'
+                cells = [_in_money(excl), _in_calc(ati, vat, -1), _in_money(vat),
+                         _in_calc(ati, excl, -1), _in_money(ati), _in_calc(excl, vat, 1)]
+                html += (f'<tr style="color:{color}"><td style="{_IN_TD};font-weight:600;'
+                         f'white-space:nowrap">{_esc(rate)}</td>'
+                         + ''.join(f'<td style="{_IN_TD}">{c}</td>' for c in cells)
+                         + f'<td style="{_IN_TD}">{_in_mark(r[-1])}</td></tr>')
+        out.append(html + '</table><br>')
+
+    if s["lines"]:
+        ok = (False if any(r[-1] is False for r in s["lines"])
+              else True if all(r[-1] for r in s["lines"]) else None)
+        out.append(f'<b>Invoice lines (Invoice vs Stored):</b> {_in_mark(ok)}<br>')
+        head = ["Item", "Qty", "Invoice", "Stored", "Diff", "Status"]
+        html = (f'<table style="{_IN_TABLE}"><tr style="background:#f7f7f7">'
+                + ''.join(f'<th style="{_IN_TH}">{h}</th>' for h in head) + '</tr>')
+        for item, qty, inv, paid, ok_row in s["lines"]:
+            diff = (f'{round(inv - paid, 2) + 0.0:+.2f}' if inv is not None and paid is not None
+                    else '&mdash;')
+            html += (f'<tr style="color:{"#e74c3c" if ok_row is False else "#333"}">'
+                     f'<td style="{_IN_TD};text-align:left">{_esc(item)}</td>'
+                     f'<td style="{_IN_TD}">{_esc(qty)}</td><td style="{_IN_TD}">{_in_eur(inv)}</td>'
+                     f'<td style="{_IN_TD}">{_in_eur(paid)}</td><td style="{_IN_TD}">{diff}</td>'
+                     f'<td style="{_IN_TD}">{_in_mark(ok_row)}</td></tr>')
+        out.append(html + '</table><br>')
+
+    ad = s["adds"]
+    out.append(f'<b>Invoice adds up (VAT rows + tip):</b> {_in_mark(ad["ok"])} '
+               f'{_in_eur(ad["calc"])} vs total {_in_eur(ad["total"])}<br>')
+
+    tip = s["tip"]
+    out.append(f'<b>Tip:</b> {_in_mark(tip["ok"])} Invoice = {_in_eur(tip["invoice"])} | '
+               f'Stored = {_in_eur(tip["stored"])} | {_in_diff(tip["invoice"], tip["stored"])}<br>')
+
+    o = s["outstanding"]
+    due = (f'{_in_eur(o["due"])} Due (change owed back)' if o["due"] else '&euro;0.00')
+    out.append(f'<b>Outstanding:</b> {_in_mark(o["ok"])} Invoice = {due} | Stored = &euro;0.00 |'
+               + (' the table closed' if o["closed"] else '') + '<br>')
+
+    def status(ok: Optional[bool]) -> str:
+        word, color = (('PASS', '#27ae60') if ok else ('FAIL', '#e74c3c') if ok is False
+                       else ('INFO', '#95a5a6'))
+        return f'<td style="{_IN_TD};color:{color};font-weight:700">{word}</td>'
+
+    paid_ok = (None if pr["total"] is None or t["stored"] is None
+               else True if abs(pr["total"] - t["stored"]) <= 0.011
+               else None if pr["total"] < t["stored"] else False)
+    rows = [("Total", _in_eur(t["invoice"]), _in_eur(t["stored"]), t["ok"]),
+            ("Tip", _in_eur(tip["invoice"]), _in_eur(tip["stored"]), tip["ok"]),
+            ("Total Paid", _in_eur(pr["total"]) + (' (own payments only)' if pr["short"] else ''),
+             _in_eur(t["stored"]), paid_ok),
+            ("Outstanding", due, '&euro;0.00', o["ok"])]
+    out.append(f'<b>Invoice vs Stored Payments:</b> '
+               f'{_in_mark(False if any(r[-1] is False for r in rows) else True)}')
+    out.append(f'<table style="{_IN_TABLE}"><tr>'
+               + ''.join(f'<th style="{_IN_TH};background:#f7f7f7">{h}</th>'
+                         for h in ("Field", "Invoice", "Stored", "Status")) + '</tr>'
+               + ''.join(f'<tr><td style="{_IN_TD}">{f}</td><td style="{_IN_TD}">{a}</td>'
+                         f'<td style="{_IN_TD}">{b}</td>{status(ok)}</tr>'
+                         for f, a, b, ok in rows) + '</table>')
+    return ''.join(out)
 
 
 def _mismatches(record: Dict[str, Any]) -> List[str]:
     """The sums of this segment that did not match, each once, in the order found."""
     lines = [str(r)[len(MISMATCH_PREFIX):] for r in (record.get('reasons') or [])
-             if str(r).startswith(MISMATCH_PREFIX)]
+             if str(r).startswith(MISMATCH_PREFIX) and not is_printed_payments_gap(r)]
     return list(dict.fromkeys(lines))
 
 
@@ -300,19 +610,35 @@ def _all_reasons(record: Dict[str, Any]) -> List[str]:
             + (record.get('reasons') or []))
 
 
+def _record_tables(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The row's tables: its pre-payment and post-payment ones together first (set by
+    render_run_report from step_tables.prepost), then its own, less those they replace
+    or that moved to the pre-order row."""
+    extra, drop, prefixes = record.get("_prepost") or ([], set(), ())
+    own = [t for t in tables_of(_all_reasons(record), record.get("_context"))
+           if t.get("t") not in drop and not str(t.get("t", "")).startswith(prefixes)]
+    return list(extra) + own
+
+
 def _has_calculation(record: Dict[str, Any]) -> bool:
-    reasons = _all_reasons(record)
-    return bool(tables_of(reasons) or _extract_bill_check_sections(reasons))
+    return bool(record.get("_invoice") or _record_tables(record)
+                or _extract_bill_check_sections(_all_reasons(record)))
 
 
 def _build_validation_cell(record: Dict[str, Any]) -> str:
     all_reasons = _all_reasons(record)
     sections = _extract_bill_check_sections(all_reasons)
-    tables = tables_of(all_reasons)
-    if not sections and not tables:
-        return '<span style="color:#999">&mdash;</span>'
+    tables = _record_tables(record)
+    invoice = record.get("_invoice")
+    if not sections and not tables and not invoice:
+        # No sums in this segment: what each step checked, so no cell is left empty (the
+        # user, 2026-11-05: "please must fill all details without skipping").
+        steps = steps_table(all_reasons)
+        return _render_calc_table(steps) if steps else '<span style="color:#999">&mdash;</span>'
 
     blocks = [''.join(_render_calc_table(t) for t in tables)] if tables else []
+    if invoice:
+        blocks.append(_render_invoice(invoice))
     for s in sections:
         lines = [f'<div style="font-weight:700;color:#1a202c;margin:10px 0 4px 0;font-size:14px">{s["label"]}</div>']
         if s.get('items_sum'):
@@ -396,7 +722,7 @@ def _build_failed_at_cell(record: Dict[str, Any]) -> str:
     warn = ''.join(f'<div style="color:#b7791f;font-weight:500;margin-top:8px;line-height:1.5">'
                    f'{i}. {_esc(w)}</div>' for i, w in enumerate(_warnings(record), 1))
     if (record.get("status") or "").upper() == "PASS":
-        return (mism + warn) or '<span style="color:#27ae60">-</span>'
+        return (mism + warn) or '<span style="color:#27ae60">No failures</span>'
     err = record.get("error", "") or ""
     if not err:
         return (mism + warn) or '<span style="color:#c0392b">Failure</span>'
@@ -464,8 +790,8 @@ def _build_row(record: Dict[str, Any], index: int, include_screenshots: bool = T
         f'<td class="td-c" style="font-size:15px">{_esc(_app_label(record))}</td>'
         f'<td class="td-c">{_status_badge(record.get("status", "PASS"))}</td>'
         f'<td class="td-bill">{_build_validation_cell(record)}</td>'
-        f'<td style="padding:14px 20px;border-bottom:1px solid #edf2f7;color:#c0392b;'
-        f'font-size:15px;font-weight:500;vertical-align:top">{failed_cell}</td>'
+        f'<td class="failed-at" style="padding:14px 20px;border-bottom:1px solid #edf2f7;'
+        f'color:#c0392b;font-size:15px;font-weight:500;vertical-align:top">{failed_cell}</td>'
         f'</tr>')
 
 
@@ -495,16 +821,44 @@ def records_from_rows(rows: List[Any]) -> List[Dict[str, Any]]:
     return records
 
 
+def _summary_html(summary: str) -> str:
+    """The run's AI summary (Reports page → Generate), above the table, when given: the
+    exported report carries it (the user, 2026-11-05: "most of the areas is not filled")."""
+    if not (summary or "").strip():
+        return ""
+    # The summary is Markdown (the dashboard renders it so): headings, **bold**, bullets.
+    lines = []
+    for line in _esc(summary.strip()).split("\n"):
+        line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+        line = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", line)
+        line = re.sub(r"^\s*[-*]\s+", "&bull; ", line)
+        lines.append(line)
+    body = "<br>".join(lines).replace("<br><br>", "</p><p>")
+    return ('<div style="padding:18px 32px;border-bottom:2px solid #e2e8f0;font-size:14px;'
+            'line-height:1.6;color:#2d3748"><div style="font-weight:700;font-size:15px;'
+            f'margin-bottom:6px">Summary</div><p>{body}</p></div>')
+
+
 def render_run_report(records: List[Dict[str, Any]], *, title: str,
                       subtitle: str = "", duration: str = "—",
                       validation_header: str = "Bill &amp; VAT Validation",
-                      include_screenshots: bool = True) -> str:
+                      include_screenshots: bool = True, summary: str = "") -> str:
     """Render the full standalone HTML report for one run's scenario records.
 
     include_screenshots: embed failure screenshots (data-URI) in the report. True for
     the rich (web) view; pass False for the downloadable/exported report so it stays
     lightweight and image-free.
     """
+    # A diner's pre-payment and its post-payment (the invoice's Pre-Order block, read in a
+    # later segment) are drawn together in the pre-order segment's row.
+    ctx = run_context(records)             # what one segment's tables take from others
+    # ONE invoice, drawn where it was read; every invoice's own tables (and the closing
+    # balance, which it shows) leave their rows (invoice_section.py).
+    inv = invoice_section.build(records)
+    drop = inv["drop"] if inv else {}
+    records = [dict(r, _prepost=(p[0], set(p[1]) | drop.get(i, set()), p[2]), _context=ctx,
+                    _invoice=inv["section"] if inv and inv["at"] == i else None)
+               for i, (r, p) in enumerate(zip(records, prepost(records)))]
     total = len(records)
     passed = sum(1 for r in records if (r.get("status") or "").upper() == "PASS")
     failed = sum(1 for r in records if (r.get("status") or "").upper() == "FAIL")
@@ -520,8 +874,10 @@ def render_run_report(records: List[Dict[str, Any]], *, title: str,
     rows = [_build_row(r, i, include_screenshots=include_screenshots)
             for i, r in enumerate(first)]
     if first and plain:
-        rows.append('<tr><td colspan="5" style="padding:10px 20px;background:#edf2f7;'
-                    'color:#4a5568;font-size:13px;font-weight:600">Passed — no calculation '
+        # A heading of its own, as big as the table's (the user, 2026-11-05: "increase the
+        # size of this font").
+        rows.append('<tr><td colspan="5" style="padding:16px 20px;background:#edf2f7;'
+                    'color:#2d3748;font-size:18px;font-weight:700">Passed — no calculation '
                     'in these segments</td></tr>')
     rows += [_build_row(r, len(first) + i, include_screenshots=include_screenshots)
              for i, r in enumerate(plain)]
@@ -532,6 +888,7 @@ def render_run_report(records: List[Dict[str, Any]], *, title: str,
 
     return (HTML_TEMPLATE
             .replace("__TITLE__", _esc(title))
+            .replace("__SUMMARY__", _summary_html(summary))
             .replace("__SUBTITLE__", subtitle or "")
             .replace("__VALIDATION_HEADER__", validation_header)
             .replace("__TOTAL__", str(total))

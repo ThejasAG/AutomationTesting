@@ -15,6 +15,7 @@ call falls back to spawning the CLI exactly as before. IDB_FAST=0 disables it.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -167,11 +168,72 @@ def recent_screen(udid: str, max_age: float) -> Optional[str]:
     return hit[1] if hit and time.time() - hit[0] <= max_age else None
 
 
+# A companion that died leaves its entry in idb's state file, and idb then keeps
+# connecting to its dead socket ('Failed to connect to companion … Connection refused')
+# instead of starting a new one. MEASURED 2026-11-05 (run 3d1d2d6b): the participant
+# iPhone's companion got SIGTERM at 11:11; at 11:44 every read of that phone came back
+# empty, so the Wallet that was on screen 'never loaded' and segment 2 failed. Taking
+# the dead entry out makes the next idb command start a fresh companion (measured: the
+# Wallet's 18 elements read at once).
+_STATE = os.getenv("IDB_STATE_FILE_PATH", "/tmp/idb/state")
+_DEAD = ("Failed to connect to companion", "Connection refused")
+_revived: dict = {}        # udid -> when its companion was last revived
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def revive_companion(udid: str, state_path: str = "") -> bool:
+    """Take *udid*'s companion out of idb's state when its process is gone (and its
+    socket with it), so idb starts a new one. False when it is alive or not listed."""
+    path = state_path or _STATE
+    try:
+        with open(path) as f:
+            targets = json.load(f)
+    except (OSError, ValueError):
+        return False
+    dead = [t for t in targets if isinstance(t, dict) and t.get("udid") == udid
+            and not _pid_alive(t.get("pid"))]
+    if not dead:
+        return False
+    keep = [t for t in targets if t not in dead]
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(keep, f)
+    os.replace(tmp, path)
+    for t in dead:
+        sock = t.get("path") or ""
+        if sock.endswith("_companion.sock"):
+            with contextlib.suppress(OSError):
+                os.remove(sock)
+    logger.warning("idb_fast: %s's companion (pid %s) was dead -- removed it so idb "
+                   "starts a new one", udid[:8], dead[0].get("pid"))
+    return True
+
+
+def _companion_dead(res: subprocess.CompletedProcess) -> bool:
+    text = f"{res.stdout or ''}\n{res.stderr or ''}"
+    return res.returncode != 0 and all(d in text for d in _DEAD)
+
+
 def run(argv: Sequence[str], timeout: float = 20.0) -> subprocess.CompletedProcess:
     """`idb <argv>` -- same result and exceptions as subprocess.run(text=True)."""
     t0 = time.time()
     try:
         res = _run(argv, timeout)
+        argv = [str(a) for a in argv]
+        udid = argv[argv.index("--udid") + 1] if "--udid" in argv[:-1] else ""
+        if udid and _companion_dead(res) and time.time() - _revived.get(udid, 0) > 30 \
+                and revive_companion(udid):
+            _revived[udid] = time.time()
+            res = _cli(argv, timeout)          # a fresh client starts the companion
     except subprocess.TimeoutExpired:
         _trace([str(a) for a in argv], t0, "TIMEOUT")
         raise

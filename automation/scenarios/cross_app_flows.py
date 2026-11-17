@@ -36,6 +36,7 @@ are marked ``# TUNE`` and fail loudly (never silently) so they can be corrected.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -417,9 +418,13 @@ _P_FULL_EVENT_MORE = [
 # The waiter just sends the diners' new dishes to the kitchen: no re-assigning or
 # splitting them (the user's call, 2026-11-02). They can already be with the kitchen
 # (MEASURED 2026-11-02: a C-App order arrived sent), so nothing unsent passes.
+# The diners' new dishes are always there to send: Select All + SEND, as plain steps
+# (the user, 2026-11-05: "instead of select all and send it to kitchen that will be more
+# clear"). @send_to_kitchen waits for a SEND the iPad draws late (_SEND_WAIT_S).
 _W_FULL_EVENT_MORE_SEND = [
     "@open_order",
-    "@send_if_any",
+    "@select_all_items",
+    "@send_to_kitchen",
 ]
 # The waiter serves the new dishes straight to the guests and asks for payment: no
 # split after serving and no more waiter/kitchen rounds (the user's call, 2026-11-02).
@@ -768,9 +773,10 @@ FLOWS: Dict[str, Dict[str, Any]] = {
             _seg("7", "Kitchen: mark every item ready", "kitchen", ["@kitchen_ready"]),
             _seg("8", "Waiter: split an item without options, serve, send the split's lines",
                  "waiter", _W_FULL_EVENT_SPLIT_SERVE),
-            _seg("9", "Kitchen: ready the split's lines, if they came back",
-                 "kitchen", ["@kitchen_ready_if_sent"]),
-            _seg("10", "Waiter: serve the rest", "waiter", _W_FULL_EVENT_SERVE_REST),
+            dict(_seg("9", "Kitchen: ready the split's lines, if they came back",
+                      "kitchen", ["@kitchen_ready_if_sent"]), only_if_sent=True),
+            dict(_seg("10", "Waiter: serve the rest", "waiter", _W_FULL_EVENT_SERVE_REST),
+                 only_if_sent=True),
             _seg("11", "Waiter: four comps (whole / one unit; split / unsplit; options / none)",
                  "waiter", _W_FULL_EVENT_COMPS),
             _seg("12", "Host (C-App): order more during the event", "consumer",
@@ -1456,6 +1462,18 @@ class FlowRunner:
                 # device that never had that default set (e.g. a fresh iPhone).
                 self._biz_metro_ready = ensure_business_metro(udid, self.business_bundle)
         self._cur_udid = udid
+        if udid in self._sessions and not self._session_alive(self._sessions[udid], bundle):
+            # Appium ends a session idle for newCommandTimeout (1200 s). Run in one go,
+            # the END TO END leaves the host's iPhone idle while segments 3-11 run on
+            # the iPad (~30 min): MEASURED 2026-11-05, run 651a9252 failed segment 12's
+            # first step with 'A session is either terminated or not started'. Start a
+            # new one instead.
+            old = self._sessions.pop(udid)
+            self._runners.pop(udid, None)
+            with contextlib.suppress(Exception):
+                old.quit()
+            self._session_note = (f"the {role} session on {udid[:8]} had ended (idle past "
+                                  f"Appium's timeout) — started a new one")
         if udid not in self._sessions:
             d = webdriver.Remote(APPIUM_URL, options=_options(udid, bundle, wda))
             apply_flow_speed_settings(d)
@@ -1474,6 +1492,18 @@ class FlowRunner:
             self._sessions[udid] = d
             self._runners[udid] = ScenarioRunner(d, bundle, screenshot_dir=None)
         return self._runners[udid]
+
+    @staticmethod
+    def _session_alive(d, bundle: str) -> bool:
+        """One cheap Appium call: False only when the session itself is gone."""
+        try:
+            d.query_app_state(bundle)
+            return True
+        except Exception as e:
+            text = str(e).lower()
+            return not any(k in text for k in ("session is either terminated",
+                                               "invalid session id", "session not created",
+                                               "no such session"))
 
     @staticmethod
     def _wait_app_ready(d, bundle: str, timeout: float = 12.0, udid: str = "") -> None:
@@ -3394,7 +3424,18 @@ class FlowRunner:
         searches match a part of the name, and the exact product is then picked by
         its id among the results."""
         head = re.match(r"[\x20-\x7e]*", product or "").group(0).strip()
-        return head if len(head) >= 3 else (product or "")
+        if len(head) < 3:
+            return product or ""
+        # Short: the words up to 10+ characters. MEASURED 2026-11-05 (run bf1fc30a): the
+        # 44 characters of '2020 Bonacci Chianti Classico Riserva 0,75lj' landed as
+        # '2020 Bonacci Chianti C5lj' (keys lost while the list re-filtered), and the
+        # search said "That's not on the menu". The pick is by id among the results.
+        words, out = head.split(" "), ""
+        for wd in words:
+            out = f"{out} {wd}".strip()
+            if len(out) >= 10:
+                break
+        return out
 
     @staticmethod
     def _tile_count(els: List[dict], pid: str) -> Optional[int]:
@@ -3459,10 +3500,33 @@ class FlowRunner:
             return els
         _idbd.tap_el(udid, f, els, scroll=False)
         time.sleep(0.6)
-        _idbd._idb(["ui", "text", "--udid", udid, self._search_text(product)])
-        els, _ = self._wait_els(udid, lambda es: any(name(e) == self._squash(product) + "Inc"
-                                                     for e in es), 6.0)
+        query = self._search_text(product)
+        _idbd._idb(["ui", "text", "--udid", udid, query])
+        hit = lambda es: any(name(e) == self._squash(product) + "Inc" for e in es)  # noqa: E731
+        els, found = self._wait_els(udid, hit, 6.0)
+        # Read the box back: keys are lost while the list re-filters under the typing.
+        # Mangled -> clear it and type again in short pieces.
+        for _ in range(2):
+            typed = self._field_text(field(els))
+            if found or typed is None or typed.strip() == query:
+                break
+            self._menu_search_typed = typed
+            clear = next((e for e in els if name(e) == self._SEARCH_CLEAR), None)
+            if clear is not None:
+                _idbd.tap_el(udid, clear, els, scroll=False)
+                time.sleep(0.6)
+            for i in range(0, len(query), 4):
+                _idbd._idb(["ui", "text", "--udid", udid, query[i:i + 4]])
+                time.sleep(0.35)
+            els, found = self._wait_els(udid, hit, 6.0)
         return els
+
+    @staticmethod
+    def _field_text(f: Optional[dict]) -> Optional[str]:
+        """What a TextField holds (its AXValue), None when there is no field."""
+        if f is None:
+            return None
+        return str(f.get("AXValue") or "")
 
     def _find_menu_tile(self, udid: str, pid: str,
                         product: str = "") -> Tuple[List[dict], Optional[dict]]:
@@ -3587,6 +3651,13 @@ class FlowRunner:
         if inc is None:
             near = sorted({name(e)[:-3] for e in els if name(e).endswith("Inc")})[:12]
             menu_says = any("not on the menu" in (name(e) or "").lower() for e in els)
+            box = next((e for e in els if e.get("type") == "TextField"), None)
+            typed = self._field_text(box)
+            if menu_says and typed and typed.strip() != self._search_text(product):
+                notes.append(f"[FAIL] {tag} — the menu search was typed wrong: it reads "
+                             f"{typed!r}, not {self._search_text(product)!r} (keys were lost "
+                             f"while typing), so it found nothing")
+                return False
             notes.append(f"[FAIL] {tag} — {product!r} is not on the menu"
                          + (" at this booking's time (the app's search says \"That's not on "
                             "the menu\": the restaurant's menus change by the time of day)"
@@ -5806,6 +5877,7 @@ class FlowRunner:
                         break
                 except Exception:
                     pass
+        self._read_cart(notes)
         try:
             els = r.d.find_elements(AppiumBy.ACCESSIBILITY_ID, "cartCheckout")
             if els:
@@ -5818,10 +5890,64 @@ class FlowRunner:
         notes.append("[FAIL] @to_checkout — cartCheckout not found")
         return False
 
+    # The cart's money rows (Screens/Cart/index.js:1100-1205): 'Total' and 'Discount' when
+    # a coupon is on, one 'VAT n%' per rate in the cart, then the final 'Total' -- the
+    # amount the Stripe sheet charges (PreOrderStripePayment amount=finalTotalShown).
+    _CART_LABEL = re.compile(r"^(VAT\s*\d{1,2}\s*%|Total|Discount)$")
+    _CART_EURO = re.compile(r"^(\d{1,6}[.,]\d{2})\s*€$")
+    _CART_JOINED = re.compile(r"^(VAT\s*\d{1,2}\s*%|Total|Discount)[,:\s]+(\d{1,6}[.,]\d{2})\s*€$")
+
+    @classmethod
+    def _cart_rows(cls, els: List[dict]) -> List[Tuple[str, float]]:
+        """[(label, amount)] of the cart's money rows, top first: each label with the
+        amount on its row, right of it (or both in one label, if the row reads as one)."""
+        texts = [(_idbd.name(e), _idbd.frame(e)) for e in els if e.get("type") == "StaticText"]
+        amounts = [(float(m.group(1).replace(",", ".")), f)
+                   for t, f in texts for m in [cls._CART_EURO.match(t)] if m]
+        out = []
+        for t, (x, y, w, h) in sorted(texts, key=lambda p: p[1][1]):
+            joined = cls._CART_JOINED.match(t)
+            if joined:
+                out.append((re.sub(r"\s+", " ", joined.group(1)).replace(" %", "%"),
+                            float(joined.group(2).replace(",", "."))))
+                continue
+            if not cls._CART_LABEL.match(t):
+                continue
+            mid = y + h / 2
+            row = [(a, f) for a, f in amounts
+                   if abs(f[1] + f[3] / 2 - mid) <= 6 and f[0] > x + w / 2]
+            if row:
+                out.append((re.sub(r"\s+", " ", t).replace(" %", "%"),
+                            min(row, key=lambda p: p[1][0])[0]))
+        return out
+
+    def _read_cart(self, notes: List[str]) -> None:
+        """Before CHECKOUT: the cart's VAT rows and Total, as the report's pre-payment
+        table ('Cart before payment (<diner>)'), set beside the invoice's Pre-Order block
+        after the event. Never fails the step: a cart it cannot read is said so."""
+        self._cart_total = None
+        try:
+            udid = getattr(self, "_cur_udid", "") or self._consumer_udid()
+            els, rows = self._wait_els(
+                udid, lambda es: [p for p in self._cart_rows(es) if p[0] == "Total"], 10.0)
+            rows = self._cart_rows(els)
+        except Exception:
+            rows = []
+        if not any(label == "Total" for label, _ in rows):
+            notes.append("    · @to_checkout: the cart's Total and VAT rows could not be read")
+            return
+        self._cart_total = [a for label, a in rows if label == "Total"][-1]
+        notes.append(invoice_check.calc_note(
+            f"Cart before payment ({self._diner_label()})", ["Line", "Amount"],
+            [[label, invoice_check.eur(a), None] for label, a in rows]))
+
     def _pay_stripe(self, r: ScenarioRunner, notes: List[str]) -> bool:
         """Stripe checkout sheet (TEST MODE): the saved card (Visa ••••4242) is
-        preselected, so just tap the blue 'Pay € X' button — NOT 'Pay with link'."""
-        bill = self._read_bill_total(r)
+        preselected, so just tap the blue 'Pay € X' button — NOT 'Pay with link'.
+        The bill is the cart's Total when @to_checkout read it (the sheet's own amount
+        would only be checked against itself)."""
+        bill = getattr(self, "_cart_total", None) or self._read_bill_total(r)
+        self._cart_total = None
         # Waited for: the sheet draws its Close first and the Pay button seconds later.
         # MEASURED 2026-11-02 (run b41372b7, the participant's freshly booted iPhone):
         # one look found only 'Close', the screenshot right after showed 'Pay €108.50'.
@@ -6424,6 +6550,35 @@ class FlowRunner:
                      f"({'; '.join(tries)})")
         return False
 
+    # How long SEND may stay hidden while a diner's dish waits for the kitchen. The order's
+    # load works its SEND state out from the state BEFORE the reload (Event/index.js:357-370
+    # -> checkNotifyPayment reads this.state before setState lands), and only a later
+    # update from the server corrects it (socket ProductsAdded / recievedProducts /
+    # serveProducts). MEASURED: 2026-11-04 about a minute; 2026-11-05 (run 6958f3fe) not
+    # in 168 s, then shown on the same screen 25 min later. On an order screen left open
+    # the diners' ordering itself is that update, so it only bites an order just opened.
+    _SEND_WAIT_S = 600.0
+
+    def _wait_for_send(self, udid: str, tag: str, notes: List[str]) -> Optional[List[dict]]:
+        """Stay on the order, selected, until SEND is drawn: the screen (with SEND), or
+        None after _SEND_WAIT_S. The order's redraws clear the selection, so Select All
+        is tapped again whenever nothing is selected. A long wait is a yellow note."""
+        started, badges = time.time(), 0
+        els = _idbd.describe_all(udid)
+        while not self._has(els, "sendItemsBtn") and time.time() - started < self._SEND_WAIT_S:
+            badges = self._unsent_orders(els) or badges
+            if not self._has(els, "unSelectAll"):
+                _idbd.tap(udid, ["selectAll"])
+            els, _ = self._wait_els(udid, lambda es: self._has(es, "sendItemsBtn"), 10.0)
+        waited = time.time() - started
+        if not self._has(els, "sendItemsBtn"):
+            return None
+        if waited >= _iss.slow_screen_seconds():
+            notes.append(f"    {_iss.GLITCH} {tag} — SEND was not shown for {waited:.0f}s while "
+                         f"{badges} line(s) showed the 'Order' badge (the order's SEND state is "
+                         f"stale after it loads, until the server's next update)")
+        return els
+
     def _send_to_kitchen(self, notes: List[str], wait: float = 12.0) -> bool:
         """SEND the selected items to the kitchen, and confirm they went.
 
@@ -6439,6 +6594,22 @@ class FlowRunner:
         if not send_shown() and not self._select_all_items(notes):
             notes.append("[FAIL] send to kitchen — no SEND button: nothing is selected")
             return False
+        if not send_shown():
+            els = _idbd.describe_all(udid)
+            badges = self._unsent_orders(els)
+            if not badges and getattr(self, "_resume", None):
+                # A resumed segment re-runs this step after it already sent: nothing
+                # left with a badge, nothing to send.
+                if self._has(els, "unSelectAll"):
+                    _idbd.tap(udid, ["unSelectAll"], els)
+                notes.append("[ok] send to kitchen — nothing unsent: the dishes went to the "
+                             "kitchen in the run this one resumes")
+                return True
+            if badges and self._wait_for_send(udid, "send to kitchen", notes) is None:
+                notes.append(f"[FAIL] send to kitchen — {badges} line(s) show the 'Order' badge "
+                             f"(a diner's dish not with the kitchen) but SEND was not offered in "
+                             f"{self._SEND_WAIT_S / 60:.0f} min")
+                return False
         for attempt in (1, 2):
             ok, why = _idbd.tap(udid, ["sendItemsBtn"])
             if not ok:
@@ -6605,24 +6776,35 @@ class FlowRunner:
 
         def enter_amount() -> bool:
             """Method -> keypad -> the amount, read back -> Input."""
-            es, b = wait_for(lambda x: find(buttons, x), 4.0)
-            if b is None:
-                notes.append(f"[FAIL] @pay:{method} — the payment methods are not on screen")
-                return False
-            # The tiles scroll sideways inside the card: one slid out of it (to reach
-            # Discount) takes no tap (MEASURED 2026-11-04, run ce8ba9e5: E-Payment at x 758
-            # of a card starting at 834, "not reachable").
-            card = own_card(es) or diner_card(es)
-            if card is not None and _idbd.frame(card)[2] > 0:
-                es, b = self._tile_into_card(udid, es, card, b)
-            ok, why = _idbd.tap_el(udid, b, es)
-            es, pad = wait_for(lambda x: find_any(("userInputBtn",), x))
-            if not ok or pad is None:
-                notes.append(f"[FAIL] @pay:{method} — tapped {name(b)} but the amount "
-                             f"keypad did not open ({why})")
-                return False
+            # The card redraws after a coupon / Pay For is applied, and a tile tapped then
+            # is 'not reachable' -- MEASURED 2026-11-05 (run e07ec401): E-Payment refused
+            # right after the discount, and hit-tested fine on the same screen at rest. So
+            # up to 3 tries, each on a fresh read after a settle.
+            for attempt in (1, 2, 3):
+                es, b = wait_for(lambda x: find(buttons, x), 4.0)
+                if b is None:
+                    notes.append(f"[FAIL] @pay:{method} — the payment methods are not on "
+                                 f"screen")
+                    return False
+                # The tiles scroll sideways inside the card: one slid out of it (to reach
+                # Discount) takes no tap (MEASURED 2026-11-04, run ce8ba9e5: E-Payment at x
+                # 758 of a card starting at 834, "not reachable").
+                card = own_card(es) or diner_card(es)
+                if card is not None and _idbd.frame(card)[2] > 0:
+                    es, b = self._tile_into_card(udid, es, card, b)
+                ok, why = _idbd.tap_el(udid, b, es)
+                es, pad = wait_for(lambda x: find_any(("userInputBtn",), x))
+                if ok and pad is not None:
+                    break
+                if attempt == 3:
+                    notes.append(f"[FAIL] @pay:{method} — tapped {name(b)} 3 times but the "
+                                 f"amount keypad did not open ({why})")
+                    return False
+                notes.append(f"    · @pay:{method}: {name(b)} did not open the keypad ({why}) "
+                             f"— the card was still redrawing; trying again")
+                time.sleep(3.0)
             got = self._keypad_type(udid, text)
-            if got is None or text not in got.replace(",", "."):
+            if not self._keypad_reads(got, text):
                 notes.append(f"[FAIL] @pay:{method} — typed {text} on the keypad but the "
                              f"amount reads {got!r}")
                 return False
@@ -6828,9 +7010,20 @@ class FlowRunner:
                 _idbd.tap_el(udid, key, els, scroll=False)
                 time.sleep(0.2)
             got = shown()
-            if got and text in got.replace(",", "."):
+            if self._keypad_reads(got, text):
                 return got
         return shown()
+
+    @staticmethod
+    def _keypad_reads(got: Optional[str], text: str) -> bool:
+        """The amount box shows exactly *text* as a number: '3' is '3 €' or '3,00€',
+        never '30 €' (MEASURED 2026-11-05, run 981e90eb: a substring test took the tip
+        keypad's '30 €' for the 3 typed)."""
+        m = re.search(r"\d+(?:[.,]\d+)?", got or "")
+        try:
+            return bool(m) and abs(float(m.group(0).replace(",", ".")) - float(text)) < 0.005
+        except ValueError:
+            return False
 
     def _optional_step(self, r: ScenarioRunner, inner: str, notes: List[str]) -> bool:
         """A step marked '?' applies to some builds/states only ('?click Yes').
@@ -10310,6 +10503,11 @@ class FlowRunner:
                      + f", {'assigned to' if mode == 'assign' else 'split among'} "
                      + f"{', '.join(people)}: {before} → {got} row(s), "
                      + ", ".join(lines))
+        if mode == "split" and done:
+            # Split while assigning: each member's share, as their card shows it.
+            self._split_evidence(udid, tag, product, people, notes,
+                                 total=round(self._dish_total(els, row_id) - euros0, 2),
+                                 qty=qty)
         return True
 
     # `@w_qty:<Profile>/<Product> =N | +N | -N | remove`
@@ -10498,11 +10696,62 @@ class FlowRunner:
 
     _CARD_LINE_RE = re.compile(r"^(?P<what>.+?) x \d+(?:/\d+)?$")
 
-    def _owner_lines(self, udid: str, profile: str, raw: bool = False) -> Optional[List[str]]:
+    def _card_line_price(self, els: List[dict], line: dict, top: float,
+                         bottom: float) -> Optional[float]:
+        """The price printed level with a card line, right of it: '83.40 €'
+        (PaymentDetails.js:1846-1870; a pre-ordered line prints none)."""
+        frame, name = _idbd.frame, _idbd.name
+        x, y, _w, h = frame(line)
+        cy = y + h / 2
+        best = None
+        # The price closest in height to the line, right of its start. 20 pt either way:
+        # MEASURED 2026-11-05 (run 3b33a2fe) a 12 pt window found no price beside any
+        # split line ('x 3/2' read, its price not); a wrapped name is 2 lines high.
+        for e in els:
+            m = self._MONEY_RE.match(name(e) or "")
+            dy = abs(frame(e)[1] + frame(e)[3] / 2 - cy)
+            if m and top < frame(e)[1] < bottom and frame(e)[0] > x and dy <= 20 \
+                    and (best is None or dy < best[0]):
+                best = (dy, float(m.group(1).replace(",", ".")))
+        return best[1] if best else None
+
+    _OCR_MONEY_RE = re.compile(r"(\d+[.,]\d{2})\s*€")
+
+    def _card_line_price_ocr(self, udid: str, profile: str, line_text: str) -> Optional[float]:
+        """The price beside *profile*'s card line *line_text*, read off the SCREEN (OCR of
+        the line's row, right of its start): when the tree gives no price element. The
+        line is brought on screen first (the payment panel scrolls)."""
+        from automation.scenarios import screen_text
+        name, frame = _idbd.name, _idbd.frame
+
+        def find(es):
+            card, top, bottom = self._profile_region(es, profile)
+            return next((e for e in es if name(e) == line_text
+                         and top < frame(e)[1] < bottom), None) if card is not None else None
+
+        els = _idbd.describe_all(udid)
+        at = find(els)
+        if at is None:
+            return None
+        els, at = self._panel_into_view(udid, els, at, find)
+        if at is None:
+            return None
+        x, y, _w, h = frame(at)
+        w_app, _h_app = _idbd.app_size(els)
+        got = [t for t in screen_text.read_text(udid, region=(x, y - 6, w_app, y + h + 6),
+                                                  els=els, accurate=True)
+               for _m in [self._OCR_MONEY_RE.search(t[0])] if _m]
+        if not got:
+            return None
+        rightmost = max(got, key=lambda t: t[1])
+        return float(self._OCR_MONEY_RE.search(rightmost[0]).group(1).replace(",", "."))
+
+    def _owner_lines(self, udid: str, profile: str, raw: bool = False,
+                     priced: bool = False) -> Optional[list]:
         """The dishes (ids; *raw*: the line texts) on *profile*'s card: its lines read
         '<Product> x <n>' or '... x <n>/<m>' for a share (MEASURED 2026-10-29:
         'Coca-Cola® Light 1.0l x 5/5', 'Pizza Salamees x 6/2'). The card is opened when
-        its lines do not show."""
+        its lines do not show. *priced*: (line, its price or None) pairs."""
         # Wait for the card: right after the order opens, the payment panel draws its
         # cards a moment later (MEASURED 2026-10-29, run a2635b0c: 'no Roopa D card').
         els, found = self._wait_els(udid, lambda es: self._profile_region(es, profile)[0], 20.0)
@@ -10522,10 +10771,13 @@ class FlowRunner:
             # screen's end, and the order pane's '<Product> x <n>' texts are there too
             # (MEASURED 2026-10-29, run a1d0235d: Guest 5 read 'Pizza Salamees x 1').
             cx, _cy, cw, _ch = _idbd.frame(card)
-            lines = [(_idbd.name(e) if raw else self._squash(m.group("what"))) for e in els
+            lines = [((_idbd.name(e) if raw else self._squash(m.group("what"))),
+                      self._card_line_price(els, e, top, bottom) if priced else None)
+                     for e in els
                      for m in [self._CARD_LINE_RE.match(_idbd.name(e) or "")]
                      if m and top < _idbd.frame(e)[1] < bottom
                      and cx - 10 <= _idbd.frame(e)[0] <= cx + cw]
+            lines = lines if priced else [t for t, _p in lines]
             if lines or attempt == 2:
                 return lines
             els, card = self._panel_into_view(
@@ -10749,7 +11001,89 @@ class FlowRunner:
         self._unfocus_profile(udid, tag, notes)
         notes.append(f"[ok] {tag} — split {who}'s {what} with {', '.join(people)}: "
                      f"{price0:.2f} € → {now:.2f} € each")
+        self._split_evidence(udid, tag, what, [who] + people, notes, total=price0)
         return True
+
+    SPLIT_SHARES = "Split shares — "            # the '[calc]' title prefix the report reads
+
+    def _split_shares(self, udid: str, what: str, members: List[str],
+                      total: Optional[float]) -> List[Tuple[str, str, Optional[float]]]:
+        """(member, line, price) of a dish shared by *members*, as each one's payment
+        card shows it: their line of the dish that reads 'x <q>/<len(members)>'
+        (PaymentDetails.js:1846-1854: ordered_quantity / (splitedTo + 1)). Of two such
+        lines (a member in two splits of one dish) the one nearest total / n."""
+        pid, n = self._squash(what), len(members)
+        out: List[Tuple[str, str, Optional[float]]] = []
+        for who in members:
+            mine = []
+            for t, p in self._owner_lines(udid, who, raw=True, priced=True) or []:
+                m = self._CARD_LINE_RE.match(t)
+                if m and self._squash(m.group("what")) == pid and t.endswith(f"/{n}"):
+                    mine.append((t, p))
+            if total is not None and len(mine) > 1:
+                mine.sort(key=lambda tp: abs((tp[1] if tp[1] is not None else 1e9) - total / n))
+            line, price = (mine[0][0], mine[0][1]) if mine else ("", None)
+            if line and price is None:
+                with contextlib.suppress(Exception):      # off the screen image instead
+                    price = self._card_line_price_ocr(udid, who, line)
+            out.append((who, line, price))
+        return out
+
+    def _split_evidence(self, udid: str, tag: str, what: str, members: List[str],
+                        notes: List[str], total: Optional[float],
+                        qty: Optional[int] = None) -> None:
+        """'[calc] Split shares — <tag>': every member's line of the dish just split,
+        for the report's per-member split check (the user's split sample, 2026-11-05).
+        Evidence only: a read that fails is noted and the step keeps its result.
+
+        The user's rule (2026-11-05): shares that cannot be equal may differ by one
+        cent, as long as they add up to what is shared; a wrong sum or a bigger gap is
+        a '[mismatch]' (red in the report, the run goes on)."""
+        members = list(dict.fromkeys(members))
+        shares: List[Tuple[str, str, Optional[float]]] = []
+        try:
+            for attempt in range(3):           # the cards redraw after the server
+                shares = self._split_shares(udid, what, members, total)
+                if all(line and p is not None for _w, line, p in shares):
+                    break
+                time.sleep(3.0)
+        except Exception as e:                  # evidence: never fail the step
+            notes.append(f"    · {tag}: could not read the members' lines ({e})")
+            return
+        notes.append(invoice_check.calc_note(
+            self.SPLIT_SHARES + tag, ["Member", "Line on their card", "Price"],
+            [[w, line or "—", f"{p:.2f}" if p is not None else "—", None]
+             for w, line, p in shares],
+            total=total, qty=qty, n=len(members)))
+        prices = [p for _w, line, p in shares if line and p is not None]
+        if total is None or len(prices) < len(members):
+            missing = [w for w, line, p in shares if not line or p is None]
+            notes.append(f"    · {tag}: {', '.join(missing) or 'a member'}'s line of {what} "
+                         f"could not be read on their card")
+            # What sits beside a line whose price was not found, to see why next time.
+            # MEASURED 2026-11-05 (run 3b33a2fe): every split line was read ('x 3/2') and
+            # no price beside any; the order is closed now, so it could not be measured.
+            with contextlib.suppress(Exception):
+                line = next(line for _w, line, p in shares if line and p is None)
+                els = _idbd.describe_all(udid)
+                at = next(e for e in els if _idbd.name(e) == line)
+                x, y, w_, h_ = _idbd.frame(at)
+                near = [f"{_idbd.name(e)[:20]!r}@{[round(v) for v in _idbd.frame(e)]}"
+                        for e in els if e is not at and _idbd.name(e)
+                        and abs(_idbd.frame(e)[1] + _idbd.frame(e)[3] / 2 - (y + h_ / 2)) <= 30
+                        and _idbd.frame(e)[0] > x][:6]
+                notes.append(f"    · {tag}: beside {line!r}@{[round(v) for v in (x, y, w_, h_)]}: "
+                             f"{', '.join(near) or 'nothing'}")
+            return
+        got = round(sum(prices), 2)
+        each = ", ".join(f"{p:.2f}" for p in prices)
+        if abs(got - total) > 0.005:
+            notes.append(f"{invoice_check.MISMATCH_PREFIX}{tag} — the shares {each} add up to "
+                         f"{got:.2f} €, not the {total:.2f} € shared")
+        elif max(prices) - min(prices) > 0.0105:
+            notes.append(f"{invoice_check.MISMATCH_PREFIX}{tag} — the shares {each} are not "
+                         f"equal: they differ by {max(prices) - min(prices):.2f} € "
+                         f"(one cent is allowed)")
 
     def _card_qty(self, udid: str, who: str, what: str) -> Tuple[int, str]:
         """(units, '<line>; <line>') of *what* on *who*'s card -- a share 'x 6/2' counts
@@ -10965,7 +11299,10 @@ class FlowRunner:
         pid = self._squash(what)
         on_card = lambda lines: [t for t in lines if self._CARD_LINE_RE.match(t)  # noqa: E731
                                  and self._squash(self._CARD_LINE_RE.match(t).group("what")) == pid]
-        mine0 = on_card(self._owner_lines(udid, who, raw=True) or [])
+        lines0 = self._owner_lines(udid, who, raw=True, priced=True) or []
+        mine0 = on_card([t for t, _p in lines0])
+        # What a Split shares: the owner's one line of the dish (for the report).
+        price0 = next((p for t, p in lines0 if t in mine0), None) if len(mine0) == 1 else None
         if getattr(self, "_resume", None):
             # A resumed segment re-runs this step; the cards say whether it was done.
             if mode == "assign" and not mine0 and on_card(
@@ -11062,6 +11399,10 @@ class FlowRunner:
                      + (f"moved {who}'s {what} to {people[0]}" if mode == "assign" else
                         f"split {who}'s {what} with {', '.join(people)}: {who}'s card "
                         f"reads {now}"))
+        if mode == "split":
+            q = re.search(r" x (\d+)$", mine0[0]) if len(mine0) == 1 else None
+            self._split_evidence(udid, tag, what, [who] + people, notes, total=price0,
+                                 qty=int(q.group(1)) if q else None)
         return True
 
     _COMP_PCTS = (5, 10, 15, 25, 30, 40, 100)       # the dialog's chips (Modal:5885)
@@ -11717,6 +12058,12 @@ class FlowRunner:
                 return None
             return next((e for e in es if name(e) == inside and top < frame(e)[1] < bottom), None)
 
+        # A keypad an earlier step left open covers the cards (MEASURED 2026-11-05, run
+        # 981e90eb: the tip's keypad, then 'Noolu Naga's card shows no Pay For'): close it.
+        here = _idbd.describe_all(udid)
+        if self._has(here, "numberPadClose") and self._has(here, "userInputBtn"):
+            _idbd.tap(udid, ["numberPadClose"], here)
+            self._wait_els(udid, lambda es: not self._has(es, "userInputBtn"), 5.0)
         # Not one raw read: an empty dump or the panel's reload spinner (after a Pay
         # For Apply, PaymentDetails.js:4838) shows no card, and the caller then took
         # "no control" for "this build has none" (a false [skip] of the discount).
@@ -11887,7 +12234,31 @@ class FlowRunner:
             notes.append(f"[FAIL] {tag} — typed {amount} on the tip keypad but it reads "
                          f"{got!r}; not pressing Input")
             return False
-        _idbd.tap(udid, ["userInputBtn"])
+        # Input closes the keypad. MEASURED 2026-11-05 (run 981e90eb): it stayed open
+        # reading '30 €' after the 3 typed, the Total could not be read under it, and the
+        # next step found the card covered. So: confirm it closed; else retype once.
+        for attempt in (1, 2):
+            _idbd.tap(udid, ["userInputBtn"])
+            els, closed = self._wait_els(udid, lambda es: not self._has(es, "userInputBtn"), 6.0)
+            if closed:
+                break
+            box = next((e for e in els if _idbd.name(e) == "userAmountInput"), None)
+            now_reads = str((box or {}).get("AXValue") or _idbd.name(box or {}) or "")
+            if attempt == 2:
+                with contextlib.suppress(Exception):
+                    _idbd.tap(udid, ["numberPadClose"], els)
+                notes.append(f"[FAIL] {tag} — pressed Input twice but the tip keypad stayed "
+                             f"open (it reads {now_reads!r}); closed it, no tip set")
+                return False
+            notes.append(f"    · {tag}: Input left the keypad open reading {now_reads!r} — "
+                         f"typing {amount} again")
+            got = self._keypad_type(udid, amount)
+            if not self._keypad_reads(got, amount):
+                with contextlib.suppress(Exception):
+                    _idbd.tap(udid, ["numberPadClose"])
+                notes.append(f"[FAIL] {tag} — retyped {amount} but the keypad reads {got!r}; "
+                             f"closed it, no tip set")
+                return False
         want = (total0 or 0) + int(amount)
 
         def risen(es):
@@ -11897,6 +12268,12 @@ class FlowRunner:
         els, now = self._wait_els(udid, risen, 10.0)
         shown = now if now is not None else self._payer_card_total(
             els, self._profile_region(els, who)[0])
+        if shown is None:
+            # The card redraws after Input and can come back folded: its Total is not on
+            # screen to read (MEASURED 2026-11-05, runs 981e90eb, e07ec401: '— €' and a
+            # red 'could not read the Total after it', the tip right). Open it and read.
+            els, card, _b = self._open_card(udid, who, "tipBtn")
+            shown = self._payer_card_total(els, card)
         notes.append(f"[ok] {tag} — {who}'s Total {invoice_check.eur(total0)} € + tip {amount} €; "
                      f"the Total displays {invoice_check.eur(shown)} €")
         self._money_check(notes, tag, *invoice_check.tip_check(who, total0, float(amount), shown))
@@ -12067,7 +12444,7 @@ class FlowRunner:
         # and a later update corrects -- a minute later the same tap offered SEND. The
         # step took Unselect alone for "prepared lines, not ours" and passed. So while a
         # badge shows, keep the selection and wait for SEND, tapping Select All again
-        # only when nothing is selected (up to 2 min); a badge left is a FAIL.
+        # only when nothing is selected (up to _SEND_WAIT_S, 10 min: 2 were not enough on 2026-11-05); a badge left is a FAIL.
         picked = lambda es: (self._has(es, "sendItemsBtn") or self._has(es, "unSelectAll")  # noqa: E731
                              or self._has(es, "serveItemsBtn"))
         send = lambda es: self._has(es, "sendItemsBtn")  # noqa: E731
@@ -12083,7 +12460,7 @@ class FlowRunner:
                 if hidden_since is None:
                     hidden_since, badges = time.time(), self._unsent_orders(els)
                 els, _any = self._wait_els(udid, send, 10.0)
-            if send(els) or time.time() - started >= 120.0 or (
+            if send(els) or time.time() - started >= self._SEND_WAIT_S or (
                     not self._unsent_orders(els)
                     and (taps >= 2 or self._has(els, "unSelectAll"))):
                 break
@@ -12418,65 +12795,95 @@ class FlowRunner:
         if not self._has(els, "finishedBlock"):
             _idbd.tap(udid, ["walletTab", "Wallet"], els)
             els, _ = self._wait_els(udid, lambda es: self._has(es, "finishedBlock"), 10.0)
-        _idbd.tap(udid, ["finishedBlock"])
-        els, _ = self._wait_els(udid, lambda es: self._has(es, "walletFinishedSearchInput"), 8.0)
+        # Already on Finished: no tap -- it reloads the list, and the reload drew the card
+        # shut under the taps that opened it (MEASURED 2026-11-05, run 17f08390).
+        if not self._has(els, "walletFinishedSearchInput"):
+            _idbd.tap(udid, ["finishedBlock"])
+            els, _ = self._wait_els(udid, lambda es: self._has(es, "walletFinishedSearchInput"),
+                                    8.0)
         w, h = _idbd.app_size(els)
         times = re.compile(r"^\d{1,2}:\d{2}$")
 
-        def mine(es):
-            """THIS run's card's time ON screen (TODAY + slot, this restaurant)."""
-            return next((t for t in self._finished_card_times(es, slot)
-                         if 0 < frame(t)[1] < h - 80), None)
+        # The tree holds the whole list, off screen too (y < 0 above, y > h below), so
+        # THIS event's card is found where it is and scrolled TO, either way. MEASURED
+        # 2026-11-05 (run 17f08390): the open card had scrolled up off the screen, and the
+        # old search, always swiping one way, took it 2800 pt further away.
+        def card_time(es):
+            """THIS run's card's time label (TODAY + slot, this restaurant), anywhere."""
+            found = self._finished_card_times(es, slot)
+            return found[0] if found else None
 
-        # The card first where it is (the user, 2026-11-04: "the card is already there on
-        # the screen but it is scrolling again"): on screen, or in the tree below / above
-        # it, brought into view; the list from its top only when it is not in the tree.
-        known = self._finished_card_times(els, slot)
-        for _ in range(4):
-            if not known or mine(els) is not None:
-                break
-            dy = frame(known[0])[1] - h * 0.45
-            _idbd.swipe(udid, w / 2, h * 0.6, w / 2, h * 0.6 - max(-h * 0.5, min(h * 0.5, dy)),
-                        0.8)
-            time.sleep(1.0)
-            els = _idbd.describe_all(udid) or els
-            known = self._finished_card_times(els, slot)
-        if not known:
-            for _ in range(4):                 # from the TOP of the list
-                _idbd.swipe(udid, w / 2, h * 0.3, w / 2, h * 0.85, 0.2)
-                time.sleep(0.4)
-
-        def opened(es):
-            """View PDF / Rebook INSIDE this event's card: below its time, above the
-            next event's (another event may be the open one)."""
-            me = mine(es)
-            if me is None:
-                return False
-            y0 = frame(me)[1]
+        def inside(es):
+            """The elements of THIS event's card: below its time, above the next event's."""
+            t = card_time(es)
+            if t is None:
+                return []
+            y0 = frame(t)[1]
             below = [frame(e)[1] for e in es if times.match(name(e) or "") and frame(e)[1] > y0]
             y1 = min(below) if below else 1e9
-            return any(name(e) in ("finishedViewPdf", "finishedRebook")
-                       and y0 < frame(e)[1] < y1 for e in es)
+            return [e for e in es if y0 < frame(e)[1] < y1]
 
-        when = None
-        for _ in range(10):
-            els = _idbd.describe_all(udid)
-            when = mine(els)
-            if when is not None:
-                break
-            _idbd.swipe(udid, w / 2, h * 0.75, w / 2, h * 0.35, 1.2)
-            time.sleep(0.8)
-        if when is None:
+        def opened(es):
+            """THIS event's card is open: View PDF / Rebook in it, or the top of its
+            receipt under its time. MEASURED 2026-11-05: an open card starts with
+            'DATE: …', 'INVOICE: 5626', 'TICKET: 5626' (y 413 under a time at 333) and
+            ends ~1500 pt lower with View PDF + Rebook (the user: "after opening the card
+            you need to scroll down there will be an option to view pdf")."""
+            return any(name(e) in ("finishedViewPdf", "finishedRebook")
+                       or name(e).startswith(("INVOICE:", "TICKET:")) for e in inside(es))
+
+        def bring(es, pick):
+            """Scroll until pick(es) lies on the screen (100 pt from either edge), toward
+            it; (els, element or None)."""
+            e = pick(es)
+            for _ in range(8):
+                if e is None or 100 < frame(e)[1] < h - 100:
+                    break
+                dy = frame(e)[1] - h * 0.45           # > 0: below the screen
+                _idbd.swipe(udid, w / 2, h * 0.6,
+                            w / 2, h * 0.6 - max(-h * 0.5, min(h * 0.5, dy)), 0.8)
+                time.sleep(1.0)
+                es = _idbd.describe_all(udid) or es
+                e = pick(es)
+            return es, e
+
+        if card_time(els) is None:
+            # Not in the tree: the list from its top, then down until it shows.
+            for _ in range(4):
+                _idbd.swipe(udid, w / 2, h * 0.3, w / 2, h * 0.85, 0.2)
+                time.sleep(0.4)
+            els = _idbd.describe_all(udid) or els
+            for _ in range(10):
+                if card_time(els) is not None:
+                    break
+                _idbd.swipe(udid, w / 2, h * 0.75, w / 2, h * 0.35, 1.2)
+                time.sleep(0.8)
+                els = _idbd.describe_all(udid) or els
+        if card_time(els) is None:
             notes.append(f"[FAIL] {tag} — the Finished tab lists no event at {slot or '?'}")
             return None
+
+        if not opened(els):
+            els, when = bring(els, card_time)
+            if when is None or not 0 < frame(when)[1] < h - 80:
+                notes.append(f"[FAIL] {tag} — could not bring the {slot} event onto the screen")
+                return None
+            x, y, _w, hh = frame(when)
+            for _ in range(2):                 # the row TOGGLES open / closed
+                _idbd.tap_point(udid, x + 150, y + hh / 2)
+                # 15 s and one more look before tapping again: a second tap CLOSES a card
+                # that opened late (MEASURED 2026-11-05, run c37f494f).
+                els, up = self._wait_els(udid, opened, 15.0)
+                if not up:
+                    time.sleep(3.0)
+                    els = _idbd.describe_all(udid) or els
+                    up = opened(els)
+                if up:
+                    break
+        # Open: its View PDF ends the receipt, often off the screen -- scroll to it.
         if opened(els):
-            return els                         # already open
-        x, y, _w, hh = frame(when)
-        for _ in range(2):                     # the row TOGGLES open / closed
-            _idbd.tap_point(udid, x + 150, y + hh / 2)
-            els, up = self._wait_els(udid, opened, 6.0)
-            if up:
-                break
+            els, _pdf = bring(els, lambda es: next(
+                (e for e in inside(es) if name(e) == "finishedViewPdf"), None))
         return els
 
     def _c_rating_prompt(self, udid: str, notes: List[str], tag: str) -> Optional[List[dict]]:
@@ -12575,14 +12982,25 @@ class FlowRunner:
         this restaurant's card (another day's or restaurant's event at the same time is
         not ours). The tree holds cards off screen too, at y < 0 or y > the screen."""
         name, frame = _idbd.name, _idbd.frame
+
+        def header(e) -> bool:
+            # A closed card's header is the `${restaurant}Card` id; an OPEN one shows a
+            # 'finishedCardclose' button and the name as plain text ('Nylai Kitchen2'), no
+            # id -- MEASURED 2026-11-05: the open card went unrecognised, and the search
+            # scrolled away from it (the user: "it is going up already ... you are
+            # scrolling it down").
+            n = name(e)
+            return n == self._RESTAURANT_CARD or (
+                " " in n and self._squash(n) + "Card" == self._RESTAURANT_CARD)
+
         out = []
         for t in (e for e in es if slot and name(e) == slot):
             ty = frame(t)[1]
             today = any(name(e) == "TODAY" and ty - 40 <= frame(e)[1] <= ty for e in es)
-            card = max((e for e in es if name(e).endswith("Card")
+            card = max((e for e in es if (name(e).endswith("Card") or header(e))
                         and ty - 140 <= frame(e)[1] < ty), key=lambda e: frame(e)[1],
                        default=None)
-            if today and card is not None and name(card) == self._RESTAURANT_CARD:
+            if today and card is not None and header(card):
                 out.append(t)
         return out
 
@@ -14169,6 +14587,16 @@ class FlowRunner:
         started = time.time()
         self._seg_started_at = started             # see _own_panel_card
         self._metro_marks = self._metro_log_sizes()  # see _collect_evidence
+        if seg.get("only_if_sent") and getattr(self, "_sent_if_any", None) is False:
+            # The user, 2026-11-05: segments 9 and 10 'are waste' when segment 8's
+            # @send_if_any sent nothing (runs 1107222a, 651a9252: nothing unsent, the
+            # ticket already prepared, nothing left to serve), yet they cost two account
+            # switches and a board wait. They pass at once then; a resumed run, which does
+            # not know what segment 8 sent, still runs them.
+            notes.append("[ok] not needed — the last @send_if_any sent nothing to the "
+                         "kitchen, so nothing came back to ready or serve")
+            self._persist(seg, "PASS", notes, time.time() - started)
+            return True
         status = "PASS"
         flaky_steps = 0
         seen_errors: set = set()                   # app errors already noted (run_issues)
@@ -14184,6 +14612,9 @@ class FlowRunner:
             # and the segment used to appear only after both.
             self._persist(seg, "running", notes + [f"▶ starting the {role} session"], 0.0)
             r = self._session_for(role)
+            if getattr(self, "_session_note", None):
+                notes.append(f"    · {self._session_note}")
+                self._session_note = None
             notes.append(f"[ok] session ready on {getattr(self, '_cur_udid', '')[:8]} "
                          f"({time.time() - _t_seg:.1f}s)")
             if role in ("waiter", "kitchen"):
@@ -14811,6 +15242,19 @@ class FlowRunner:
         from automation.projects import simulators as _sims
         for udid in udids:
             _sims.quiet_background_daemons(udid)
+        # A restart of the backend (./stop.sh && ./start.sh) kills the idb companions it
+        # started but leaves them in idb's state, and idb then never starts new ones: every
+        # read of that sim comes back empty. MEASURED 2026-11-05: the restart at 11:11 took
+        # the participant iPhone's companion; run 3d1d2d6b failed at 11:44 on a Wallet
+        # that was on screen. Clear those before any step (idb_fast also heals a read).
+        for udid in udids:
+            try:
+                if _idb_fast.revive_companion(udid):
+                    self.on_event({"type": "log", "message":
+                                   f"preflight: {udid[:8]}'s idb companion was dead (a "
+                                   f"backend restart) — cleared it; idb starts a new one"})
+            except Exception as e:
+                logger.warning("preflight companion %s: %s", udid[:8], e)
 
         # 2. Ensure Appium is listening on 4723 (start it if not).
         def _appium_ready() -> bool:

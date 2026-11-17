@@ -161,3 +161,14 @@ def test_the_registered_project_checkout_wins_over_a_stale_clone(tmp_path, monke
         assert sources.app_repo("business") == old                 # a registered project wins
     finally:
         sources.app_repo.cache_clear()
+
+
+def test_a_long_flow_gets_time_for_every_segment_it_still_runs(monkeypatch):
+    # The user, 2026-11-05: run the END TO END in one go -- a flat hour stopped run
+    # cf1f3ec2 in segment 6 with nothing wrong.
+    from automation.agentic import runinfo
+    monkeypatch.delenv("AGENT_RUN_TIMEOUT_MIN", raising=False)
+    assert runinfo.run_timeout_s(0) == 3600 and runinfo.run_timeout_s(3) == 3600
+    assert runinfo.run_timeout_s(16) == 16 * 15 * 60        # resumed at segment 6 of 21
+    monkeypatch.setenv("AGENT_RUN_TIMEOUT_MIN", "90")
+    assert runinfo.run_timeout_s(16) == 90 * 60

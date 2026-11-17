@@ -14,6 +14,7 @@ gates (automation/claude_code/gates.py) need exactly these answers:
 from __future__ import annotations
 
 import inspect
+import os
 import re
 import time
 from functools import lru_cache
@@ -51,6 +52,22 @@ def status_of(run_id: str) -> str:
         return (r.status or "") if r else "missing"
 
 
+SEGMENT_BUDGET_S = 15 * 60       # what one segment may take, on a slow staging day
+
+
+def run_timeout_s(segments_to_run: int) -> float:
+    """How long a run may take: 60 minutes, or 15 per segment it still has to run.
+
+    The user, 2026-11-05: run the END TO END's segments in one go. Its 21 segments take
+    2-4 hours (segment 3 alone 862 s on 2026-11-04), so the flat 60 minutes stopped run
+    cf1f3ec2 in segment 6 with nothing wrong. A wedged step is still bounded by
+    STEP_TIMEOUT and a wedged run by this; AGENT_RUN_TIMEOUT_MIN overrides it."""
+    override = os.environ.get("AGENT_RUN_TIMEOUT_MIN", "").strip()
+    if override.isdigit() and int(override) > 0:
+        return int(override) * 60.0
+    return float(max(RUN_TIMEOUT_S, SEGMENT_BUDGET_S * max(0, int(segments_to_run))))
+
+
 def wait_for(run_id: str, timeout_s: float = RUN_TIMEOUT_S) -> str:
     """Wait for a run to end. A run that outlives `timeout_s` is asked to stop and
     marked failed, so a wedged flow can never hold the rig forever."""
@@ -66,7 +83,8 @@ def wait_for(run_id: str, timeout_s: float = RUN_TIMEOUT_S) -> str:
         r = db.get(TestRun, run_id)
         if r is not None:
             r.status = "failed"
-            r.error_message = "Agent: the run exceeded 60 minutes and was stopped."
+            r.error_message = (f"Agent: the run exceeded {round(timeout_s / 60)} minutes "
+                               f"and was stopped.")
             db.commit()
     return "failed"
 

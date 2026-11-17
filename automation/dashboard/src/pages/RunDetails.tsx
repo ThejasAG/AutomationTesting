@@ -16,6 +16,18 @@ import { openRichReport } from '../richReport';
 // What a run saw that did NOT fail it — a crash it relaunched past, a spinner left up,
 // an error toast, an app bug worked around: yellow. The same tags as
 // automation/scenarios/run_issues.py KINDS.
+// An invoice's printed payment lines SHORT of its Total: they print only the diners' own
+// payments, not those booked on guests (paid for them by another diner, or their own cash).
+// Information, not a failed sum (the user, 2026-11-05: "make it all pass ... that only you
+// failed"); same rule as automation/scenarios/invoice_check.is_printed_payments_gap.
+const PRINTED_PAYMENTS_RE = /(?:Pre-Order|On Premises|Invoice) payments: .*? = (\d+\.\d{2}) against Total (\d+\.\d{2}).* unexplained$/;
+const isPrintedPaymentsGap = (line: string): boolean => {
+  const m = PRINTED_PAYMENTS_RE.exec(line || '');
+  return !!m && parseFloat(m[1]) < parseFloat(m[2]);
+};
+const isMismatch = (line: string): boolean =>
+  /^\s*\[mismatch\]/i.test(line || '') && !isPrintedPaymentsGap(line);
+
 const ISSUE_RE = /^\s*(\[(APP CRASH|APP ERROR|LOADING|STUCK LOADING|NO UI PROGRESS|PARTIAL LOAD|LOADING ISSUE|APP GLITCH|warn)\]|⚡ flaky:)/;
 // Slowness is not shown (the user, 2026-11-04: "dont mention slow steps"); nor are the
 // '[calc] {…}' notes, which are the report's tables (Report button), not steps.
@@ -81,7 +93,7 @@ function ScenarioRow({ s }: { s: ScenarioResult }) {
             <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.7 }}>
               {(s.reasons && s.reasons.length ? s.reasons : [s.error || ''])
                 .filter(r => r && !HIDDEN_NOTE_RE.test(r)).map((r, i) => (
-                <li key={i} style={r.startsWith('[mismatch]') ? { color: 'var(--danger)', fontWeight: 600 }
+                <li key={i} style={isMismatch(r) ? { color: 'var(--danger)', fontWeight: 600 }
                   : ISSUE_RE.test(r) ? { color: 'var(--warning)' } : undefined}>{r}</li>
               ))}
             </ul>
@@ -408,7 +420,7 @@ function LiveView({ runId, jobState }: LiveViewProps) {
                         // A step that did not apply (optional, or nothing left to do).
                         const skip = /^\s*\[skip\]/i.test(line);
                         // A sum that did not match: red, but the steps went on.
-                        const mismatch = /^\s*\[mismatch\]/i.test(line);
+                        const mismatch = isMismatch(line);
                         // A problem that did not fail the step: yellow.
                         const issue = ISSUE_RE.test(line);
                         const now = /^\s*▶/.test(line);       // step currently executing

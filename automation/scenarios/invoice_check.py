@@ -240,11 +240,25 @@ def _diff(calc: Optional[float], shown: Optional[float]) -> str:
 # them. A sum that does not match also leaves a '[mismatch]' note and the step goes on.
 CALC_PREFIX = "[calc] "
 MISMATCH_PREFIX = "[mismatch] "
+# Why an invoice's printed payment lines can be short of its Total (see the payments row).
+PRINTED_PAYMENTS_NOTE = ("the payment lines print only the diners' own payments, not those "
+                         "booked on guests (paid for them by another diner, or their own cash)")
+_PRINTED_PAYMENTS_RE = re.compile(
+    r"(?:Pre-Order|On Premises|Invoice) payments: .*? = (?P<printed>\d+\.\d{2}) against Total "
+    r"(?P<total>\d+\.\d{2}).* unexplained$")
 
 
-def calc_note(title: str, head: List[str], rows: List[list]) -> str:
-    return CALC_PREFIX + json.dumps({"t": title, "h": head, "r": rows}, ensure_ascii=False,
-                                    separators=(",", ":"))
+def is_printed_payments_gap(text: str) -> bool:
+    """A '[mismatch]' an older run wrote for printed payment lines SHORT of the Total,
+    which are information now (see PRINTED_PAYMENTS_NOTE)."""
+    m = _PRINTED_PAYMENTS_RE.search(str(text))
+    return bool(m) and float(m.group("printed")) < float(m.group("total"))
+
+
+def calc_note(title: str, head: List[str], rows: List[list], **extra) -> str:
+    """*extra*: more of what the step read, for the report (a split's shared total)."""
+    return CALC_PREFIX + json.dumps({"t": title, "h": head, "r": rows, **extra},
+                                    ensure_ascii=False, separators=(",", ":"))
 
 
 def calc_of(note) -> Optional[Dict]:
@@ -435,12 +449,23 @@ def check(blocks: List[Block], gaps: int = 0, cut: bool = False, comps_printed: 
                     f"{total:.2f}" + (f", Due {due:.2f}" if due else "")
                     + (f", the run overpaid {over:.2f}" if over else ""))
             ok = any(_adds(abs(diff), x) for x in (0.0, due)) or (diff > 0 and _adds(diff, over))
+            # SHORT of the Total: the printed payment lines leave out what was booked on
+            # guests -- a share the host paid for them in the C-App, a guest's own cash
+            # (MEASURED 2026-11-05, run 3b33a2fe: 310.11 printed of 404.56 = 16.15 + 78.31
+            # not on the lines). Information, not a failure (the user, 2026-11-05: "make it
+            # all pass ... that only you failed"); the money itself is checked 'against the
+            # payments'. MORE than the Total, unexplained, is still a mismatch.
+            short = not ok and diff < 0
             if ok:
                 rep.lines.append(line + " — matches")
+            elif short:
+                rep.lines.append(line + f" — {PRINTED_PAYMENTS_NOTE}")
+                how += f"; {PRINTED_PAYMENTS_NOTE}"
             else:
                 rep.problems.append(line + f" — {abs(diff):.2f} unexplained")
             totals.setdefault(name, []).append(["payments", how, eur(sum(tendered)), eur(total),
-                                                _diff(total, sum(tendered)), ok])
+                                                _diff(total, sum(tendered)),
+                                                True if ok else None if short else False])
     if paid is None:
         rep.lines.append("Not compared with the payments: this run's are not known")
     elif paid.get("incomplete"):

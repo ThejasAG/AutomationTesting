@@ -89,9 +89,9 @@ def test_the_grand_total_is_the_on_premises_block_not_the_pre_order_one():
     # The comp is printed but the Total did not take it off.
     ([("On Premises",), ("Pizza x 1", "20.00 €"), ("• Discount 50%", "-10.00€"),
       ("Total", "20.00 €"), ("VAT 3% INCL. :", "19.42€", "0.58€", "20.00€")], "dishes"),
-    # The money taken is not the Total and nothing explains it.
+    # More money printed than the Total and nothing explains it.
     ([("Pre-Order",), ("Penne x 1", "10.00 €"), ("Total", "10.00 €"),
-      ("EC-Card / Bank Card", "9.00 €"),
+      ("EC-Card / Bank Card", "11.00 €"),
       ("VAT 3% INCL. :", "9.71€", "0.29€", "10.00€")], "unexplained"),
 ])
 def test_a_wrong_figure_is_named(rows, expected):
@@ -602,3 +602,25 @@ def test_the_invoice_step_leaves_its_tables_in_the_notes():
 
 def test_a_difference_of_nothing_never_reads_minus_zero():
     assert ic._diff(322.29, 288.33 + 33.96) == "+0.00"
+
+
+def test_payment_lines_short_of_the_total_are_information_not_a_mismatch():
+    # MEASURED 2026-11-05 (run 3b33a2fe): the invoice prints only the diners' own payments
+    # (310.11 of 404.56: the host's shares for two guests and a guest's cash are not on
+    # the lines). The user: "make it all pass ... that only you failed".
+    rows = [("On Premises",), ("Penne x 1", "10.00 €"), ("Total", "10.00 €"),
+            ("EC-Card / Bank Card", "9.00 €"), ("VAT 3% INCL. :", "9.71€", "0.29€", "10.00€")]
+    rep = ic.check(blocks(*rows))
+    assert rep.problems == []
+    assert any(ic.PRINTED_PAYMENTS_NOTE in line for line in rep.lines)
+    payments = [r for t in rep.tables for r in ic.calc_of(t)["r"] if r[0] == "payments"]
+    assert payments and payments[0][-1] is None
+
+
+def test_an_older_runs_short_payment_gap_is_known_and_an_excess_is_not():
+    assert ic.is_printed_payments_gap(
+        "[mismatch] @w_invoice — On Premises payments: 310.11 + 0.00 + 0.00 = 310.11 against "
+        "Total 404.56, Due 0.01, the run overpaid 10.01 — 94.45 unexplained")
+    assert not ic.is_printed_payments_gap(
+        "[mismatch] @w_invoice — On Premises payments: 280.47 + 88.31 + 0.00 = 368.78 against "
+        "Total 367.74, Due 10.01, the run overpaid 10.01 — 1.04 unexplained")
