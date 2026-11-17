@@ -168,52 +168,13 @@ def test_10b_the_batch_does_not_recompute_the_run_status(env):
     assert (run.status, run.job_state) == ("running", "running")
 
 
-# ── Android compatibility (22–23) ────────────────────────────────────────────
+# ── One writer (23b) ─────────────────────────────────────────────────────────
 
-def test_22_the_android_endpoint_still_works(env, monkeypatch):
-    db, _ = env
-    _run(db, "run-bot")
-    monkeypatch.setattr(jr, "BOT_SECRET", "", raising=False)
-    out = jr.post_scenario_result(
-        "run-bot", jr.ScenarioResultIn(scenario_num="1", scenario_name="Order",
-                                       status="PASS", role="Consumer"),
-        db=db, x_bot_secret=None)
-    assert out["saved"] is True
-    rows = _rows(db, "run-bot")
-    assert len(rows) == 1 and rows[0].consumer_status == "PASS"
-
-
-def test_22b_role_merging_still_produces_one_row(env, monkeypatch):
-    """The cross-app behaviour the bot depends on: two posts, one merged row."""
-    db, _ = env
-    _run(db, "run-bot")
-    monkeypatch.setattr(jr, "BOT_SECRET", "", raising=False)
-    for role, status in (("Consumer", "PASS"), ("Business", "FAIL")):
-        jr.post_scenario_result("run-bot",
-                                jr.ScenarioResultIn(scenario_num="1", scenario_name="Order",
-                                                    status=status, role=role),
-                                db=db, x_bot_secret=None)
-    rows = _rows(db, "run-bot")
-    assert len(rows) == 1
-    assert rows[0].consumer_status == "PASS" and rows[0].business_status == "FAIL"
-    assert rows[0].status == "FAIL", "either side failing fails the scenario"
-
-
-def test_23_both_paths_share_one_implementation():
-    android = inspect.getsource(jr.post_scenario_result)
-    batch = inspect.getsource(jr.post_scenario_results_batch)
-    assert "upsert_scenario_result" in android
-    assert "upsert_scenario_result" in batch
-    # and neither builds its own row
-    for src in (android, batch):
-        assert "ScenarioResult(" not in src, "no second implementation"
-
-
-def test_23b_the_two_modes_differ_only_in_role_merging(env):
-    """merge_roles=False is exactly what the iOS writers did before."""
+def test_23b_a_whole_scenario_is_written_as_reported(env):
+    """The caller reports a whole scenario and its verdict; the row takes it as is."""
     db, _ = env
     _run(db, "run-x")
-    jr.upsert_scenario_result(db, "run-x", _item(1, "S", "PASS"), merge_roles=False)
+    jr.upsert_scenario_result(db, "run-x", _item(1, "S", "PASS"))
     db.commit()
     row = _rows(db, "run-x")[0]
     assert (row.consumer_status, row.business_status) == ("N/A", "N/A")

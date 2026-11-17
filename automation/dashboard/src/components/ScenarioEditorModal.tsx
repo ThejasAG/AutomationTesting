@@ -44,9 +44,6 @@ const plainBtn: React.CSSProperties = {
   padding: '0 16px',
 };
 
-export const emptyScenario = (): ScenarioInput =>
-  ({ name: '', description: '', project_id: '', device_id: '', steps: [], covers: [] });
-
 export default function ScenarioEditorModal({
   initial, isNew, projects: projectsIn, sims: simsIn, onClose, onSave, onSaved,
 }: {

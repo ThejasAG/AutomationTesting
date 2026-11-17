@@ -5,7 +5,7 @@ somewhere else entirely.
 """
 from pathlib import Path
 
-DOC = Path("INSTALL.md").read_text()
+DOC = Path("docs/INSTALL.md").read_text()
 
 
 def test_every_stage_ends_in_something_you_can_check():

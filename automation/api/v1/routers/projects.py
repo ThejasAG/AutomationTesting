@@ -1,11 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 import uuid
 import os
-import pathlib
-import subprocess
 
 from automation.database import database
 from automation.database.database import utc_iso
@@ -19,7 +16,6 @@ from automation.projects.detector import (
 )
 from automation.projects.preparation import preparation_service, preparation_tracker
 from automation.auth.security import get_current_user
-from automation.runner.service import runner_service
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -41,23 +37,6 @@ _SKIP_DIRS: frozenset[str] = frozenset(
 _TEST_DIRS: frozenset[str] = frozenset({"e2e", "tests", "test", "e2e_tests", "appium"})
 
 
-def _is_test_script(rel_path: "pathlib.PurePath") -> bool:
-    """A test script = a .py under a test directory, or a test_*.py / *_test.py
-    anywhere, or the project's automation.yaml. Filters out app source & config
-    JSON so the Scripts tab shows scripts, not the whole repo."""
-    parts = rel_path.parts
-    name = rel_path.name
-    ext = rel_path.suffix.lower()
-    if name in ("automation.yaml", "automation.yml"):
-        return True
-    if ext != ".py":
-        return False
-    if any(seg in _TEST_DIRS for seg in parts[:-1]):
-        return True
-    stem = rel_path.stem
-    return stem.startswith("test_") or stem.endswith("_test")
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_project_or_404(project_id: str, db: Session) -> TestProject:
@@ -65,34 +44,6 @@ def _get_project_or_404(project_id: str, db: Session) -> TestProject:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
-
-
-def _get_repo_root(project_id: str) -> pathlib.Path:
-    """Return the resolved absolute path to the cloned repository.
-
-    Raises 404 if the repository has not been cloned yet.
-    """
-    raw = repository_manager.get_repo_path(project_id)
-    root = pathlib.Path(raw).resolve()
-    if not root.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Repository not cloned yet. Trigger a run or project sync first.",
-        )
-    return root
-
-
-def _safe_resolve(repo_root: pathlib.Path, file_path: str) -> pathlib.Path:
-    """Resolve *file_path* relative to *repo_root* and reject path-traversal.
-
-    Raises 400 if the resolved path escapes the repository directory.
-    """
-    # Normalise separators (Windows paths from the frontend may use backslash).
-    normalised = file_path.replace("\\", "/").lstrip("/")
-    target = (repo_root / normalised).resolve()
-    if not str(target).startswith(str(repo_root) + os.sep) and target != repo_root:
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    return target
 
 
 # ── Project CRUD ──────────────────────────────────────────────────────────────
@@ -280,11 +231,6 @@ def _serialize(p: TestProject, db: Optional[Session] = None) -> Dict[str, Any]:
 def list_projects(db: Session = Depends(get_db)):
     projects = database.get_test_projects(db)
     return {"projects": [_serialize(p, db) for p in projects]}
-
-
-@router.get("/{project_id}")
-def get_project(project_id: str, db: Session = Depends(get_db)):
-    return {"project": _serialize(_get_project_or_404(project_id, db), db)}
 
 
 @router.post("/")
@@ -531,17 +477,6 @@ def pull_repository(project_id: str, db: Session = Depends(get_db)):
     return {"status": "pulled", "steps": result.steps, "project": _serialize(refreshed, db)}
 
 
-@router.get("/{project_id}/status")
-def project_status(
-    project_id: str,
-    check_remote: bool = False,
-    db: Session = Depends(get_db),
-):
-    """Repository + health status. ``check_remote=true`` also detects 'outdated'."""
-    _get_project_or_404(project_id, db)
-    return preparation_service.get_status(project_id, check_remote=check_remote)
-
-
 class ValidateBody(BaseModel):
     device_id: Optional[str] = None
     # When true, a missing automation.yaml is generated instead of failing.
@@ -550,32 +485,6 @@ class ValidateBody(BaseModel):
     # whatever happens to be checked out, so picking a branch on the card and
     # pressing Execute silently built the previous one.
     branch: Optional[str] = None
-
-
-@router.post("/{project_id}/validate")
-def validate_project(
-    project_id: str,
-    body: ValidateBody = ValidateBody(),
-    db: Session = Depends(get_db),
-):
-    """Run the full preparation pipeline: clone/pull → checkout → detect → validate → install.
-
-    Validation happens only AFTER the repository is on disk and prepared, so it
-    can no longer fail with "automation.yaml not found" / ".venv not found"
-    simply because the clone had not happened yet.
-
-    When automation.yaml is missing the response carries
-    ``needs_automation_yaml: true`` so the dashboard can offer to generate one.
-    """
-    _get_project_or_404(project_id, db)
-
-    result = preparation_service.prepare_for_execution(
-        project_id,
-        device_id=body.device_id,
-        auto_generate_yaml=body.generate_yaml,
-        branch=body.branch,
-    )
-    return result.to_dict()
 
 
 @router.post("/{project_id}/prepare", status_code=202)
@@ -611,228 +520,6 @@ def preparation_status(project_id: str, db: Session = Depends(get_db)):
     return preparation_tracker.status(project_id)
 
 
-@router.post("/{project_id}/generate-yaml")
-def generate_yaml(project_id: str, db: Session = Depends(get_db)):
-    """Scaffold an automation.yaml based on the detected project type."""
-    project = _get_project_or_404(project_id, db)
-
-    if not repository_manager.is_cloned(project_id):
-        raise HTTPException(
-            status_code=400, detail="Repository is not cloned yet. Clone it first."
-        )
-
-    repo_path = repository_manager.get_repo_path(project_id)
-    detection = detect_project_type(repo_path)
-
-    content = write_automation_yaml(
-        repo_path,
-        project_name=project.name,
-        project_type=detection.project_type,
-        platform=project.platform or "ios",
-        branch=project.default_branch or "main",
-    )
-
-    project.project_type = detection.project_type
-    db.commit()
-
-    return {
-        "status": "generated",
-        "project_type": detection.project_type,
-        "content": content,
-    }
-
-
-# ── File browser endpoints ────────────────────────────────────────────────────
-
-@router.get(
-    "/{project_id}/files",
-    summary="List all editable files in a project repository",
-    dependencies=[Depends(get_current_user)],
-)
-def list_project_files(
-    project_id: str,
-    scripts_only: bool = True,
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    """List repository files for the editor.
-
-    By default (``scripts_only=True``) only TEST scripts are returned — the
-    Scripts tab is for authoring/running test scripts, not browsing the app's
-    own source and config JSON. Pass ``scripts_only=false`` to walk the whole
-    repo (all allowed extensions). Hidden files and build/cache dirs are always
-    excluded.
-    """
-    _get_project_or_404(project_id, db)
-    repo_root = _get_repo_root(project_id)
-
-    files: List[Dict[str, str]] = []
-
-    for root, dirs, filenames in os.walk(repo_root):
-        # Prune unwanted directories in-place so os.walk skips them.
-        dirs[:] = sorted(
-            d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")
-        )
-
-        for filename in sorted(filenames):
-            if filename.startswith("."):
-                continue
-            _, ext = os.path.splitext(filename)
-            if ext not in _ALLOWED_EXTENSIONS:
-                continue
-
-            full_path = pathlib.Path(root) / filename
-            rel_path = full_path.relative_to(repo_root)
-            if scripts_only and not _is_test_script(rel_path):
-                continue
-            # Always return POSIX-style paths regardless of the host OS.
-            files.append(
-                {
-                    "path": rel_path.as_posix(),
-                    "name": filename,
-                    "type": "file",
-                }
-            )
-
-    return {"files": files}
-
-
-@router.get(
-    "/{project_id}/files/{file_path:path}",
-    response_class=PlainTextResponse,
-    summary="Read the content of a project file",
-    dependencies=[Depends(get_current_user)],
-)
-def get_project_file(
-    project_id: str,
-    file_path: str,
-    db: Session = Depends(get_db),
-) -> str:
-    """Return the raw UTF-8 text content of *file_path* inside the repository."""
-    _get_project_or_404(project_id, db)
-    repo_root = _get_repo_root(project_id)
-    target = _safe_resolve(repo_root, file_path)
-
-    if not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-
-    return target.read_text(encoding="utf-8", errors="replace")
-
-
-class FileUpdateBody(BaseModel):
-    content: str
-
-
-@router.put(
-    "/{project_id}/files/{file_path:path}",
-    summary="Save a file and git-commit the change",
-    dependencies=[Depends(get_current_user)],
-)
-def save_project_file(
-    project_id: str,
-    file_path: str,
-    body: FileUpdateBody,
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    """Overwrite *file_path* with *body.content* and create a git commit.
-
-    The commit message is: ``Platform edit: {file_path} via dashboard``
-
-    Returns ``{"status": "saved", "committed": true|false}``.
-    A ``committed: false`` result means the file was written but the git
-    operation failed (e.g. nothing changed, no git identity set).  This is
-    non-fatal — the content on disk is correct regardless.
-    """
-    _get_project_or_404(project_id, db)
-    repo_root = _get_repo_root(project_id)
-    target = _safe_resolve(repo_root, file_path)
-
-    # Write content to disk.
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(body.content, encoding="utf-8")
-
-    # Attempt to git-commit the change.
-    committed = False
-    try:
-        add = subprocess.run(
-            ["git", "add", file_path],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if add.returncode == 0:
-            commit_msg = f"Platform edit: {file_path} via dashboard"
-            commit = subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            committed = commit.returncode == 0
-    except Exception:
-        # Commit failure is non-fatal; file is already written.
-        committed = False
-
-    return {"status": "saved", "committed": committed}
-
-
-class FileRunBody(BaseModel):
-    device_id: str
-
-
-@router.post(
-    "/{project_id}/files/{file_path:path}/run",
-    summary="Trigger a test run for a specific file",
-    dependencies=[Depends(get_current_user)],
-)
-def run_project_file(
-    project_id: str,
-    file_path: str,
-    body: FileRunBody,
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    """Enqueue a new test run scoped to *file_path*.
-
-    The run is created with ``triggered_by="Script Editor"`` so it can be
-    distinguished in the dashboard from regular automation runs.
-
-    Returns ``{"run_id": "<uuid>"}`` on success.
-    """
-    project = _get_project_or_404(project_id, db)
-
-    device_id = body.device_id
-    # The user picks the simulator from a dropdown, so honour that exact choice
-    # (prefer_requested) — do NOT jump to whatever else is booted. Only an invalid
-    # id (e.g. a stale UDID or an Android 'emulator-5554') falls back to a real sim.
-    if (project.platform or "ios").lower() == "ios":
-        from automation.projects.builder import app_builder
-        from automation.device_manager.service import device_service
-        resolved, _ = app_builder.resolve_ios_device(device_id, prefer_requested=True)
-        if resolved:
-            device_id = resolved
-        # Boot exactly the chosen simulator so it — not some other booted one — is
-        # what runs. Booting a cold sim adds a few seconds; that's expected.
-        app_builder.ensure_ios_booted(device_id)
-        # The agent-fed registry can be empty (e.g. just after a restart), which
-        # would fail execute_project's device check. Register the chosen sim.
-        if not device_service.get_device(device_id):
-            from automation.scenarios.cross_app_config import list_ios_simulators
-            name = next((s["name"] for s in list_ios_simulators()
-                         if s["udid"] == device_id), "iOS Simulator")
-            device_service.register_local_device(device_id, name)
-
-    try:
-        run_id = runner_service.execute_project(
-            project_id=project_id,
-            device_id=device_id,
-            triggered_by="Script Editor",
-        )
-        return {"run_id": run_id}
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
 @router.get("/{project_id}/trend-summary")
 def get_trend_summary(
     project_id: str,
@@ -843,25 +530,3 @@ def get_trend_summary(
     from automation.ai.services.summary import test_summary_generator
     return test_summary_generator.generate_trend_summary(project_id, days=days)
 
-
-@router.get("/{project_id}/performance-trends")
-def get_performance_trends(
-    project_id: str,
-    limit: int = 10,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    """Performance scores for a project's last N runs + regression detection."""
-    from automation.database.models import PerformanceSummary
-    from automation.database.models import TestRun as _TestRun
-    from automation.api.v1.routers.intelligence import analyze_performance_trend
-
-    rows = (
-        db.query(PerformanceSummary)
-        .join(_TestRun, _TestRun.id == PerformanceSummary.run_id)
-        .filter(_TestRun.project_id == project_id)
-        .order_by(PerformanceSummary.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-    return analyze_performance_trend(rows)

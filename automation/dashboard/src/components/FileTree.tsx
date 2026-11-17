@@ -11,6 +11,10 @@ interface FileTreeProps {
   files: FileEntry[];
   selected: string | null;
   onSelect: (path: string) => void;
+  /** Folders in this order first (e.g. ios before android); the rest A–Z. */
+  dirOrder?: string[];
+  /** Folders to show even when empty (e.g. android/, before it has scripts). */
+  folders?: string[];
 }
 
 /** Group file entries by their top-level directory segment. */
@@ -49,8 +53,10 @@ const ROW_BASE: React.CSSProperties = {
   textOverflow: 'ellipsis',
 };
 
-export default function FileTree({ files, selected, onSelect }: FileTreeProps) {
+export default function FileTree({ files, selected, onSelect, dirOrder = [], folders = [] }: FileTreeProps) {
+  const rank = (dir: string) => (dirOrder.includes(dir) ? dirOrder.indexOf(dir) : dirOrder.length);
   const groups = groupByDirectory(files);
+  for (const dir of folders) if (!groups[dir]) groups[dir] = [];
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const toggleDir = (dir: string) => {
@@ -61,7 +67,7 @@ export default function FileTree({ files, selected, onSelect }: FileTreeProps) {
     });
   };
 
-  if (files.length === 0) {
+  if (files.length === 0 && folders.length === 0) {
     return (
       <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '12px 10px' }}>
         No files found
@@ -89,9 +95,9 @@ export default function FileTree({ files, selected, onSelect }: FileTreeProps) {
       {/* Directory groups */}
       {Object.entries(groups)
         .filter(([dir]) => dir !== '__root__')
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
         .map(([dir, dirFiles]) => {
-          if (dirFiles.length === 0) return null;
+          if (dirFiles.length === 0 && !folders.includes(dir)) return null;
           const isOpen = !collapsed.has(dir);
 
           return (
@@ -117,6 +123,11 @@ export default function FileTree({ files, selected, onSelect }: FileTreeProps) {
               </div>
 
               {/* Children */}
+              {isOpen && dirFiles.length === 0 && (
+                <div style={{ ...ROW_BASE, paddingLeft: '26px', cursor: 'default', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                  empty
+                </div>
+              )}
               {isOpen && (
                 <div style={{ paddingLeft: '16px' }}>
                   {dirFiles

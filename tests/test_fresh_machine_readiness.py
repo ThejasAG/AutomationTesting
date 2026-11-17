@@ -137,7 +137,7 @@ def test_the_stale_repo_database_is_gone():
         "the stale repo-root database is back; tooling will silently read it again"
 
 
-@pytest.mark.parametrize("rel", ["install.py", "clear-screenshots.sh"])
+@pytest.mark.parametrize("rel", ["scripts/install.py", "scripts/clear-screenshots.sh"])
 def test_tooling_does_not_hardcode_a_database_filename(rel):
     text = (REPO / rel).read_text()
     assert "database_url" in text, f"{rel} must use the configured database"

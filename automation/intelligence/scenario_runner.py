@@ -34,6 +34,7 @@ from appium.webdriver.common.appiumby import AppiumBy
 
 logger = logging.getLogger("scenario_runner")
 
+from automation import formulas
 from automation.intelligence.element_catalog import (
     AutoIdCatalog, METHOD_CONTAINER, METHOD_EXACT_ID, METHOD_HIERARCHY,
     METHOD_PARTIAL_ID, METHOD_TEXT,
@@ -1866,7 +1867,7 @@ class ScenarioRunner:
         # captures, not about what is currently displayed.
         left = self._safe_eval(lhs)
         if left is not None:
-            ok = abs(left - expected) <= 0.01
+            ok = bool(formulas.same(left, expected))
             return StepResult(
                 step=s, ok=ok,
                 action=(f"calculation checks out ({left:g} = {expected:g})" if ok
@@ -1879,12 +1880,12 @@ class ScenarioRunner:
         actual = None
         # Prefer a number in an element whose text mentions the label.
         for val, ctx in nums:
-            if label_words and all(w.lower() in ctx.lower() for w in label_words) and abs(val - expected) <= 0.01:
+            if label_words and all(w.lower() in ctx.lower() for w in label_words) and formulas.same(val, expected):
                 actual = val; break
         if actual is None:
             # Fall back: is the expected value visible anywhere?
             for val, _ctx in nums:
-                if abs(val - expected) <= 0.01:
+                if formulas.same(val, expected):
                     actual = val; break
         ok = actual is not None
         return StepResult(
@@ -1981,6 +1982,15 @@ class ScenarioRunner:
                           action=f"api {field}={actual} {op} {expected}" if ok else "api value mismatch",
                           detail="" if ok else f"backend {field}={actual}, expected {op} {expected}",
                           code=f'    # verify api: {field} {op} {expected}')
+
+    def _crash_on_screen(self) -> Optional[str]:
+        """idb_driver.crash_screen on the screen app_crash just read (or a fresh read)."""
+        from automation.scenarios import idb_driver as _dv
+        at, els = getattr(self, "_post_els", None) or (0.0, None)
+        if els is None or time.time() - at > 3.0:
+            udid = self._device_udid()
+            els = _dv.describe_all(udid) if udid else []
+        return _dv.crash_screen(els or [])
 
     def app_crash(self) -> Optional[str]:
         """The JS error on screen, if the app has red-boxed. None when healthy.
@@ -2395,7 +2405,10 @@ class ScenarioRunner:
                 detail=f"APP BUG (not automation): {crash}",
                 code=res.code)
 
-        if not res.ok and self.shot_dir:
+        # A screenshot only when the screen shows the app crashed: the red box, a
+        # warning modal on a white screen, or the app gone (the user, 2026-11-17:
+        # "otherwise no need of taking screenshots while running").
+        if not res.ok and self.shot_dir and (crash or self._crash_on_screen()):
             try:
                 path = os.path.join(self.shot_dir, f"step_{index}.png")
                 self.d.get_screenshot_as_file(path)

@@ -66,20 +66,18 @@ def test_sampler_failure_is_never_blamed_on_the_app():
     rep = run([None, None, None, None])
     assert rep.result == LoadResult.MONITOR_UNAVAILABLE
     assert "MONITORING fault" in rep.to_note()
-    assert not rep.is_problem
 
 
 # ── result classes ───────────────────────────────────────────────────────────
 def test_success_within_the_window():
     rep = run([["walletHeader", "walletBalance"]])
-    assert rep.result == LoadResult.SUCCESS and not rep.is_problem
+    assert rep.result == LoadResult.SUCCESS
 
 
 def test_slow_success_is_not_a_failure():
     late = [["spinner"]] * 7 + [["walletHeader", "transactionHistory"]]
     rep = run(late)
     assert rep.result == LoadResult.SLOW_SUCCESS
-    assert not rep.is_problem
     assert "[SLOW LOAD]" in rep.to_note()
 
 
@@ -119,7 +117,6 @@ def test_exceeding_the_window_is_not_reported_when_content_arrives():
               ["walletHeader", "walletBalance"]]
     rep = run(frames)
     assert rep.result == LoadResult.SLOW_SUCCESS
-    assert not rep.is_problem
 
 
 # ── volatile UI filtering ────────────────────────────────────────────────────
@@ -210,24 +207,6 @@ def test_missing_lists_the_gaps():
 
 
 # ── recovered after retry ────────────────────────────────────────────────────
-def test_an_issue_refiled_as_recovered_is_not_a_failure():
-    stalled = run([["bookingBoard"]] * 8)          # attempt 1 stalls
-    assert stalled.result == LoadResult.NO_PROGRESS and stalled.is_problem
-    rec = stalled.as_recovered(attempt=2)
-    assert rec.result == LoadResult.RECOVERED
-    assert not rec.is_problem
-    assert "[SLOW / RECOVERED]" in rec.to_note()
-
-
-def test_recovered_keeps_the_original_evidence():
-    stalled = run([["ActivityIndicator", f"x{i}"] for i in range(8)])
-    rec = stalled.as_recovered(attempt=2)
-    assert rec.context["first_attempt_was"] == LoadResult.STUCK_LOADING
-    assert rec.context["recovered_on_attempt"] == "2"
-    assert rec.spinners == stalled.spinners
-    assert rec.waited == stalled.waited
-
-
 # ── named screens / substring content matching ───────────────────────────────
 from automation.scenarios.ui_health import SCREENS
 

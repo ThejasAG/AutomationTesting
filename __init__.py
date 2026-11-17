@@ -1,1 +1,0 @@
-"""iOS Test Automation Platform"""

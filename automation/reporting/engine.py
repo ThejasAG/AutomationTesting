@@ -1,7 +1,6 @@
 import os
-import json
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 class ReportingEngine:
     def __init__(self, output_dir: str):
@@ -63,28 +62,6 @@ class ReportingEngine:
         file_path = os.path.join(self.output_dir, f"report_{run_id}.html")
         with open(file_path, "w") as f:
             f.write(html_content)
-            
-        return file_path
-
-    def generate_markdown_report(self, run_id: str, results: Dict[str, Any], rca: Dict[str, Any] = None) -> str:
-        """Generate a Markdown report."""
-        md_content = f"# Execution Report: {run_id}\n\n"
-        md_content += f"**Status:** {results.get('status', 'FAILED').upper()}\n\n"
-        md_content += f"**Duration:** {results.get('duration_ms', 0)} ms\n\n"
-        
-        if rca:
-            md_content += "## 🤖 AI Root Cause Analysis\n\n"
-            md_content += f"- **Primary Cause:** {rca.get('primary_cause')}\n"
-            md_content += f"- **Confidence:** {rca.get('confidence_score')}%\n"
-            md_content += f"- **Recommendation:** {rca.get('recommended_fix')}\n\n"
-            
-        md_content += "## Logs\n\n```text\n"
-        md_content += "\n".join(results.get('logs', []))
-        md_content += "\n```\n"
-        
-        file_path = os.path.join(self.output_dir, f"report_{run_id}.md")
-        with open(file_path, "w") as f:
-            f.write(md_content)
             
         return file_path
 

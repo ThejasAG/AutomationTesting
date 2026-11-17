@@ -1,4 +1,4 @@
-"""Emit the Metro ports status.sh should check, split by whether anything starts them.
+"""Emit the Metro ports scripts/status.sh should check, split by whether anything starts them.
 
 status.sh used to hardcode 8081-8084. 8083 (Business staging) is declared in
 project-environments.json but has no project row, and the Metro watchdog starts one

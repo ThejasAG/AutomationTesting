@@ -23,8 +23,6 @@ from automation.database import database
 from automation.database.config import SessionLocal
 from automation.database.models import TestProject, ApplicationGroup, TestRun
 from automation.device_manager.service import device_service
-from automation.projects.builder import app_builder
-from automation.device_manager.models import DeviceStatus
 from automation.intelligence.git_analyzer import git_analyzer
 from automation.intelligence.hybrid_impact_analyzer import HybridImpactAnalyzer
 from automation.projects.repository import repository_manager
@@ -66,12 +64,6 @@ def _find_project(db, repo_clone_url: str, repo_ssh_url: str, repo_full_name: st
             .first()
         )
     return None
-
-
-@router.post("/github/test")
-async def github_webhook_test():
-    """Unauthenticated reachability probe — used to verify the endpoint is live."""
-    return {"status": "ok", "message": "Webhook endpoint working"}
 
 
 @router.post("/github")
@@ -227,7 +219,6 @@ async def github_webhook(request: Request):
 
     # ── 6. Match the project and queue a single TestRun ──────────────────────
     run_ids = []
-    android_run_id = None
     with SessionLocal() as db:
         project = _find_project(db, clone_url, ssh_url, repo_name)
         if not project:
@@ -301,47 +292,6 @@ async def github_webhook(request: Request):
             except Exception as exc:
                 logger.warning("PR pending status failed: %s", exc)
 
-        # ── 6b. Android cross-app run (Consumer + Business) ──────────────────
-        # If this project's group has the Android bot configured, spin up a
-        # SECOND run (bot_type="android") and hand it to the bot adapter.
-        if project.group_id:
-            group = (
-                db.query(ApplicationGroup)
-                .filter(ApplicationGroup.id == project.group_id)
-                .first()
-            )
-            if group is not None and group.android_bot_url:
-                from automation.api.v1.routers.jobs import trigger_android_bot
-
-                android_run_id = str(uuid.uuid4())
-                android_now = datetime.utcnow()
-                database.insert_test_run(db, {
-                    "id": android_run_id,
-                    "project_id": project.id,
-                    "test_suite": f"{group.name} (Android cross-app)",
-                    "test_name": "Consumer + Business scenarios",
-                    "status": "queued",
-                    "job_state": "queued",
-                    "started_at": android_now,
-                    "created_at": android_now,
-                    "device_name": "android-bot",
-                    "platform": "Android",
-                    "triggered_by": f"github_webhook:{repo_name}",
-                    "branch": branch,
-                    "commit_sha": commit_sha,
-                    "bot_type": "android",
-                })
-                android_run = db.query(TestRun).filter_by(id=android_run_id).first()
-                try:
-                    trigger_android_bot(
-                        db, android_run, scenarios=[],
-                        consumer_device=None, business_device=None,
-                        bot_url=group.android_bot_url,
-                    )
-                except Exception as exc:
-                    logger.warning("Android bot trigger failed: %s", exc)
-                run_ids.append(android_run_id)
-
     module_count = len(affected_modules)
     message = (
         f"Running {len(selected_tests)} test{'s' if len(selected_tests) != 1 else ''} "
@@ -354,7 +304,6 @@ async def github_webhook(request: Request):
     )
 
     ios_run_id = run_ids[0] if run_ids else None
-    both = message + (" | iOS + Android tests triggered" if android_run_id else "")
 
     # Ticket-driven testing: run any ticket linked to this PR — either by an explicit
     # pr_number, OR by a match_key (e.g. "NEWVYA-1134") that appears in the PR's branch,
@@ -401,12 +350,11 @@ async def github_webhook(request: Request):
         "missing_tests": missing_tests,
         "no_coverage": no_coverage,
         "ios_run_id": ios_run_id,
-        "android_run_id": android_run_id,
         "run_ids": run_ids,
         # Cross-app impact (empty unless the project belongs to an AppGroup).
         "cross_app_impact": cross_app_impact,
         "affected_endpoints": affected_endpoints,
         "graphify_nodes": graphify_nodes,
         "linked_tickets": linked_tickets,
-        "message": both,
+        "message": message,
     }

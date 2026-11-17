@@ -22,7 +22,10 @@ TOOLS = os.path.join(MAIN_ROOT, TOOLS_REL)
 PYTHON = os.path.join(MAIN_ROOT, ".venv", "bin", "python")
 
 # Untracked things a worktree needs to run flows: linked, never copied.
-WORKTREE_LINKS = (".env", "cross_app_config.json", "repos", ".venv")
+WORKTREE_LINKS = ("config/.env", "config/cross_app_config.json", "repos", ".venv")
+# Where a worktree of a commit from before 2026-11-17 (secrets at the repo root) reads
+# them: linked there too, so measuring an older base commit still finds them.
+LEGACY_LINKS = {"config/.env": ".env", "config/cross_app_config.json": "cross_app_config.json"}
 
 
 def session_dir(session_id: str) -> str:

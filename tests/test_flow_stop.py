@@ -25,7 +25,6 @@ import pytest
 from automation.scenarios import cross_app_flows as caf
 from automation.scenarios.cross_app_flows import (
     FlowRunner,
-    flow_run_is_active,
     request_flow_stop,
 )
 
@@ -51,7 +50,6 @@ def test_stopping_an_unknown_run_is_a_no_op():
     which is what stops those.
     """
     assert request_flow_stop("not-a-real-run") is False
-    assert flow_run_is_active("not-a-real-run") is False
 
 
 def test_a_registered_run_can_be_stopped():
@@ -59,7 +57,6 @@ def test_a_registered_run_can_be_stopped():
     with caf._ACTIVE_FLOW_RUNS_LOCK:
         caf._ACTIVE_FLOW_RUNS["live-run"] = r._cancel
 
-    assert flow_run_is_active("live-run") is True
     assert r.cancelled is False
     assert request_flow_stop("live-run") is True
     assert r.cancelled is True, "the runner must observe the stop request"

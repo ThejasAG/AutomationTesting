@@ -11,7 +11,7 @@ Pure function over a list of strings, so it is testable without a device or a DB
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 # A step line starts with its outcome tag. Everything else in `reasons` — the
 # "[where] failed at step:" marker, "[SLOW LOAD]" notes, indented "    ·" detail —
@@ -39,12 +39,6 @@ class StepStats:
         if not self.total:
             return None
         return round(self.passed * 100.0 / self.total, 1)
-
-    @property
-    def fail_pct(self) -> Optional[float]:
-        if self.pass_pct is None:
-            return None
-        return round(100.0 - self.pass_pct, 1)
 
     def summary(self) -> str:
         """One line for the report cell, e.g. '6/8 steps · 75% passed'."""

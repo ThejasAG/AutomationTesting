@@ -109,10 +109,18 @@ def test_the_real_vat_rounding_bug_is_caught():
     assert "VAT 3.26 on 111.36 is above the rate (at most 3.24)" in rep.problems[0]
 
 
-def test_one_cent_of_rounding_per_row_is_not_a_mismatch():
+def test_one_cent_off_is_a_mismatch_even_from_rounding_per_row():
+    """The user, 2026-11-17: "if anywhere 0.01 difference then fail it" -- three
+    3.33 rows make 9.99, so a Total of 10.00 is a cent off and fails."""
     rows = [("Pre-Order",), ("A x 1/3", "3.33 €"), ("B x 1/3", "3.33 €"), ("C x 1/3", "3.33 €"),
             ("Total", "10.00 €"), ("VAT 3% INCL. :", "9.71€", "0.29€", "10.00€")]
-    assert ic.check(blocks(*rows)).problems == []
+    assert ic.check(blocks(*rows)).problems == [
+        "Pre-Order dishes: 3 dishes 9.99 = 9.99, invoice shows 10.00 — off by 0.01"]
+
+
+# The real event invoice below prints VAT 14% as 15.43 on 125.56: the exact VAT is
+# 125.56 x 14 / 114 = 15.42, a cent less. Exact to the cent (2026-11-17), that fails.
+EVENT_VAT_CENT = "On Premises VAT 14%: VAT 15.43 on 125.56 is above the rate (at most 15.42)"
 
 
 def test_a_real_overpayment_is_explained_by_due_or_by_the_run():
@@ -128,7 +136,7 @@ def test_a_real_overpayment_is_explained_by_due_or_by_the_run():
 
 def test_the_event_invoice_cannot_add_comps_it_does_not_print_and_says_so():
     rep = ic.check(blocks(*EVENT_TABLE), comps_printed=False)
-    assert rep.problems == []
+    assert rep.problems == [EVENT_VAT_CENT]
     assert any("does not print comps" in line for line in rep.lines)
 
 
@@ -137,7 +145,7 @@ def test_the_invoice_is_checked_against_what_the_run_really_paid():
     paid = {"preorder": [168.27], "table": [76.95, 211.38, 33.96], "tips": [2.0, 3.0],
             "overpaid": 0.0}
     rep = ic.check(parsed, comps_printed=False, paid=paid)
-    assert rep.problems == []
+    assert rep.problems == [EVENT_VAT_CENT]
     assert any("76.95 + 211.38 + 33.96" in line for line in rep.lines)
     assert any("Whole invoice: Pre-Order 168.27 + On Premises 322.29 = 490.56" in line
                for line in rep.lines)
@@ -357,7 +365,7 @@ def test_the_invoice_is_read_to_its_end_past_the_pre_order_vat_table(monkeypatch
     parsed, gaps, cut = fr._invoice_read
     assert gaps == 0 and not cut
     assert [b.totals[-1] for b in parsed] == [168.27, 322.29]
-    assert ic.check(parsed, comps_printed=False).problems == []
+    assert ic.check(parsed, comps_printed=False).problems == [EVENT_VAT_CENT]
 
 
 def test_running_out_of_screens_says_the_end_was_not_reached(monkeypatch):
@@ -624,3 +632,29 @@ def test_an_older_runs_short_payment_gap_is_known_and_an_excess_is_not():
     assert not ic.is_printed_payments_gap(
         "[mismatch] @w_invoice — On Premises payments: 280.47 + 88.31 + 0.00 = 368.78 against "
         "Total 367.74, Due 10.01, the run overpaid 10.01 — 1.04 unexplained")
+
+
+def test_fair_shares_are_equal_when_the_total_divides():
+    """The user, 2026-11-17: "when you split 10.2 euro between 2 people it should 5.1 each
+    not 5.2 for one"."""
+    assert ic.fair_shares(10.20, 2) == [5.10, 5.10]
+    assert ic.shares_ok([5.10, 5.10], 10.20)
+    assert not ic.shares_ok([5.10, 5.20], 10.20)        # does not even add up
+    assert not ic.shares_ok([5.09, 5.11], 10.20)        # adds up, but not equal
+
+
+def test_a_total_that_cannot_divide_gives_one_share_the_leftover_cent():
+    assert ic.fair_shares(10.21, 2) == [5.11, 5.10]
+    assert ic.fair_shares(10.00, 3) == [3.34, 3.33, 3.33]
+    assert ic.shares_ok([5.10, 5.11], 10.21) and ic.shares_ok([3.33, 3.34, 3.33], 10.00)
+    assert not ic.shares_ok([3.32, 3.34, 3.34], 10.00)  # adds up, but a cent moved
+
+
+def test_every_money_check_is_exact_to_the_cent():
+    """A one-cent difference fails everywhere: charge, coupon, tip (2026-11-17)."""
+    assert ic.charge_check("Pre-order payment (host)", 273.57, 273.58, "Charged by Stripe")[1]
+    assert ic.charge_check("Pre-order payment (host)", 273.57, 273.57, "Charged by Stripe")[1] is None
+    assert ic.offer_check("Coupon", 92.04, 82.85, "10% OFFER")[1]        # 82.84 is right
+    assert ic.offer_check("Coupon", 92.04, 82.84, "10% OFFER")[1] is None
+    assert ic.tip_check("host", 82.84, 2.0, 84.85)[1]
+    assert ic.tip_check("host", 82.84, 2.0, 84.84)[1] is None

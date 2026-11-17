@@ -470,6 +470,58 @@ def logbox_buttons(els: List[dict]) -> List[dict]:
     return [e for e in els if name(e) in ("Dismiss", "Minimize")]
 
 
+# A warning / error modal: an alert, a LogBox or RedBox, or a box that says so.
+_WARNING_WORDS = re.compile(r"\b(warning|error|exception|fatal|crash(?:ed)?|unhandled|"
+                            r"went wrong)\b", re.I)
+_MODAL_BUTTONS = ("Dismiss", "Minimize", "Reload")
+_CONTAINERS = ("Application", "Window", "Other", "GenericElement", "Group", "ScrollView")
+
+
+def _inside(e: dict, box: Tuple[float, float, float, float]) -> bool:
+    x, y = centre(e)
+    bx, by, bw, bh = box
+    return bx <= x <= bx + bw and by <= y <= by + bh
+
+
+def crash_screen(els: List[dict]) -> Optional[str]:
+    """What the screen shows when the app has crashed, else None.
+
+    Two looks count as a crash:
+    - the red box: React Native's error screen ("Render Error", "RCTFatal", ...);
+    - a white screen with a warning modal: a warning or error box is up and the app
+      behind it shows nothing.
+
+    A modal over a normal screen (a confirm dialog, a "payment failed" toast) is the
+    app working, so it is not a crash. An empty read is idb failing, not the app:
+    None too."""
+    if not els:
+        return None
+    red = crash_text(els)
+    if red:
+        return red
+    modal = [e for e in els
+             if e.get("type") in ("Alert", "Sheet")
+             or name(e) in _MODAL_BUTTONS
+             or (e.get("type") == "StaticText" and _WARNING_WORDS.search(e.get("AXLabel") or ""))]
+    if not modal:
+        return None
+    xs = [frame(e) for e in modal]
+    x0, y0 = min(f[0] for f in xs), min(f[1] for f in xs)
+    x1, y1 = max(f[0] + f[2] for f in xs), max(f[1] + f[3] for f in xs)
+    box = (x0, y0, x1 - x0, y1 - y0)
+    # The app behind it: anything with words or an id that is not part of the modal.
+    behind = [e for e in els
+              if e not in modal and name(e)
+              and e.get("type") not in ("Application", "Window")
+              and not (e.get("type") in _CONTAINERS and not e.get("AXLabel"))
+              and not _inside(e, box)]
+    if behind:
+        return None
+    said = next((e.get("AXLabel") for e in modal
+                 if e.get("type") == "StaticText" and e.get("AXLabel")), "") or name(modal[0])
+    return f"white screen with a warning: {said}"[:160]
+
+
 # -- pixels (for state accessibility does not expose) --------------------------
 
 def sample_colors(udid: str, points: Sequence[Tuple[float, float]],

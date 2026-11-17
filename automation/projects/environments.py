@@ -23,11 +23,11 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger("environments")
 
-# Repo-root default; override for tests or an alternate deployment.
+# config/ default; override for tests or an alternate deployment.
 CONFIG_PATH = os.getenv(
     "PROJECT_ENVIRONMENTS_PATH",
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))), "project-environments.json"),
+        os.path.abspath(__file__)))), "config", "project-environments.json"),
 )
 
 
@@ -135,12 +135,6 @@ def find_project_entry(*, bundle_id: Optional[str] = None,
                 if frag.lower() in low:
                     return entry
     return None
-
-
-def supported_environments(*, bundle_id: Optional[str] = None,
-                           name: Optional[str] = None) -> List[str]:
-    entry = find_project_entry(bundle_id=bundle_id, name=name)
-    return sorted((entry.get("environments") or {}).keys()) if entry else []
 
 
 def resolve(environment: str, *, bundle_id: Optional[str] = None,

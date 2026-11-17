@@ -625,16 +625,6 @@ export async function addGroup(data: { name: string; description?: string }): Pr
     return body.group;
 }
 
-export async function updateGroup(id: string, data: { name?: string; description?: string }): Promise<ApplicationGroup> {
-    const res = await fetch(`${API_BASE}/groups/${id}`, {
-        method: 'PUT',
-        headers: getHeaders(),
-        body: JSON.stringify(data),
-    });
-    const body = await handleResponse(res);
-    return body.group;
-}
-
 /** Replaces the group's membership with exactly these projects. */
 export async function setGroupProjects(id: string, projectIds: string[]): Promise<ApplicationGroup> {
     const res = await fetch(`${API_BASE}/groups/${id}/projects`, {
@@ -653,12 +643,6 @@ export async function deleteGroup(id: string): Promise<void> {
         headers: getHeaders(),
     });
     await handleResponse(res);
-}
-
-/** Sibling apps whose suites should also run when one app in the group changes. */
-export async function getGroupImpactScope(id: string): Promise<any> {
-    const res = await fetch(`${API_BASE}/groups/${id}/impact-scope`, { headers: getHeaders() });
-    return handleResponse(res);
 }
 
 // ── Cross-App Dependency Analysis ────────────────────────────────────────────
@@ -721,16 +705,6 @@ export interface CrossAppImpactItem {
     call_sites: string[];
 }
 
-export interface CrossAppImpact {
-    changed_files: string[];
-    directly_affected_app: string | null;
-    directly_affected_apps: string[];
-    affected_endpoints: string[];
-    cross_app_impact: CrossAppImpactItem[];
-    total_apps_affected: number;
-    run_all_test_suites: string[];
-}
-
 export async function getAppGroups(): Promise<AppGroup[]> {
     const res = await fetch(`${API_BASE}/dependency/groups`, { headers: getHeaders() });
     const data = await handleResponse(res);
@@ -761,18 +735,6 @@ export async function getDependencyGraph(id: string): Promise<DependencyGraphDat
 export async function getModuleGraph(projectId: string): Promise<DependencyGraphData> {
     const res = await fetch(`${API_BASE}/dependency/projects/${projectId}/module-graph`, {
         headers: getHeaders(),
-    });
-    return handleResponse(res);
-}
-
-export async function analyzeCrossAppImpact(
-    id: string,
-    changed_files: string[],
-): Promise<CrossAppImpact> {
-    const res = await fetch(`${API_BASE}/dependency/groups/${id}/impact`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ changed_files }),
     });
     return handleResponse(res);
 }
@@ -813,24 +775,6 @@ export interface HybridImpact {
     skipped_not_cloned?: string[];
     queued_runs?: QueuedRun[];
     error?: string;
-}
-
-export interface HybridGraphNode {
-    id: string;
-    type: 'app' | 'endpoint';
-    color: string;
-    app_role?: string;
-    test_suite?: string;
-    project_id?: string;
-    used_by?: string[];
-    shared?: boolean;
-    connections: number;
-}
-
-export interface HybridGraphEdge {
-    source: string | HybridGraphNode;
-    target: string | HybridGraphNode;
-    label: string;
 }
 
 /** Hybrid impact: Graphify intra-app blast radius + cross-app endpoint coupling. */
@@ -948,12 +892,7 @@ export async function createTicket(data: TicketInput): Promise<Ticket> {
     });
     return await handleResponse(res);
 }
-export async function updateTicket(id: string, data: TicketInput): Promise<Ticket> {
-    const res = await fetch(`${API_BASE}/tickets/${id}`, {
-        method: 'PUT', headers: getHeaders(), body: JSON.stringify(data),
-    });
-    return await handleResponse(res);
-}
+
 export async function deleteTicket(id: string): Promise<void> {
     await fetch(`${API_BASE}/tickets/${id}`, { method: 'DELETE', headers: getHeaders() });
 }
@@ -1227,30 +1166,6 @@ export async function pullProject(id: string): Promise<Project> {
     return body.project;
 }
 
-export async function getProjectStatus(id: string, checkRemote = false): Promise<any> {
-    const res = await fetch(
-        `${API_BASE}/projects/${id}/status?check_remote=${checkRemote}`,
-        { headers: getHeaders() },
-    );
-    return handleResponse(res);
-}
-
-/** Runs clone/pull → checkout → detect → validate → install. */
-export async function validateProject(
-    id: string,
-    opts: { device_id?: string; generate_yaml?: boolean } = {},
-): Promise<PreparationResult> {
-    const res = await fetch(`${API_BASE}/projects/${id}/validate`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({
-            device_id: opts.device_id ?? null,
-            generate_yaml: opts.generate_yaml ?? false,
-        }),
-    });
-    return handleResponse(res);
-}
-
 export interface PreparationTask {
     task_id?: string;
     project_id?: string;
@@ -1295,15 +1210,6 @@ export async function getPreparationStatus(id: string): Promise<PreparationTask>
     return handleResponse(res);
 }
 
-/** Scaffold an automation.yaml from the detected project type. */
-export async function generateAutomationYaml(id: string): Promise<{ project_type: string; content: string }> {
-    const res = await fetch(`${API_BASE}/projects/${id}/generate-yaml`, {
-        method: 'POST',
-        headers: getHeaders(),
-    });
-    return handleResponse(res);
-}
-
 export async function startRun(projectId: string, deviceId: string): Promise<string> {
     const res = await fetch(`${API_BASE}/automation/run`, {
         method: 'POST',
@@ -1312,29 +1218,6 @@ export async function startRun(projectId: string, deviceId: string): Promise<str
     });
     const data = await handleResponse(res);
     return data.run_id;
-}
-
-export async function getIntelligenceMetrics(): Promise<any> {
-    const res = await fetch(`${API_BASE}/intelligence/metrics`, { headers: getHeaders() });
-    return await handleResponse(res);
-}
-
-export async function getRecommendations(projectId: string, branch: string = "main"): Promise<any> {
-    const res = await fetch(`${API_BASE}/intelligence/recommend`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ project_id: projectId, branch })
-    });
-    return await handleResponse(res);
-}
-
-export async function askChat(query: string, context?: any): Promise<any> {
-    const res = await fetch(`${API_BASE}/intelligence/chat`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ query, context })
-    });
-    return await handleResponse(res);
 }
 
 export interface PullRequest {
@@ -1410,32 +1293,6 @@ export async function testPullRequest(
     return await handleResponse(res);
 }
 
-export interface GenerateScriptParams {
-    provider: string;          // ollama (local, no key) | openai | gemini | claude
-    api_key?: string;          // not needed for ollama
-    app_name: string;
-    requirements: string;
-    platform?: string;         // defaults server-side
-    framework?: string;
-    known_testids?: string[];  // real ids captured from the running app (grounding)
-    folded_testids?: string[];
-}
-
-export async function generateScript(
-    p: GenerateScriptParams,
-): Promise<{ test_script: string; automation_yaml: string }> {
-    const res = await fetch(`${API_BASE}/intelligence/generate-scripts`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({
-            platform: 'iOS',
-            framework: 'Appium + pytest (Python)',
-            ...p,
-        }),
-    });
-    return await handleResponse(res);
-}
-
 export interface ScenarioStepResult {
     step: string;
     ok: boolean;
@@ -1453,24 +1310,6 @@ export interface ScenarioRunResult {
     saved_to: string | null;
     script: string;
     steps: ScenarioStepResult[];
-}
-
-export async function runScenario(body: {
-    project_id: string;
-    steps: string[];
-    device_id: string;
-    bundle_id?: string;
-    name?: string;
-    save?: boolean;
-    env?: string;
-}): Promise<ScenarioRunResult> {
-    const res = await fetch(`${API_BASE}/scenario/run`, {
-        method: 'POST',
-        headers: getHeaders(),
-        // Same Staging/Live toggle the cross-app suites use, so one switch governs both.
-        body: JSON.stringify({ env: localStorage.getItem('flowEnv') || 'staging', ...body }),
-    });
-    return await handleResponse(res);
 }
 
 /** One progress event from a streaming scenario run. */
@@ -1592,25 +1431,6 @@ export async function runScenarioStream(
     }
 }
 
-export interface LocatorCapture {
-    known_testids: string[];
-    folded_testids: string[];
-    gaps: { type: string; label: string | null; parent_id: string | null; suggested_testid: string }[];
-}
-
-/** Capture the live locator catalog from a running app (grounds the generator). */
-export async function captureLocators(
-    deviceId: string,
-    bundleId: string,
-): Promise<LocatorCapture> {
-    const res = await fetch(`${API_BASE}/intelligence/capture-locators`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ device_id: deviceId, bundle_id: bundleId }),
-    });
-    return await handleResponse(res);
-}
-
 export async function cancelAllQueued(): Promise<{ cancelled: number; message: string }> {
     const res = await fetch(`${API_BASE}/automation/cancel-all-queued`, {
         method: 'POST',
@@ -1628,141 +1448,9 @@ export async function stopRun(runId: string): Promise<void> {
     await handleResponse(res);
 }
 
-export async function getLiveStatus(runId: string): Promise<any> {
-    const res = await fetch(`${API_BASE}/automation/status/${runId}`, { headers: getHeaders() });
-    return await handleResponse(res);
-}
-
-export interface AIRecommendation {
-    id: string;
-    project_id: string;
-    run_id: string | null;
-    type: string;
-    payload: any;
-    status: string;
-    feedback: string | null;
-    created_at: string;
-}
-
-export async function getRecommendationsList(status?: string): Promise<AIRecommendation[]> {
-    const url = status ? `${API_BASE}/intelligence/recommendations?status=${status}` : `${API_BASE}/intelligence/recommendations`;
-    const res = await fetch(url, { headers: getHeaders() });
-    const data = await handleResponse(res);
-    return data.recommendations;
-}
-
-export async function updateRecommendationStatus(id: string, status: string, feedback?: string): Promise<void> {
-    const res = await fetch(`${API_BASE}/intelligence/recommendations/${id}`, {
-        method: 'PUT',
-        headers: getHeaders(),
-        body: JSON.stringify({ status, feedback })
-    });
-    await handleResponse(res);
-}
-
-export async function generateTestPlan(projectId: string, deviceId: string = ''): Promise<any> {
-    const res = await fetch(`${API_BASE}/automation/plan`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ project_id: projectId, device_id: deviceId })
-    });
-    return await handleResponse(res);
-}
-export async function getOpsMetrics(): Promise<any> {
-    const res = await fetch(`${API_BASE}/ops/metrics`, { headers: getHeaders() });
-    return await handleResponse(res);
-}
-export async function getOpsAlerts(): Promise<any> {
-    const res = await fetch(`${API_BASE}/ops/alerts`, { headers: getHeaders() });
-    return await handleResponse(res);
-}
-export async function getOpsAgents(): Promise<any> {
-    const res = await fetch(`${API_BASE}/ops/agents`, { headers: getHeaders() });
-    return await handleResponse(res);
-}
-export async function drainOpsAgent(agentId: string): Promise<any> {
-    const res = await fetch(`${API_BASE}/ops/agents/${agentId}/drain`, { method: 'POST', headers: getHeaders() });
-    return await handleResponse(res);
-}
 export async function getAuditLogs(): Promise<any> {
     const res = await fetch(`${API_BASE}/ops/audit`, { headers: getHeaders() });
     return await handleResponse(res);
-}
-export async function getFullHealth(): Promise<any> {
-    const res = await fetch(`${API_BASE}/ops/health/full`, { headers: getHeaders() });
-    return await handleResponse(res);
-}
-export async function getQuickHealth(): Promise<any> {
-    const res = await fetch(`${API_BASE}/ops/health`);
-    return await handleResponse(res);
-}
-
-// ── Script Editor: Project File API ─────────────────────────────────────────
-
-export interface FileEntry {
-    path: string;
-    name: string;
-    type: 'file' | 'directory';
-}
-
-export async function getProjectFiles(projectId: string): Promise<FileEntry[]> {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/files`, {
-        headers: getHeaders(),
-    });
-    const data = await handleResponse(res);
-    return data.files as FileEntry[];
-}
-
-export async function getProjectFileContent(
-    projectId: string,
-    filePath: string,
-): Promise<string> {
-    // The backend returns PlainTextResponse, not JSON, so we use res.text().
-    const res = await fetch(
-        `${API_BASE}/projects/${projectId}/files/${encodeURIComponent(filePath)}`,
-        { headers: getHeaders(false) },
-    );
-    if (res.status === 401) {
-        setAuthToken(null);
-        window.location.href = '/login';
-        throw new Error('Unauthorized');
-    }
-    if (!res.ok) {
-        throw new Error(`Failed to load file: ${res.status}`);
-    }
-    return res.text();
-}
-
-export async function saveProjectFile(
-    projectId: string,
-    filePath: string,
-    content: string,
-): Promise<void> {
-    const res = await fetch(
-        `${API_BASE}/projects/${projectId}/files/${encodeURIComponent(filePath)}`,
-        {
-            method: 'PUT',
-            headers: getHeaders(),
-            body: JSON.stringify({ content }),
-        },
-    );
-    await handleResponse(res);
-}
-
-export async function runProjectFile(
-    projectId: string,
-    filePath: string,
-    deviceId: string,
-): Promise<{ run_id: string }> {
-    const res = await fetch(
-        `${API_BASE}/projects/${projectId}/files/${encodeURIComponent(filePath)}/run`,
-        {
-            method: 'POST',
-            headers: getHeaders(),
-            body: JSON.stringify({ device_id: deviceId }),
-        },
-    );
-    return handleResponse(res);
 }
 
 // ── AI Chat Session API ───────────────────────────────────────────────────
@@ -1809,20 +1497,6 @@ export async function deleteSession(sessionId: string): Promise<void> {
         headers: getHeaders(),
     });
     await handleResponse(res);
-}
-
-/**
- * Fallback: synchronous (non-streaming) chat via POST.
- * Used when EventSource streaming fails.
- */
-export async function sendChat(query: string, context?: Record<string, unknown>): Promise<string> {
-    const res = await fetch(`${API_BASE}/intelligence/chat`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({ query, context: context ?? {} }),
-    });
-    const data = await handleResponse(res);
-    return data.reply as string;
 }
 
 // ── Latest build: update notification + one-click deploy to every device ─────
@@ -1969,7 +1643,7 @@ export async function getRunnerState(): Promise<RunnerState> {
 }
 
 /** Start or stop the execution agent process. The backend runs the same
- *  start-agent.sh / pid-file teardown the terminal does. */
+ *  scripts/start-agent.sh / pid-file teardown the terminal does. */
 export async function setRunnerRunning(on: boolean): Promise<RunnerState> {
     const res = await fetch(`${API_BASE}/agents/runner/${on ? 'start' : 'stop'}`, {
         method: 'POST', headers: getHeaders(),

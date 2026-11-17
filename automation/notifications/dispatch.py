@@ -7,8 +7,8 @@ Common: DASHBOARD_URL (for links)
 All calls are best-effort and no-op when unconfigured, so callers can invoke them
 unconditionally.
 """
-
 from __future__ import annotations
+
 
 import logging
 import os
@@ -41,18 +41,6 @@ def send_slack_text(text: str) -> bool:
     except Exception as e:
         logger.warning("Slack post failed: %s", e)
         return False
-
-
-def notify_run_result(run_id: str, test_name: str, status: str, rca_data: Optional[dict] = None) -> None:
-    """Rich Slack card for a run result (uses the existing Notifier)."""
-    if not slack_enabled():
-        return
-    from automation.notifications.notifier import Notifier
-    try:
-        Notifier(slack_webhook=os.getenv("SLACK_WEBHOOK_URL")).notify_all(
-            run_id, test_name, status, rca_data or {}, dashboard_url())
-    except Exception as e:
-        logger.warning("Slack notify failed: %s", e)
 
 
 def create_jira_ticket(summary: str, description: str, evidence_path: Optional[str] = None) -> Optional[str]:

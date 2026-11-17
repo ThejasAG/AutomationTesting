@@ -1,7 +1,6 @@
 """Report Generator Module"""
 
 from datetime import datetime
-from typing import Optional
 from jinja2 import Template
 
 REPORT_TEMPLATE = """# AI-Powered RCA Report
@@ -170,8 +169,3 @@ class ReportGenerator:
 </body>
 </html>
 """
-
-    def generate_pdf(self, html_content: str, output_path: str) -> Optional[str]:
-        """Generate PDF from HTML"""
-        # Placeholder for PDF generation
-        return None

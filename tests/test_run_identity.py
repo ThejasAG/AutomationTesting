@@ -85,7 +85,7 @@ def _drain(gen):
     return seen
 
 
-def test_a_supplied_run_id_creates_no_second_testrun(env, monkeypatch):
+def test_a_supplied_run_id_creates_no_second_testrun(env, monkeypatch, tmp_path):
     """Real path: scenario_events() itself, with the injected store trapped."""
     finished = []
 
@@ -100,7 +100,7 @@ def test_a_supplied_run_id_creates_no_second_testrun(env, monkeypatch):
                              name="Login", save=False, prepare=False,
                              bundle_id="com.example.app")
     seen = _drain(sc.scenario_events(req, "com.example.app", ["tap Login"],
-                                     str(env.bind.url), run_id="job-abc"))
+                                     str(tmp_path), run_id="job-abc"))
 
     assert "error" in seen, "the boot failure should still have reached the finish path"
     assert finished == [], (
@@ -108,7 +108,7 @@ def test_a_supplied_run_id_creates_no_second_testrun(env, monkeypatch):
         f"reports finish over the status API; got {finished}")
 
 
-def test_backend_callers_still_get_their_own_testrun(env, monkeypatch):
+def test_backend_callers_still_get_their_own_testrun(env, monkeypatch, tmp_path):
     """The Scenarios tab has no run record of its own; it must keep creating one."""
     started, finished = [], []
 
@@ -122,7 +122,7 @@ def test_backend_callers_still_get_their_own_testrun(env, monkeypatch):
     req = sc.ScenarioRequest(project_id="proj-1", steps=["tap Login"], device_id="UDID-X",
                              name="Login", save=False, prepare=False,
                              bundle_id="com.example.app")
-    seen = _drain(sc.scenario_events(req, "com.example.app", ["tap Login"], str(env.bind.url)))
+    seen = _drain(sc.scenario_events(req, "com.example.app", ["tap Login"], str(tmp_path)))
 
     assert "run" in seen, "the backend caller must still be told its run id"
     assert len(started) == 1, "backend-local behaviour must be unchanged"

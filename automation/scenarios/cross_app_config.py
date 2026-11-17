@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 _CONFIG_PATH = Path(os.getenv(
     "CROSS_APP_CONFIG_PATH",
-    Path(__file__).resolve().parents[2] / "cross_app_config.json",
+    Path(__file__).resolve().parents[2] / "config" / "cross_app_config.json",
 ))
 
 ROLES = ("consumer", "participant", "waiter", "kitchen")

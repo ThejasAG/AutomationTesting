@@ -4,7 +4,7 @@ import signal
 import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import time
@@ -99,24 +99,6 @@ def heartbeat(agent_id: str, req: HeartbeatRequest, db: Session = Depends(get_db
     
     return {"status": "ok"}
 
-@router.get("")
-def list_agents(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
-    agents = db.query(ExecutionAgent).order_by(ExecutionAgent.created_at.desc()).all()
-    
-    result = []
-    for a in agents:
-        result.append({
-            "id": a.id,
-            "hostname": a.hostname,
-            "os": a.os,
-            "status": a.status,
-            "last_heartbeat": a.last_heartbeat.isoformat() if a.last_heartbeat else None,
-            "capabilities": a.capabilities,
-            "connected_devices": a.connected_devices
-        })
-    return result
-
-
 # ── Runner control: start/stop the execution agent process from the dashboard ──
 #
 # Without this the agent is only startable from a terminal, so queued jobs sat
@@ -168,17 +150,17 @@ def runner_status(current_user=Depends(get_current_user)):
 
 @router.post("/runner/start")
 def runner_start(current_user=Depends(get_current_user)):
-    """Start the execution agent. Idempotent — start-agent.sh no-ops if it is up."""
+    """Start the execution agent. Idempotent — scripts/start-agent.sh no-ops if it is up."""
     if _agent_pid() is not None:
         return {**_runner_state(), "message": "already running"}
-    script = os.path.join(_PROJECT_ROOT, "start-agent.sh")
+    script = os.path.join(_PROJECT_ROOT, "scripts", "start-agent.sh")
     try:
         proc = subprocess.run([script], cwd=_PROJECT_ROOT, capture_output=True,
                               text=True, timeout=60)
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Agent did not start within 60s")
     except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Could not run start-agent.sh: {e}")
+        raise HTTPException(status_code=500, detail=f"Could not run scripts/start-agent.sh: {e}")
 
     state = _runner_state()
     if not state["running"]:
@@ -231,10 +213,6 @@ def runner_stop(current_user=Depends(get_current_user)):
 
 class ReservationRequest(BaseModel):
     run_id: str
-
-
-class WdaPortRequest(BaseModel):
-    preferred: Optional[int] = None
 
 
 def _own_device(agent, device_id_or_udid: str, db: Session, by_udid: bool = False):
@@ -362,25 +340,3 @@ def release_my_reservation(device_id: str, req: ReservationRequest,
         return {"device_id": row.id, "released": False}
     return {"device_id": row.id, "released": True}
 
-
-@router.post("/me/devices/{device_id}/wda-port")
-def allocate_my_wda_port(device_id: str, req: WdaPortRequest = None,
-                         db: Session = Depends(get_db),
-                         agent=Depends(require_authenticated_agent)):
-    """The machine-scoped WDA port for one of my devices.
-
-    An explicit `preferred` still wins outright, so the cross-app orchestrator's
-    pinned 8100/8101 is unaffected. Otherwise the existing atomic lowest-free-port
-    allocation runs, scoped to this machine.
-    """
-    from automation.device_manager.reservation import ensure_wda_port
-
-    row = _own_device(agent, device_id, db)
-    preferred = (req.preferred if req else None)
-    if preferred:
-        return {"device_id": row.id, "port": preferred, "preferred": True}
-    port = ensure_wda_port(row.id, db=db)
-    if port is None:
-        raise HTTPException(status_code=503,
-                            detail="No WDA port could be allocated on this machine.")
-    return {"device_id": row.id, "port": port, "preferred": False}

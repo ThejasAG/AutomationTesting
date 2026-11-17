@@ -184,16 +184,12 @@ def test_artifact_metadata_records_branch_commit_and_environment(tmp_path):
     app_builder._write_artifact_metadata(
         app, repo_path=str(tmp_path), commit="abc123", environment="staging",
         bundle_id="org.vyapy.sarls.vyaconsumerstaging", configuration="Debug")
-    meta = app_builder.artifact_metadata(app)
+    meta = json.loads(open(os.path.join(os.path.dirname(app), os.path.basename(app)
+                                        + app_builder.METADATA_NAME)).read())
     assert meta["environment"] == "staging"
     assert meta["commit"] == "abc123"
     assert meta["bundle_id"] == "org.vyapy.sarls.vyaconsumerstaging"
     assert meta["built_at"]
-
-
-def test_metadata_is_absent_not_fatal_for_older_artifacts(tmp_path):
-    app = _fake_app(tmp_path, "a.b.c")
-    assert app_builder.artifact_metadata(app) == {}
 
 
 # ── artifact selection (the production/staging mix-up) ───────────────────────

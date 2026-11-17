@@ -134,28 +134,6 @@ class LoadReport:
     final_state: List[str] = field(default_factory=list)
     context: Dict[str, str] = field(default_factory=dict)
 
-    @property
-    def is_problem(self) -> bool:
-        return self.result in LoadResult.PROBLEMS
-
-    def as_recovered(self, attempt: int) -> "LoadReport":
-        """Re-file an earlier issue as RECOVERED once a retry succeeded.
-
-        Existing flows already retry (clear overlays, tap again). Without this the
-        first attempt's issue would stand on the record and a feature that DID
-        work would read as permanently broken. Keeps the original evidence — the
-        first attempt genuinely did stall — but stops calling it a failure.
-        """
-        return LoadReport(
-            result=LoadResult.RECOVERED, expectation=self.expectation,
-            waited=self.waited, expected_all=self.expected_all,
-            expected_any=self.expected_any, missing=list(self.missing),
-            spinners=list(self.spinners), progressed=self.progressed,
-            samples=self.samples, sample_errors=self.sample_errors,
-            first_state=list(self.first_state), final_state=list(self.final_state),
-            context={**self.context, "recovered_on_attempt": str(attempt),
-                     "first_attempt_was": self.result})
-
     def to_note(self) -> str:
         """One compact block for the run notes / Live Steps panel."""
         head = {

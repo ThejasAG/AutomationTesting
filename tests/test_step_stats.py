@@ -22,7 +22,7 @@ def test_only_step_lines_are_counted():
     """[where], [SLOW LOAD] and indented notes are commentary, not steps."""
     s = step_stats(REAL)
     assert (s.passed, s.failed, s.total) == (4, 1, 5)
-    assert s.pass_pct == 80.0 and s.fail_pct == 20.0
+    assert s.pass_pct == 80.0
 
 
 def test_summary_reads_as_a_report_cell():
@@ -42,7 +42,7 @@ def test_no_steps_is_not_zero_percent():
     """'nothing ran' and 'everything failed' are different failures — do not
     report the first as 0%."""
     s = step_stats([])
-    assert s.total == 0 and s.pass_pct is None and s.fail_pct is None
+    assert s.total == 0 and s.pass_pct is None
     assert s.summary() == "no steps recorded"
 
 

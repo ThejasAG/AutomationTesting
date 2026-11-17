@@ -259,6 +259,6 @@ def test_me_endpoints_use_the_authenticated_agent():
     src = inspect.getsource(agents)
     assert "/me/devices/" in src
     for fn in ("get_my_device", "reserve_my_device", "activate_my_reservation",
-               "release_my_reservation", "allocate_my_wda_port"):
+               "release_my_reservation"):
         assert "require_authenticated_agent" in inspect.getsource(getattr(agents, fn)), \
             f"{fn} must depend on the authenticated agent"

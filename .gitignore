@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Virtual environment
 .venv/
@@ -23,13 +24,23 @@ node_modules/
 
 # Secrets — never commit
 .env
-automation/android_bot/bot_queue.json
 cross_app_config.json
 
 
 # Supabase staging credentials — 4G.6.0 validation only, never committed
 .env.supabase-staging
-logs/mcp-screenshots/
 
 # Claude Code: per-user approvals; agent worktrees live outside the repo
 .claude/settings.local.json
+
+# Runtime output — never commit (logs can carry staging tokens)
+logs/
+
+# App source checkouts cloned by the platform (GBs; each is its own git repo)
+repos/
+
+# macOS
+.DS_Store
+
+# graphify's working output (its graph.json is kept as automation/knowledge/app_graph.json)
+graphify-out/

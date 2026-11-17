@@ -47,9 +47,11 @@ def box(tmp_path):
     for d in (main / "repos" / "app" / "App", wt / "automation" / "scenarios", wt / "tests",
               wt / "automation" / "claude_code", sdir):
         d.mkdir(parents=True, exist_ok=True)
-    (main / ".env").write_text("SECRET=1\n")
+    (main / "config").mkdir()
+    (wt / "config").mkdir()
+    (main / "config" / ".env").write_text("SECRET=1\n")
     os.symlink(main / "repos", wt / "repos")
-    os.symlink(main / ".env", wt / ".env")
+    os.symlink(main / "config" / ".env", wt / "config" / ".env")
     env = {"AGENT_WORKTREE": str(wt), "AGENT_SESSION_DIR": str(sdir), "AGENT_MAIN_ROOT": str(main)}
     return {"main": main, "wt": wt, "sdir": sdir, "env": env}
 
@@ -70,13 +72,16 @@ def test_guard_blocks_the_app_checkouts_even_through_the_worktree_link(box):
 
 
 def test_guard_blocks_secrets_its_own_guardrails_and_the_run_ledger(box):
-    assert "secrets" in _check(box, "Read", file_path=str(box["wt"] / ".env"))
-    assert "secrets" in _check(box, "Edit", file_path=str(box["main"] / ".env"))
+    assert "secrets" in _check(box, "Read", file_path=str(box["wt"] / "config" / ".env"))
+    assert "secrets" in _check(box, "Edit", file_path=str(box["main"] / "config" / ".env"))
     assert "guardrails" in _check(box, "Edit", file_path=str(box["wt"] / "automation" / "claude_code" / "gates.py"))
     assert "guardrails" in _check(box, "Write", file_path=str(box["wt"] / "scripts" / "agent_tools.py"))
     assert "ledger" in _check(box, "Write", file_path=str(box["sdir"] / "runs.jsonl"))
     assert "edit only" in _check(box, "Edit", file_path=str(box["main"] / "AGENTS.md"))
     assert "edit only" in _check(box, "Edit", file_path=str(box["wt"] / "start.sh"))
+    # the platform commands moved into scripts/ and stay out of the agent's reach
+    for cmd in ("start.sh", "stop.sh", "status.sh", "install.py"):
+        assert "guardrails" in _check(box, "Edit", file_path=str(box["wt"] / "scripts" / cmd))
 
 
 @pytest.mark.parametrize("cmd,ok", [
@@ -715,3 +720,32 @@ def test_a_running_agent_session_does_not_block_the_backend_restart(monkeypatch,
                                                                          "status": "running"})()])
     with pytest.raises(session.Busy, match="is running"):
         session.restart_backend_if_idle()
+
+
+def test_a_worktree_of_an_older_commit_gets_the_secrets_linked_at_both_spots(tmp_path, monkeypatch):
+    """Secrets moved to config/ on 2026-11-17. A worktree of a commit from before has no
+    config/ folder and its code reads them at the root: both spots are linked, and
+    making the link must not crash (it raised FileNotFoundError once)."""
+    main, wt = tmp_path / "main", tmp_path / "wt"
+    (main / "config").mkdir(parents=True)
+    (main / "config" / ".env").write_text("SECRET=1\n")
+    (main / "config" / "cross_app_config.json").write_text("{}")
+    wt.mkdir()                                   # an old checkout: no config/ at all
+    monkeypatch.setattr(paths, "MAIN_ROOT", str(main))
+    runner.link_runtime(str(wt))
+    for rel in ("config/.env", ".env", "config/cross_app_config.json", "cross_app_config.json"):
+        assert os.path.islink(wt / rel), rel
+        assert os.path.realpath(wt / rel).startswith(str(main / "config"))
+
+
+def test_the_guard_blocks_the_legacy_secret_spots_too(box):
+    os.symlink(box["main"] / "config" / ".env", box["wt"] / ".env")
+    assert "secrets" in _check(box, "Read", file_path=str(box["wt"] / ".env"))
+    assert "secrets" in _check(box, "Edit", file_path=str(box["wt"] / ".env"))
+
+
+def test_session_settings_deny_reading_the_legacy_secret_spots():
+    s = runner.session_settings("/w", "/s")
+    deny = s["permissions"]["deny"]
+    assert "Read(//w/.env)" in deny and "Read(//w/config/.env)" in deny   # Claude Code's absolute form
+    assert "Read(//w/cross_app_config.json)" in deny

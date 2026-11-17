@@ -12,7 +12,7 @@ NODEBIN="$(dirname "$(command -v node 2>/dev/null)" 2>/dev/null)"
 [ ! -x "$NODEBIN/node" ] && NODEBIN="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1)"
 [ -n "$NODEBIN" ] && export PATH="$NODEBIN:$PATH"
 
-# On stop (./stop.sh sends TERM), take the running backend down with us.
+# On stop (scripts/stop.sh sends TERM), take the running backend down with us.
 trap 'kill "$(cat logs/backend.pid 2>/dev/null)" 2>/dev/null; rm -f logs/supervisor.pid; exit 0' TERM INT
 
 while true; do

@@ -31,7 +31,8 @@ from automation.claude_code import impact
 
 EDITABLE_DIRS = ("automation/", "tests/", "scripts/")
 # The agent's own guardrails: changing them would let a session loosen its limits.
-PROTECTED = ("automation/claude_code/", ".claude/", "scripts/agent_tools.py")
+PROTECTED = ("automation/claude_code/", ".claude/", "scripts/agent_tools.py", "scripts/start.sh",
+             "scripts/stop.sh", "scripts/status.sh", "scripts/install.py", "scripts/supervise_backend.sh")
 FLOWS_FILE = impact.FLOWS_FILE
 DEVICE_CODE = ("automation/scenarios/", "automation/intelligence/", "automation/projects/")
 

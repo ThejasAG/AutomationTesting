@@ -165,8 +165,6 @@ def agent(db, monkeypatch):
     monkeypatch.setattr(agent_main, "_PROCESSED_JOB_IDS", set())
     monkeypatch.setattr(agent_main, "report_status", lambda *a, **k: None)
     monkeypatch.setattr(agent_main, "_upload_evidence_with_retry", lambda *a, **k: None)
-    monkeypatch.setattr(agent_main, "_start_screen_capture", lambda *a, **k: (None, None))
-    monkeypatch.setattr(agent_main, "_stop_screen_capture", lambda *a, **k: None)
     monkeypatch.setattr(agent_main.proctree, "reap_job", lambda *a, **k: 0)
 
     class _Cfg:                       # minimal automation.yaml stand-in

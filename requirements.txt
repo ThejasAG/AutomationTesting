@@ -44,9 +44,6 @@ PyYAML>=6.0
 requests>=2.34
 httpx>=0.28
 
-# ── Claude (autonomous test agent: automation/agentic/) ─────────────────────
-anthropic>=1.11
-
 # ── Reporting ───────────────────────────────────────────────────────────────
 Jinja2>=3.1
 Markdown>=3.5                 # reports/generator.py imports it inside generate_html()
@@ -65,3 +62,5 @@ pytest-xdist>=3.6        # the session checks run the suite in parallel (gates.U
 #                   it with a try/except. Without it the Module (files) graph is off.
 #   redis           the service is used, but nothing imports the Python client
 #   python-dateutil declared historically, zero usages
+#   anthropic       the AI runs on the Claude Code CLI (`claude -p`); nothing imports the SDK
+#   fb-idb          installed with pipx (docs/INSTALL.md); idb_worker.py runs under its interpreter

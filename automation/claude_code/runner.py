@@ -8,7 +8,7 @@ this). Steps:
  1. lock (one session at a time); for device work make sure the rig is up and wait
     while a person's run is on the simulators;
  2. a git worktree on a new branch `agent/<stamp>-<kind>` from HEAD, with the
-    untracked runtime files (.env, cross_app_config.json, repos/, .venv) linked in;
+    untracked runtime files (config/.env, config/cross_app_config.json, repos/, .venv) linked in;
  3. `claude -p` in that worktree on the logged-in Claude plan (ANTHROPIC_API_KEY is
     removed from its environment), with the session's permission rules and the
     guard hook, until it ends, hits its time limit or is stopped;
@@ -97,9 +97,9 @@ def ensure_rig(sdir: str) -> bool:
     if preflight.all_ok(rig):
         return True
     log(sdir, "rig down (" + "; ".join(f"{c['name']}: {c['detail']}" for c in rig if not c["ok"])
-        + ") — running ./start.sh")
+        + ") — running scripts/start.sh")
     with open(os.path.join(sdir, "start.log"), "w") as f:
-        subprocess.run(["./start.sh"], cwd=paths.MAIN_ROOT, stdout=f, stderr=subprocess.STDOUT,
+        subprocess.run(["scripts/start.sh"], cwd=paths.MAIN_ROOT, stdout=f, stderr=subprocess.STDOUT,
                        timeout=1200)
     return preflight.all_ok([c for c in preflight.run("staging") if c["name"] != "Staging backend"])
 
@@ -173,11 +173,20 @@ def continuing(row: Dict[str, Any]) -> bool:
 def link_runtime(wt: str) -> None:
     for name in paths.WORKTREE_LINKS:
         src = os.path.join(paths.MAIN_ROOT, name)
-        dst = os.path.join(wt, name)
         if not os.path.exists(src):
             continue
+        # A worktree of an older commit has no config/ folder (and reads the secrets
+        # at the root): make the folder, and link the legacy spot as well.
+        for rel in (name, paths.LEGACY_LINKS.get(name)):
+            if not rel:
+                continue
+            dst = os.path.join(wt, rel)
+            if not os.path.lexists(dst):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.symlink(src, dst)
+        dst = os.path.join(wt, name)
         if not os.path.lexists(dst):
-            os.symlink(src, dst)
+            continue
         elif os.path.isdir(dst) and not os.path.islink(dst) and os.path.isdir(src):
             # A folder git tracks part of (repos/ holds a few tracked entries, while
             # the app checkouts in it are untracked): link what the worktree lacks.
@@ -208,7 +217,8 @@ def session_settings(wt: str, sdir: str) -> Dict[str, Any]:
              "Bash(git log *)", "Bash(git show *)", f"Write({s}/**)", f"Edit({s}/**)"]
     for d in ("automation", "tests", "scripts"):
         allow += [f"Edit({w}/{d}/**)", f"Write({w}/{d}/**)"]
-    deny = [f"Read({r}/{f})" for r in (w, m) for f in (".env", ".env.*", "cross_app_config.json")]
+    deny = [f"Read({r}/{f})" for r in (w, m) for f in ("config/.env", "config/.env.*", "config/cross_app_config.json",
+                                                       ".env", ".env.*", "cross_app_config.json")]
     deny += [f"Edit({m}/repos/**)", f"Write({m}/repos/**)", "WebFetch", "WebSearch"]
     hook = f"{paths.PYTHON} {paths.GUARD}"
     return {
@@ -451,7 +461,8 @@ def changed_paths(wt: str) -> List[str]:
         p = line[3:].strip().strip('"')
         if not p:
             continue
-        if p in paths.WORKTREE_LINKS or p.split("/", 1)[0] in paths.WORKTREE_LINKS:
+        links = (*paths.WORKTREE_LINKS, *paths.LEGACY_LINKS.values())
+        if p in links or p.split("/", 1)[0] in links:
             continue
         found.append(p)
     return found
@@ -648,7 +659,7 @@ def main(sid: str) -> int:
         if kind in DEVICE_KINDS:
             phase(sid, sdir, "checking the rig (Appium, simulators, Metro)")
             if not ensure_rig(sdir):
-                log(sdir, "rig still not ready after ./start.sh — the session will wait for it")
+                log(sdir, "rig still not ready after scripts/start.sh — the session will wait for it")
             if not wait_until_idle(sid, sdir):
                 if _stop_requested(sid):
                     final = "stopped"

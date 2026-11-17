@@ -611,7 +611,8 @@ def test_close_table_reopens_a_folded_card_to_check_and_repays(runner, monkeypat
 
 def test_close_table_does_not_pay_twice_when_nothing_is_left_to_pay(runner, monkeypatch):
     """The payment went through but Close Table is slow: wait, never re-pay."""
-    s = Settling(appears_after=30)          # later than the first 15s window
+    # later than the first 15s window: 90 reads at _wait_els' 0.2s pace (2026-11-17)
+    s = Settling(appears_after=90)
     r = runner(s)
     monkeypatch.setattr(r, "_pay_business", lambda m, n: pytest.fail("paid twice"))
     notes = []

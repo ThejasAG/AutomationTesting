@@ -63,7 +63,6 @@ def test_01_acquire_a_free_device(db):
     assert r.reserved_by == "run-1"
     assert r.reserved_state == res.STATE_RESERVED
     assert isinstance(r.reserved_at, datetime)
-    assert r.is_held
 
 
 def test_02_a_second_run_is_blocked(db):

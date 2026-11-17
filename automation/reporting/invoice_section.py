@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from automation import formulas
 from automation.reporting.step_tables import tables_of
 
 _INVOICE = re.compile(r"^(?P<inv>Event invoice \(iPad\)|Invoice of the (?P<who>\w+) \(phone\)) — "
@@ -63,8 +64,8 @@ def eur(v: Optional[float]) -> str:
     return "—" if v is None else f"€{v:.2f}"
 
 
-def _same(a: Optional[float], b: Optional[float], tol: float = 0.011) -> Optional[bool]:
-    return None if a is None or b is None else abs(a - b) <= tol
+def _same(a: Optional[float], b: Optional[float]) -> Optional[bool]:
+    return formulas.same(a, b)
 
 
 def _reasons(rec: Dict[str, Any]) -> List[str]:
@@ -244,9 +245,9 @@ def build(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     printed = [f for f in figs.values() if f["printed"] is not None]
     printed_total = round(sum(f["printed"] for f in printed), 2) if printed else None
     printed_of = round(sum(f["total"] or 0.0 for f in printed), 2) if printed else None
-    over = any(f["printed_ok"] is not True and f["printed"] > (f["total"] or 0) + 0.011
+    over = any(f["printed_ok"] is not True and f["printed"] > (f["total"] or 0) + formulas.TOL
                for f in printed)
-    short = any(f["printed_ok"] is not True and f["printed"] < (f["total"] or 0) - 0.011
+    short = any(f["printed_ok"] is not True and f["printed"] < (f["total"] or 0) - formulas.TOL
                 for f in printed)
 
     # VAT, section by section, as the invoice prints it.
@@ -281,8 +282,8 @@ def build(records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     # a little above the bill; the table closed in the run.
     due = round(sum(f["due"] for f in figs.values()), 2)
     e_change = [x for x in paid["pays"] if x["e_payment"] and x["handed"] is not None
-                and x["amount"] is not None and x["handed"] - x["amount"] >= 0.005]
-    change = round(sum(x["handed"] - x["amount"] for x in e_change), 2)
+                and x["amount"] is not None and formulas.change(x["handed"], x["amount"]) >= formulas.TOL]
+    change = round(sum(formulas.change(x["handed"], x["amount"]) for x in e_change), 2)
     closed = bool(close) and "closed" in str(close[2] if len(close) > 2 else "")
     explained = not due or _same(change, due)
     outstanding = {"due": due, "explained": bool(explained), "closed": closed,

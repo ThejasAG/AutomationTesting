@@ -1314,11 +1314,6 @@ class PreparationTracker:
         self._tasks: Dict[str, Dict[str, Any]] = {}  # project_id -> state
         self._lock = threading.Lock()
 
-    def is_running(self, project_id: str) -> bool:
-        with self._lock:
-            t = self._tasks.get(project_id)
-            return bool(t and t["status"] == "running")
-
     def start(
         self,
         project_id: str,

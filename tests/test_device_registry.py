@@ -127,16 +127,6 @@ def test_uniqueness_is_machine_plus_udid_not_udid(registry):
         db.close()
 
 
-def test_devices_for_machine_separates_the_two_macs(registry):
-    svc, _ = registry
-    svc.sync_agent_devices("agent-a", [_dev("UDID-1"), _dev("UDID-2")], "mac-a")
-    svc.sync_agent_devices("agent-b", [_dev("UDID-3")], "mac-b")
-
-    assert {d.id for d in svc.devices_for_machine("agent-a")} == {"UDID-1", "UDID-2"}
-    assert {d.id for d in svc.devices_for_machine("agent-b")} == {"UDID-3"}
-    assert svc.devices_for_machine("agent-c") == []
-
-
 # ── Restart / hydration ──────────────────────────────────────────────────────
 
 def test_devices_survive_a_backend_restart(registry):
@@ -215,30 +205,6 @@ def test_local_machine_id_falls_back_when_the_database_is_unreachable(monkeypatc
     monkeypatch.setattr(cfg, "SessionLocal",
                         lambda: (_ for _ in ()).throw(RuntimeError("db down")))
     assert dm.local_machine_id().startswith("local:")
-
-
-def test_backend_local_device_persists_under_the_local_machine(registry):
-    svc, Session = registry
-    svc.register_local_device("UDID-LOCAL", "iPhone 16 Pro")
-    row = _rows(Session)[0]
-    assert row.machine_id == dm.local_machine_id()
-    assert row.provider == "local", "existing provider semantics unchanged"
-    assert row.hostname
-
-
-def test_backend_local_and_agent_device_with_the_same_udid_are_distinct(registry):
-    """The explicitly required case: backend-local iPhone X vs agent-Mac-B iPhone X."""
-    svc, Session = registry
-    svc.register_local_device("UDID-SHARED", "iPhone X")
-    svc.sync_agent_devices("agent-mac-b", [_dev("UDID-SHARED", name="iPhone X")], "mac-b")
-
-    rows = _rows(Session)
-    assert len(rows) == 2, "one physical device per machine, not one merged row"
-    by_machine = {r.machine_id: r for r in rows}
-    assert dm.local_machine_id() in by_machine
-    assert "agent-mac-b" in by_machine
-    assert by_machine[dm.local_machine_id()].provider == "local"
-    assert by_machine["agent-mac-b"].provider == "agent-mac-b"
 
 
 # ── Machine identity stability ───────────────────────────────────────────────
@@ -421,30 +387,6 @@ def test_backend_row_is_never_a_polling_worker(registry, monkeypatch):
         db.close()
 
 
-def test_colocated_backend_and_agent_write_one_device_row(registry, monkeypatch):
-    """The duplicate this phase exists to stop."""
-    svc, Session = registry
-    monkeypatch.setattr(dm, "_backend_machine_id", None)
-
-    backend_id = dm.ensure_backend_machine()
-    svc.register_local_device("UDID-SHARED", "iPhone 16 Pro")          # backend path
-    svc.sync_agent_devices(backend_id, [_dev("UDID-SHARED")],
-                           dm._local_hostname() + ".local")            # agent path
-
-    rows = [r for r in _rows(Session) if r.udid == "UDID-SHARED"]
-    assert len(rows) == 1, "one physical simulator, one row"
-    assert rows[0].machine_id == backend_id
-
-
-def test_provider_local_is_unchanged(registry, monkeypatch):
-    """provider is display/provider info, not machine identity — it must not move."""
-    svc, Session = registry
-    monkeypatch.setattr(dm, "_backend_machine_id", None)
-    dev = svc.register_local_device("UDID-LOCAL2", "iPhone 16 Pro")
-    assert dev.provider == "local"
-    assert _rows(Session)[0].provider == "local"
-
-
 def test_existing_local_scheme_rows_are_not_touched(registry, monkeypatch):
     """Historical `local:<hostname>` rows must survive — no destructive cleanup."""
     svc, Session = registry
@@ -457,8 +399,8 @@ def test_existing_local_scheme_rows_are_not_touched(registry, monkeypatch):
         db.close()
 
     monkeypatch.setattr(dm, "_backend_machine_id", None)
-    dm.ensure_backend_machine()
-    svc.register_local_device("UDID-NEW", "iPhone 16 Pro")
+    machine = dm.ensure_backend_machine()
+    svc.sync_agent_devices(machine, [_dev("UDID-NEW")], "mac-a")
 
     machines = {r.machine_id for r in _rows(Session)}
     assert "local:Admins-MacBook-Pro" in machines, "legacy row still present"
@@ -537,7 +479,7 @@ def test_machine_id_comes_from_the_registry_not_from_a_bare_udid(registry, monke
     assert dm.machine_for_local_device("") is None
 
     # Registered on this host -> the machine that owns it.
-    svc.register_local_device("UDID-KNOWN", "iPhone 16 Pro")
+    svc.sync_agent_devices(machine, [_dev("UDID-KNOWN")], "mac-a")
     assert dm.machine_for_local_device("UDID-KNOWN") == machine
 
 

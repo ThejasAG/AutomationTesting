@@ -30,7 +30,7 @@ brew tap facebook/fb && brew install idb-companion && pipx install fb-idb
 ```bash
 git clone <this repo> && cd AutomationTesting
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env          # then fill it in — see §2
+cp config/.env.example config/.env          # then fill it in — see §2
 mkdir -p ~/.vya-platform      # the database lives HERE, not in the repo
 (cd automation/dashboard && npm install)
 ```
@@ -58,7 +58,7 @@ clone. Then per app repo, one bundler each on its own port:
 cd repos/<project-id> && npx react-native start --port 8081
 ```
 
-Boot the devices the flows are PINNED to in `cross_app_config.json` — the platform
+Boot the devices the flows are PINNED to in `config/cross_app_config.json` — the platform
 does not use "whatever is booted":
 
 ```bash
@@ -133,7 +133,7 @@ and the PR planner then present fiction as analysis. There is no error — just 
 
 ## 3. Simulators
 
-Devices are pinned in `cross_app_config.json`; the platform does not "use whatever is
+Devices are pinned in `config/cross_app_config.json`; the platform does not "use whatever is
 booted". Boot the pinned consumer and waiter devices before a cross-app run.
 
 ## 4. App repos (`repos/<project-id>/`)

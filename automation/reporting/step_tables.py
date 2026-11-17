@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from automation import formulas
 from automation.scenarios.invoice_check import (MISMATCH_PREFIX, PRINTED_PAYMENTS_NOTE,
                                                 calc_of, is_printed_payments_gap)
 
@@ -85,7 +86,7 @@ def _w_add(step, text):
         return [name, qty, opts or "none", mode.strip().title(), ", ".join(people), "—", "—",
                 text, None]
     added = _num(m.group(1))
-    each = added / len(people) if people else None
+    each = formulas.even_share(added, len(people)) if people else None
     return [name, qty, opts or "none", mode.strip().title(), ", ".join(people), _eur(added),
             f"{_eur(each)} × {len(people)}" if each is not None else "—", "", added > 0]
 
@@ -108,19 +109,13 @@ def _w_comp(step, text):
         return [item, "—", "—", "—", "—", "—", "—", "—", "—", text, None]
     units, pct = int(m.group(1)), float(m.group(2))
     before, after = _num(m.group(3)), _num(m.group(4))
-    rate = pct / 100
     if m_spec and m_spec.group(1) == "all":
-        comp = round(before * rate, 2)
-        expected = round(before - comp, 2)
+        comp, expected = formulas.comp_whole_line(before, pct)
         return [item, f"{units} (whole line)", f"{pct:g}%",
                 _eur(before / units if units else None), _eur(comp), _eur(expected),
                 _eur(after), _diff(after - expected), "— (comped in place)", "",
-                abs(after - expected) < 0.011]
-    unit = (before - after) / units if units else 0.0
-    held = before / unit if unit > 0 else 0.0
-    whole = held > 0 and abs(held - round(held)) < 0.02
-    comp = round(units * unit * rate, 2)
-    expected = round(before - units * unit, 2)
+                bool(formulas.same(after, expected))]
+    unit, held, whole, comp, expected = formulas.comp_units(before, after, units, pct)
     return [item, f"{units} of {round(held) if whole else f'{held:.2f}'}", f"{pct:g}%",
             _eur(unit), _eur(comp), _eur(expected), _eur(after),
             _diff(after - expected), _eur(round(units * unit - comp, 2)),
@@ -255,15 +250,16 @@ def run_context(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             if mode.strip().lower() != "assign" or not people or not got:
                 continue
             name, qty, _opts = _item(left)
-            each = round(_num(got.group(1)) / len(people), 2)
+            each = formulas.even_share(_num(got.group(1)), len(people))
             for p in people:
                 assigned[(re.sub(r"\s+", "", name), p)] = (each, qty)
     return {"assigned": assigned}
 
 
 def _shares_text(total: float, n: int) -> str:
-    lo = int(round(total * 100)) // n / 100
-    return f"€{lo:.2f} each" if abs(lo * n - total) < 0.005 else f"€{lo:.2f} or €{lo + 0.01:.2f} each"
+    shares = formulas.fair_shares(total, n)
+    lo, hi = min(shares), max(shares)
+    return f"€{lo:.2f} each" if lo == hi else f"€{lo:.2f} or €{hi:.2f} each"
 
 
 def _split_tables(events: List[Dict[str, Any]], shares: Dict[str, Table],
@@ -307,8 +303,8 @@ def _split_tables(events: List[Dict[str, Any]], shares: Dict[str, Table],
         if complete:
             after: Optional[float] = round(sum(prices), 2)
             found_p = " + ".join(f"€{p:.2f}" for p in prices) + f" = €{after:.2f}"
-            ok_p: Optional[bool] = (total is None or abs(after - total) <= 0.005) \
-                and max(prices) - min(prices) <= 0.0105
+            # Exactly the fair shares: 10.20 / 2 is 5.10 + 5.10, never 5.10 + 5.20.
+            ok_p: Optional[bool] = (total is None or formulas.shares_ok(prices, total))
             if total is None:
                 ok_p = None if ok_p else False
             note = "Each member's share as their payment card shows it."
@@ -316,8 +312,8 @@ def _split_tables(events: List[Dict[str, Any]], shares: Dict[str, Table],
             # '+X € on the order' is the sum of the dish's rows AFTER the split: one row
             # per member ('0 → N row(s)').
             after, ok_p = total, None
-            lo = int(round(total * 100)) // n / 100
-            found_p = (f"€{lo:.2f} × {n} = €{total:.2f}" if abs(lo * n - total) < 0.005
+            shares = formulas.fair_shares(total, n)
+            found_p = (f"€{shares[0]:.2f} × {n} = €{total:.2f}" if len(set(shares)) == 1
                        else f"{n} shares = €{total:.2f}")
             note = (f"The {n} members' rows on the order add up to €{total:.2f}; "
                     f"each member's card shows the fraction.")
@@ -326,21 +322,20 @@ def _split_tables(events: List[Dict[str, Any]], shares: Dict[str, Table],
             after = round(owner_each * (n - 1) + rest, 2)
             found_p = " + ".join([f"€{owner_each:.2f}"] + [f"€{rest:.2f}"] * (n - 1)) \
                 + f" = €{after:.2f}"
-            ok_p = abs(owner_each * n - total) <= 0.01 * n + 0.001
+            ok_p = round(owner_each, 2) in formulas.fair_shares(total, n)
             note = (f"{members[0]}'s share read on the iPad; "
                     f"{', '.join(members[1:])}'s is the rest of the line.")
         elif total is not None:
             after, ok_p = total, None
-            lo = int(round(total * 100)) // n / 100
-            found_p = (f"€{lo:.2f} × {n} = €{total:.2f}" if abs(lo * n - total) < 0.005
+            shares = formulas.fair_shares(total, n)
+            found_p = (f"€{shares[0]:.2f} × {n} = €{total:.2f}" if len(set(shares)) == 1
                        else f"{n} shares = €{total:.2f}")
             note = "Shared equally between the members."
         else:
             after, ok_p = None, None
             found_p = ev["text"]
         gt_rows.append([ev["label"], _eur(total), _eur(after),
-                        False if total is not None and after is not None
-                        and abs(after - total) > 0.005 else None])
+                        False if formulas.same(after, total) is False else None])
         if base:
             gt_notes.append(f"{ev['item']}: before is {base}.")
 
@@ -403,8 +398,8 @@ def _amount(cell) -> Optional[float]:
         return None
 
 
-def _ok(a: Optional[float], b: Optional[float], tol: float = 0.011) -> Optional[bool]:
-    return None if a is None or b is None else abs(a - b) <= tol
+def _ok(a: Optional[float], b: Optional[float]) -> Optional[bool]:
+    return formulas.same(a, b)
 
 
 def _who(record: Dict[str, Any]) -> str:
@@ -507,14 +502,14 @@ def _post_tables(post: Dict[str, Any], whom: str, where: str) -> List[Table]:
                     "r": [[r[0]] + [_eur(_amount(c)) if _amount(c) is not None else c
                                     for c in r[1:-1]] + [r[-1]] for r in post["rows"]]})
         atis = [(k, v[2]) for k, v in sorted(post["vat"].items())]
-        calc = round(sum(a or 0.0 for _, a in atis) + post["tip"], 2)
+        calc = formulas.vat_rows_total((a or 0.0 for _, a in atis), post["tip"])
         rows = [[f"ATI {k}%", _eur(a), None] for k, a in atis]
         if post["tip"]:
             rows.append(["Tip", _eur(post["tip"]), None])
         rows += [["Calculated Sum", _eur(calc), None],
                  ["Displayed Total", _eur(post["total"]), None],
                  ["Diff", _diff(calc - post["total"]) if post["total"] is not None else "—",
-                  _ok(calc, post["total"], 0.021)]]
+                  _ok(calc, post["total"])]]
         out.append({"t": f"ATI Sum — {whom}", "h": ["Line", "Amount"], "r": rows})
     return out
 

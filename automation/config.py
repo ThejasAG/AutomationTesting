@@ -27,7 +27,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ENV_FILE = PROJECT_ROOT / ".env"
+ENV_FILE = PROJECT_ROOT / "config" / ".env"
 
 # The development default, used only when neither the environment nor .env says
 # otherwise. It is deliberately NOT the historical in-repo test_automation_new.db:

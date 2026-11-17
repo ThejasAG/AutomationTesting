@@ -11,7 +11,7 @@ run_records here is what gives a backend-local run its TestRun rows.
 
 import logging
 import os
-from typing import Any, Dict, Generator, List, Optional
+from typing import Generator, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -174,76 +174,3 @@ def run_scenario_stream(req: ScenarioRequest, db: Session = Depends(get_db)):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-
-@router.post("/run", dependencies=[Depends(get_current_user)])
-def run_scenario(req: ScenarioRequest, db: Session = Depends(get_db)):
-    from appium import webdriver
-    from automation.intelligence.scenario_runner import ScenarioRunner
-
-    bundle_id, steps, repo_path = _resolve_run(req, db)
-    shot_dir = os.path.join(repo_path, "reports", "scenario")
-    os.makedirs(shot_dir, exist_ok=True)
-
-    # A Debug React Native build does not embed its JS — it fetches the bundle
-    # from Metro when the app launches. With no Metro the app comes up on the red
-    # "No bundle URL present" screen and every step below drives a dead app.
-    # No-op for native projects and when Metro is already up.
-    from automation.projects.builder import app_builder
-
-    metro_ok, metro_msg = app_builder.ensure_metro(repo_path)
-    logger.info("Metro: %s", metro_msg)
-    if not metro_ok:
-        # Unlike the build pipeline, a scenario run has nothing left to do
-        # without a working app — fail fast instead of reporting N dead steps.
-        raise HTTPException(
-            status_code=503,
-            detail=f"{metro_msg} Without it the app opens on the red "
-                   f"'No bundle URL present' screen and no step can run.",
-        )
-
-    driver = None
-    try:
-        driver = webdriver.Remote(req.appium_url, options=_appium_options(req.device_id, bundle_id))
-        _apply_speed_settings(driver)
-        # clean start from the app's launch screen
-        try:
-            driver.terminate_app(bundle_id)
-        except Exception:
-            pass
-        driver.activate_app(bundle_id)
-        import time as _t
-        _t.sleep(3)   # app-launch settle (was 6s)
-
-        runner = ScenarioRunner(driver, bundle_id, screenshot_dir=shot_dir)
-        result = runner.run(steps)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Scenario run failed: {e}")
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-
-    saved_path = None
-    if req.save:
-        name = _slug(req.name)
-        saved_path = _save_scenario(
-            os.path.join(repo_path, "e2e"), name,
-            runner.build_script(result, test_name=name),
-        )
-
-    return {
-        "ok": result.ok,
-        "passed": result.passed,
-        "total": len(result.results),
-        "saved_to": (os.path.relpath(saved_path, repo_path) if saved_path else None),
-        "script": result.script,
-        "steps": [
-            {
-                "step": r.step, "ok": r.ok, "action": r.action, "detail": r.detail,
-                "screenshot": (os.path.relpath(r.screenshot, repo_path) if r.screenshot else None),
-            }
-            for r in result.results
-        ],
-    }

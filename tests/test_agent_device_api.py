@@ -206,34 +206,29 @@ def test_15_activation_is_owner_only(env):
     assert e.value.status_code == 409
 
 
-# ── WDA ports (16–21) ────────────────────────────────────────────────────────
+# ── WDA ports (16–19, 21) ────────────────────────────────────────────────────────
 
 def test_16_17_18_ports_are_machine_scoped_and_stable(env):
+    """The live allocator (wda.port_for -> ensure_wda_port); its remote-agent endpoint,
+    which nothing called, was removed 2026-11-17."""
+    from automation.device_manager.reservation import ensure_wda_port
     db, _ = env
     a, cred = _agent(db, "mac-a")
     dx = _device(db, a, UDID_X, "iPhone 16 Pro")
     dy = _device(db, a, UDID_Y, "iPad Pro 11-inch")
 
-    px = ar.allocate_my_wda_port(dx, None, db=db, agent=_auth(db, cred))["port"]
-    py = ar.allocate_my_wda_port(dy, None, db=db, agent=_auth(db, cred))["port"]
+    px = ensure_wda_port(dx, db=db)
+    py = ensure_wda_port(dy, db=db)
     assert px != py, "two simulators on one Mac must not share a port"
-    assert ar.allocate_my_wda_port(dx, None, db=db, agent=_auth(db, cred))["port"] == px
+    assert ensure_wda_port(dx, db=db) == px
 
 
 def test_19_the_same_number_may_exist_on_two_machines(env):
+    from automation.device_manager.reservation import ensure_wda_port
     db, _ = env
     a, a_cred = _agent(db, "mac-a"); b, b_cred = _agent(db, "mac-b")
     d_a = _device(db, a, UDID_X); d_b = _device(db, b, UDID_X)
-    assert (ar.allocate_my_wda_port(d_a, None, db=db, agent=_auth(db, a_cred))["port"]
-            == ar.allocate_my_wda_port(d_b, None, db=db, agent=_auth(db, b_cred))["port"])
-
-
-def test_20_an_explicit_preferred_port_wins(env):
-    db, _ = env
-    a, cred = _agent(db, "mac-a"); d = _device(db, a, UDID_X)
-    out = ar.allocate_my_wda_port(d, ar.WdaPortRequest(preferred=8100),
-                                  db=db, agent=_auth(db, cred))
-    assert out["port"] == 8100 and out["preferred"] is True
+    assert ensure_wda_port(d_a, db=db) == ensure_wda_port(d_b, db=db)
 
 
 def test_21_concurrent_allocation_gives_one_port_per_device(env):

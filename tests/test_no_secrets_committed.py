@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 SEED = Path("seeds/platform.json")
-EXAMPLE = Path(".env.example")
+EXAMPLE = Path("config/.env.example")
 
 # Provider key shapes: Groq, GitHub, OpenAI, Slack.
 _KEY = re.compile(r"\b(gsk_[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"
@@ -57,5 +57,5 @@ def test_the_example_documents_the_settings_that_fail_silently():
 
 def test_dotenv_itself_is_not_tracked():
     import subprocess
-    tracked = subprocess.run(["git", "ls-files", ".env"], capture_output=True, text=True).stdout
+    tracked = subprocess.run(["git", "ls-files", ".env", "config/.env"], capture_output=True, text=True).stdout
     assert not tracked.strip(), ".env is tracked by git — it holds live keys"

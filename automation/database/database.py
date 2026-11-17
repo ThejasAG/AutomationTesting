@@ -1,10 +1,10 @@
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case
+from sqlalchemy import func
 import json
 
-from automation.database.models import TestRun, RCAReport, EvidenceBundle, TestProject, ModuleStability, UserFeedback, AIRecommendation, ProjectSettings
+from automation.database.models import TestRun, RCAReport, EvidenceBundle, TestProject, AIRecommendation
 from datetime import datetime
 
 
@@ -34,17 +34,6 @@ def get_test_projects(db: Session, limit: int = 50) -> List[TestProject]:
 def get_test_project(db: Session, project_id: str) -> Optional[TestProject]:
     return db.query(TestProject).filter(TestProject.id == project_id).first()
 
-def record_user_feedback(db: Session, data: dict):
-    feedback = UserFeedback(**data, created_at=datetime.utcnow().isoformat())
-    db.add(feedback)
-    db.commit()
-    
-def get_historical_test_runs(db: Session, test_name: str, limit: int = 10) -> List[TestRun]:
-    return db.query(TestRun).filter(TestRun.test_name == test_name).order_by(TestRun.created_at.desc()).limit(limit).all()
-
-def get_all_rca_reports(db: Session, limit: int = 50) -> List[RCAReport]:
-    return db.query(RCAReport).order_by(RCAReport.generated_at.desc()).limit(limit).all()
-
 def get_test_runs(db: Session, limit: int = 50, suite: Optional[str] = None, status: Optional[str] = None):
     query = db.query(TestRun)
     if suite:
@@ -60,21 +49,6 @@ def get_test_runs(db: Session, limit: int = 50, suite: Optional[str] = None, sta
             "created_at": utc_iso(r.created_at),
             "completed_at": utc_iso(r.completed_at)
         } for r in runs
-    ]
-
-def get_historical_failures(db: Session, test_name: str, limit: int = 5) -> List[Dict]:
-    failures = db.query(TestRun).filter(
-        TestRun.test_name == test_name, 
-        TestRun.status == 'failed'
-    ).order_by(TestRun.created_at.desc()).limit(limit).all()
-    
-    return [
-        {
-            "id": f.id,
-            "test_suite": f.test_suite,
-            "error_message": f.error_message,
-            "created_at": utc_iso(f.created_at)
-        } for f in failures
     ]
 
 def get_test_run(db: Session, run_id: str):
@@ -197,24 +171,9 @@ def get_trends(db: Session, days: int = 30) -> Dict[str, Any]:
     
     return trends
 
-def get_ai_recommendations(db: Session, status: Optional[str] = None, limit: int = 50) -> List[AIRecommendation]:
-    query = db.query(AIRecommendation)
-    if status:
-        query = query.filter(AIRecommendation.status == status)
-    return query.order_by(AIRecommendation.created_at.desc()).limit(limit).all()
-
 def create_ai_recommendation(db: Session, data: dict) -> AIRecommendation:
     rec = AIRecommendation(**data)
     db.add(rec)
     db.commit()
     db.refresh(rec)
-    return rec
-
-def update_ai_recommendation(db: Session, rec_id: str, updates: dict) -> Optional[AIRecommendation]:
-    rec = db.query(AIRecommendation).filter(AIRecommendation.id == rec_id).first()
-    if rec:
-        for k, v in updates.items():
-            setattr(rec, k, v)
-        db.commit()
-        db.refresh(rec)
     return rec

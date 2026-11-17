@@ -53,10 +53,6 @@ def test_sorter_uses_the_runners_real_messages(error, cat):
     assert v["failed_step"] == "click x (step 2/5)"
 
 
-def test_only_infra_and_timing_get_a_free_retry():
-    from automation.agentic.classifier import first_policy
-    assert first_policy("INFRA") == "retry" and first_policy("TIMING") == "resume"
-    assert first_policy("APP_BUG") is None and first_policy("LOCATOR") is None
 
 
 # ── @tokens and value checks ─────────────────────────────────────────────────

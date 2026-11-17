@@ -1,5 +1,5 @@
 """What a run saw that did not fail it is said in YELLOW (automation/scenarios/run_issues.py):
-a crash after a step that did its job is relaunched past, a spinner left up, the app's
+a spinner left up (a crash now stops the run instead, 2026-11-17), the app's
 error toasts and slow screens are noted after their step, and the report lists them all
 under Failed At without turning a passed segment red."""
 import json
@@ -134,8 +134,9 @@ def test_a_wait_that_got_its_screen_late_says_how_long_the_app_took(monkeypatch)
     fr._slow_wait = 0.0
     els, hit = fr._wait_els("PHONE", lambda es: SPINNER in es, 30.0)
     assert hit
-    # The second read STARTED 5.6s in and did not show it: the app took more than that.
-    assert round(fr._slow_wait, 1) == 5.6
+    # The second read STARTED 5.2s in (a 5s read + the 0.2s poll) and did not show it:
+    # the app took more than that.
+    assert round(fr._slow_wait, 1) == 5.2
 
 
 def test_a_wait_that_never_got_its_screen_is_not_a_slow_screen(monkeypatch):
@@ -186,29 +187,27 @@ def _segment(monkeypatch, crashes, relaunch_ok=True, step=None):
         notes.append(f"[ok] {s} — done")
         return True
     fr._handle_special = handle
-    fr._relaunch_after_crash = lambda r_, role, notes: fr.relaunched.append(role) or relaunch_ok
     seg = {"role": "consumer", "name": "C", "steps": ["@one", "@two"]}
     return fr, fr._run_segment(seg)
 
 
-def test_a_crash_after_a_step_that_worked_is_yellow_and_the_run_goes_on(monkeypatch):
+def test_a_crash_stops_the_run_right_there(monkeypatch):
+    """The user, 2026-11-17: "if crash is there just stop there itself exit from running".
+    The segment fails at the crash, the next step never runs, nothing is relaunched."""
     fr, passed = _segment(monkeypatch, ["RCTFatal: undefined is not an object"])
-    assert passed and fr.ran == ["@one", "@two"] and fr.relaunched == ["consumer"]
-    status, notes = fr.saved[-1]
-    assert status == "PASS"
-    assert ("    [APP CRASH] the app crashed after '@one': RCTFatal: undefined is not an "
-            "object — relaunched it and went on") in notes
-    assert "    [evidence] CRASH Vya Consumer — abort()" in notes
-    assert not any(n.startswith("[FAIL]") for n in notes)
-
-
-def test_a_crash_the_app_cannot_be_relaunched_from_fails(monkeypatch):
-    fr, passed = _segment(monkeypatch, ["app terminated"], relaunch_ok=False)
-    assert not passed and fr.ran == ["@one"]
+    assert not passed and fr.ran == ["@one"] and fr.relaunched == []
     status, notes = fr.saved[-1]
     assert status == "FAIL"
-    assert any(n.startswith("[FAIL] app crashed after '@one' and could not be relaunched")
-               for n in notes)
+    assert ("[FAIL] the app crashed after '@one': RCTFatal: undefined is not an object "
+            "— the run stops here") in notes
+    assert "    [evidence] CRASH Vya Consumer — abort()" in notes
+    assert any(n.startswith("[where] failed at step: '@one (step 1/2) — app crashed'") for n in notes)
+
+
+def test_a_native_crash_stops_the_run_too(monkeypatch):
+    fr, passed = _segment(monkeypatch, ["app terminated"])
+    assert not passed and fr.ran == ["@one"]
+    assert fr.saved[-1][0] == "FAIL"
 
 
 def test_what_a_step_read_is_noted_after_it_in_yellow(monkeypatch):

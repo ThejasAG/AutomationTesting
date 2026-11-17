@@ -112,7 +112,7 @@ def cmd_decide(a) -> int:
         return 1
     print(out)
     if out.get("restart_needed"):
-        print("Restart the backend to load it: ./stop.sh && ./start.sh (when nothing is running)")
+        print("Restart the backend to load it: scripts/stop.sh && scripts/start.sh (when nothing is running)")
     return 0
 
 

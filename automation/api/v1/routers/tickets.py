@@ -3,8 +3,8 @@
 When a linked PR is pushed the platform runs the ticket's scenarios and flips
 its status (see webhooks integration). Also runnable on demand via /run.
 """
-
 from __future__ import annotations
+
 
 import logging
 import threading
@@ -22,18 +22,6 @@ logger = logging.getLogger("tickets")
 router = APIRouter(prefix="/tickets", tags=["tickets"])
 
 
-class TicketIn(BaseModel):
-    title: str
-    description: str = ""
-    project_id: Optional[str] = None
-    pr_number: Optional[str] = None
-    pr_url: Optional[str] = None
-    match_key: Optional[str] = None   # e.g. "NEWVYA-1134" — links to the PR before it exists
-    scenario_ids: List[str] = []
-    setup_scenario_id: Optional[str] = None
-    ticket_type: str = "ui"
-
-
 @router.post("")
 def _norm_pr(v: Optional[str]) -> Optional[str]:
     """Store the bare PR number ('535'), so the GitHub webhook — which matches on
@@ -45,19 +33,6 @@ def _norm_pr(v: Optional[str]) -> Optional[str]:
     return m.group(0) if m else (str(v).strip() or None)
 
 
-def create_ticket(body: TicketIn, db: Session = Depends(get_db),
-                  current_user=Depends(get_current_user)):
-    t = Ticket(
-        title=body.title, description=body.description, project_id=body.project_id,
-        pr_number=_norm_pr(body.pr_number), pr_url=body.pr_url,
-        match_key=(body.match_key or "").strip() or None,
-        scenario_ids=body.scenario_ids or [], ticket_type=body.ticket_type or "ui",
-        setup_scenario_id=body.setup_scenario_id or None,
-    )
-    db.add(t); db.commit(); db.refresh(t)
-    return t.to_dict()
-
-
 @router.get("")
 def list_tickets(project_id: Optional[str] = None, db: Session = Depends(get_db),
                  current_user=Depends(get_current_user)):
@@ -65,34 +40,6 @@ def list_tickets(project_id: Optional[str] = None, db: Session = Depends(get_db)
     if project_id:
         q = q.filter(Ticket.project_id == project_id)
     return {"tickets": [t.to_dict() for t in q.all()]}
-
-
-@router.get("/{ticket_id}")
-def get_ticket(ticket_id: str, db: Session = Depends(get_db),
-               current_user=Depends(get_current_user)):
-    t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
-    if not t:
-        raise HTTPException(status_code=404, detail="Ticket not found")
-    return t.to_dict()
-
-
-@router.put("/{ticket_id}")
-def update_ticket(ticket_id: str, body: TicketIn, db: Session = Depends(get_db),
-                  current_user=Depends(get_current_user)):
-    t = db.query(Ticket).filter(Ticket.id == ticket_id).first()
-    if not t:
-        raise HTTPException(status_code=404, detail="Ticket not found")
-    t.title = body.title
-    t.description = body.description
-    t.project_id = body.project_id
-    t.pr_number = _norm_pr(body.pr_number)
-    t.pr_url = body.pr_url
-    t.match_key = (body.match_key or "").strip() or None
-    t.scenario_ids = body.scenario_ids or []
-    t.setup_scenario_id = body.setup_scenario_id or None
-    t.ticket_type = body.ticket_type or t.ticket_type
-    db.commit(); db.refresh(t)
-    return t.to_dict()
 
 
 @router.delete("/{ticket_id}")
@@ -214,7 +161,7 @@ def _app_knowledge(project_id: str, db: Session) -> str:
     #    connectivity, so the drafter anchors flows on screens that actually exist.
     try:
         import json as _json
-        gpath = os.path.join("graphify-out", "graph.json")
+        gpath = os.path.join("automation", "knowledge", "app_graph.json")   # graphify output
         if os.path.isfile(gpath):
             with open(gpath, encoding="utf-8") as gf:
                 g = _json.load(gf)
@@ -294,7 +241,7 @@ def _app_vocabulary(project_id: str, db: Session) -> set:
 
     try:
         import json as _json
-        gpath = os.path.join("graphify-out", "graph.json")
+        gpath = os.path.join("automation", "knowledge", "app_graph.json")   # graphify output
         if os.path.isfile(gpath):
             with open(gpath, encoding="utf-8") as gf:
                 g = _json.load(gf)

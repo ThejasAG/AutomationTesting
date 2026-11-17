@@ -35,6 +35,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from automation import formulas
 from automation.reporting import invoice_section
 from automation.reporting.step_tables import prepost, run_context, steps_table, tables_of
 from automation.scenarios.invoice_check import (MISMATCH_PREFIX, PRINTED_PAYMENTS_NOTE,
@@ -473,8 +474,8 @@ def _in_eur(v: Optional[float]) -> str:
 def _in_diff(a: Optional[float], b: Optional[float]) -> str:
     if a is None or b is None:
         return ''
-    d = round(a - b, 2) + 0.0
-    color = '#27ae60' if abs(d) <= 0.011 else '#e74c3c'
+    d = formulas.diff(b, a)
+    color = '#27ae60' if formulas.same(a, b) else '#e74c3c'
     return f'<span style="color:{color};font-weight:600">diff &euro;{d:+.2f}</span>'
 
 
@@ -580,7 +581,7 @@ def _render_invoice(s: Dict[str, Any]) -> str:
         return f'<td style="{_IN_TD};color:{color};font-weight:700">{word}</td>'
 
     paid_ok = (None if pr["total"] is None or t["stored"] is None
-               else True if abs(pr["total"] - t["stored"]) <= 0.011
+               else True if formulas.same(pr["total"], t["stored"])
                else None if pr["total"] < t["stored"] else False)
     rows = [("Total", _in_eur(t["invoice"]), _in_eur(t["stored"]), t["ok"]),
             ("Tip", _in_eur(tip["invoice"]), _in_eur(tip["stored"]), tip["ok"]),
@@ -746,19 +747,21 @@ def _app_label(record: Dict[str, Any]) -> str:
 
 
 def _screenshot_html(record: Dict[str, Any]) -> str:
-    """A small, clickable failure screenshot (data-URI) shown under the reason in the
-    RICH web report. Only for failures that actually captured one. Callers gate this
-    behind include_screenshots so the downloadable report can omit it."""
+    """The app's crash screen (data-URI), small and clickable, under the reason in the
+    RICH web report. A run stores a screenshot only when the app crashed (the user,
+    2026-11-17), so it is shown whatever the segment's status: a crash the run
+    recovered from is evidence too. Callers gate this behind include_screenshots so
+    the downloadable report can omit it."""
     shot = (record.get("screenshot") or "").strip()
-    if not shot or (record.get("status", "").upper() != "FAIL"):
+    if not shot:
         return ""
     if not shot.startswith("data:image"):
         return ""
     return (
         '<div style="margin-top:10px">'
-        '<div style="color:#888;font-size:12px;margin-bottom:4px">Screen at failure:</div>'
+        '<div style="color:#888;font-size:12px;margin-bottom:4px">Screen when the app crashed:</div>'
         f'<a href="{shot}" target="_blank" rel="noreferrer">'
-        f'<img src="{shot}" alt="screen at failure" '
+        f'<img src="{shot}" alt="screen when the app crashed" '
         'style="max-width:260px;max-height:360px;border:1px solid #e2e8f0;border-radius:8px;'
         'box-shadow:0 2px 8px rgba(0,0,0,0.12)" /></a>'
         '<div style="color:#a0aec0;font-size:11px;margin-top:3px">click to enlarge</div>'
@@ -819,6 +822,53 @@ def records_from_rows(rows: List[Any]) -> List[Dict[str, Any]]:
             "screenshot": getattr(r, "screenshot", None) or "",
         })
     return records
+
+
+_LOAD_RE = re.compile(r"^\[load\] (?P<screen>.+?) — (?:(?P<secs>\d+(?:\.\d+)?)s"
+                      r"|(?P<never>loads indefinitely)\b.*)$")
+LOAD_LIMIT_S = 1.0          # each screen should load in 1 s or less (the user, 2026-11-17)
+
+
+def _loads_html(records: List[Dict[str, Any]]) -> str:
+    """'Screen load times': every timed screen that took MORE than a second -- its PURE
+    loading time, from the tap that opened it to the first screen read that showed it
+    (the user, 2026-11-17: "dont include waits while calculating loading - just pure
+    loading time"). Runs from before the timing have no such notes: nothing is drawn."""
+    timed, slow = 0, []
+    for rec in records:
+        notes = (rec.get("reasons") or []) + (rec.get("consumer_reasons") or []) \
+            + (rec.get("business_reasons") or [])
+        for note in notes:
+            m = _LOAD_RE.match(str(note).strip())
+            if not m:
+                continue
+            timed += 1
+            secs = None if m.group("never") else float(m.group("secs"))
+            if secs is None or secs > LOAD_LIMIT_S:
+                slow.append((rec.get("num") or "", rec.get("name") or "", m.group("screen"), secs))
+    if not timed:
+        return ""
+    head = ('<div style="margin:18px 0 6px;font-size:15px;font-weight:700;color:#1a202c">'
+            'Screen load times</div>')
+    if not slow:
+        return (head + f'<div style="color:#15803d;font-size:13px">All {timed} timed screens '
+                f'loaded in {LOAD_LIMIT_S:g} s or less.</div>')
+    def when(secs):
+        if secs is None:
+            return ('<span style="color:#b91c1c;font-weight:700">'
+                    f'{_esc("loads indefinitely")}</span> (over 20 s)')
+        return f'<span style="color:#b45309;font-weight:600">{secs:.1f} s</span>'
+    rows = "".join(
+        f'<tr><td style="{_CELL}">{_esc(screen)}</td><td style="{_CELL}">{_esc(num)}. '
+        f'{_esc(name.split(":")[0])}</td><td style="{_CELL}">{when(secs)}</td></tr>'
+        for num, name, screen, secs in slow)
+    return (head + f'<div style="color:#718096;font-size:12px;margin-bottom:6px">Screens over '
+            f'{LOAD_LIMIT_S:g} s ({len(slow)} of {timed} timed). Pure loading time: from the tap '
+            f'to the first screen read that showed it.</div>'
+            f'<table style="border-collapse:collapse;font-size:13px;margin:0 0 16px">'
+            f'<tr><th style="{_CELL};background:#f7f7f7">Screen</th><th style="{_CELL};'
+            f'background:#f7f7f7">Segment</th><th style="{_CELL};background:#f7f7f7">'
+            f'Load time</th></tr>{rows}</table>')
 
 
 def _summary_html(summary: str) -> str:
@@ -888,7 +938,7 @@ def render_run_report(records: List[Dict[str, Any]], *, title: str,
 
     return (HTML_TEMPLATE
             .replace("__TITLE__", _esc(title))
-            .replace("__SUMMARY__", _summary_html(summary))
+            .replace("__SUMMARY__", _summary_html(summary) + _loads_html(records))
             .replace("__SUBTITLE__", subtitle or "")
             .replace("__VALIDATION_HEADER__", validation_header)
             .replace("__TOTAL__", str(total))

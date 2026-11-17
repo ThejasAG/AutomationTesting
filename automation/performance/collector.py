@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("performance")
 
@@ -219,25 +219,6 @@ class PerformanceCollector:
             logger.debug("launch-time measure failed: %s", e)
             return None
 
-    def measure_screen_load_time(self, driver, action_fn: Callable,
-                                 screen_id: str, timeout_s: float = 15.0) -> Optional[float]:
-        try:
-            start = time.time()
-            action_fn()
-            deadline = start + timeout_s
-            while time.time() < deadline:
-                try:
-                    els = driver.find_elements("accessibility id", screen_id)
-                    if els and els[0].is_displayed():
-                        return round((time.time() - start) * 1000.0, 1)
-                except Exception:
-                    pass
-                time.sleep(0.25)
-            return round((time.time() - start) * 1000.0, 1)
-        except Exception as e:
-            logger.debug("screen-load measure failed: %s", e)
-            return None
-
     # ── aggregation + scoring ────────────────────────────────────────────────
     def _vals(self, key: str) -> List[float]:
         return [m[key] for m in self.metrics if m.get(key) is not None]
@@ -340,10 +321,3 @@ class PerformanceCollector:
             "sample_interval_s": SAMPLE_INTERVAL_S,
             "downsampled_from": original,
         }
-
-    @staticmethod
-    def _parse_ts(ts):
-        try:
-            return datetime.fromisoformat(ts) if ts else datetime.utcnow()
-        except Exception:
-            return datetime.utcnow()

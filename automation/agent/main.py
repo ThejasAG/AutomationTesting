@@ -7,7 +7,6 @@ import platform
 import threading
 import requests
 import logging
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from automation.config import load_env
@@ -342,93 +341,6 @@ def _upload_evidence_with_retry(job_id: str, evidence_data: dict, max_retries: i
     logger.error(f"Evidence upload failed after {max_retries} attempts for job {job_id}")
 
 
-# ── Screen streaming helpers ─────────────────────────────────────────────────
-
-def _post_frame(job_id: str, png_bytes: bytes) -> None:
-    """Upload a single PNG frame to the backend streaming endpoint.
-
-    Called from the capture thread.  All exceptions are swallowed so that
-    network hiccups never crash the capture loop or the parent job thread.
-    """
-    try:
-        HTTP.post(
-            f"{PLATFORM_URL}/jobs/{job_id}/stream/frame",
-            data=png_bytes,
-            headers={
-                "Content-Type": "application/octet-stream",
-                "X-Agent-Secret": os.getenv("AGENT_SECRET", ""),
-            },
-            timeout=4,
-        )
-    except Exception as e:
-        logger.warning(f"Frame upload failed for job {job_id}: {e}")
-
-
-def _signal_stream_ended(job_id: str) -> None:
-    """Send an empty-body POST to tell the backend the stream is finished."""
-    try:
-        HTTP.post(
-            f"{PLATFORM_URL}/jobs/{job_id}/stream/frame",
-            data=b"",
-            headers={
-                "Content-Type": "application/octet-stream",
-                "X-Agent-Secret": os.getenv("AGENT_SECRET", ""),
-            },
-            timeout=4,
-        )
-    except Exception as e:
-        logger.warning(f"Stream end signal failed for job {job_id}: {e}")
-
-
-def _start_screen_capture(job_id: str, device_id: str) -> tuple[threading.Thread | None, threading.Event]:
-    """Start the screen-capture daemon thread.
-
-    Returns ``(thread, stop_event)``.  If the streaming module is unavailable
-    or initialisation fails, returns ``(None, stop_event)`` — the job
-    continues normally without streaming.
-    """
-    stop_event = threading.Event()
-    try:
-        from automation.streaming.screen_capture import ScreenCaptureLoop
-
-        def on_frame(png_bytes: bytes) -> None:
-            _post_frame(job_id, png_bytes)
-
-        capture_loop = ScreenCaptureLoop(
-            device_id=device_id,
-            stop_event=stop_event,
-            on_frame=on_frame,
-            fps=4.0,
-        )
-        thread = threading.Thread(
-            target=capture_loop.start,
-            daemon=True,
-            name=f"screen-capture-{job_id[:8]}",
-        )
-        thread.start()
-        logger.info(f"Screen capture thread started for job {job_id}")
-        return thread, stop_event
-
-    except Exception as e:
-        logger.warning(f"Screen capture unavailable for job {job_id}: {e}")
-        return None, stop_event
-
-
-def _stop_screen_capture(
-    job_id: str,
-    capture_thread: threading.Thread | None,
-    stop_event: threading.Event,
-) -> None:
-    """Stop the capture thread and send the end-of-stream signal."""
-    try:
-        stop_event.set()
-        if capture_thread and capture_thread.is_alive():
-            capture_thread.join(timeout=6)
-        _signal_stream_ended(job_id)
-    except Exception as e:
-        logger.warning(f"Screen capture cleanup error for job {job_id}: {e}")
-
-
 # ── Job execution ─────────────────────────────────────────────────────────────
 
 # A job in any of these states has already been attempted (or is being run
@@ -663,9 +575,6 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
         # runs today, so proceed unreserved exactly as before 4E.2.
         logger.info("No device record for %s on this machine — running unreserved.", device_id)
 
-    # Screen capture state — declared here so finally block can always reference it.
-    capture_thread: threading.Thread | None = None
-    stop_capture_event = threading.Event()
     perf_collector = None  # declared here so finally can always stop it
         
     try:
@@ -746,12 +655,6 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
             logger.warning(f"perf collector start failed: {_pe}")
             perf_collector = None
 
-        # 2. Start screen capture BEFORE executing tests so the browser can
-        #    watch from the very first moment the suite launches. By this point
-        #    the app is already built, installed and launched, so the stream
-        #    shows the running app even if there is no test suite yet.
-        capture_thread, stop_capture_event = _start_screen_capture(job_id, device_id)
-
         # 3. Execute — but only if the repository actually has a test suite.
         #    A repo with no Appium tests is not a failure: the app was deployed
         #    and is running on the device. Reporting that as "failed" makes a
@@ -770,10 +673,6 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
                  f"{config.execution.command!r}) to run automated tests."],
                 "App Deployed",
             )
-            # Let the stream show the running app for a few seconds before we cut it.
-            time.sleep(8)
-            _stop_screen_capture(job_id, capture_thread, stop_capture_event)
-            capture_thread = None
             # NOT "passed". Nothing was verified about the change — the app merely
             # built and launched. Reporting green here means a PR with no runnable
             # tests looks identical to a PR whose tests all passed, which is exactly
@@ -829,9 +728,6 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
         except Exception:
             pass
 
-        # 5. Stop capture as soon as pytest exits.
-        _stop_screen_capture(job_id, capture_thread, stop_capture_event)
-        capture_thread = None  # prevent double-stop in finally
         
         report_status(job_id, "collecting_evidence", logs, f"Execution {status}")
 
@@ -880,9 +776,6 @@ def run_job(job: Dict[str, Any], connected_devices: List[str]):
         logger.error(f"Job Execution Error: {e}")
         report_status(job_id, "failed", [f"Execution Error: {str(e)}"], "Failed", str(e))
     finally:
-        # Always stop capture if it wasn't already stopped cleanly above.
-        if capture_thread is not None:
-            _stop_screen_capture(job_id, capture_thread, stop_capture_event)
         # Never leak the perf-collector thread on an error path.
         # `is_collecting` is already False when the happy path stopped it, so this
         # reports only for a run that died before reaching the block above — never twice.

@@ -9,7 +9,7 @@ will answer questions — decide, act, verify, and write down what you did.
   `$worktree`, on branch `$branch`. Your edits change nothing in the person's
   checkout or the running backend until a person approves them.
 - Your session folder (report, notes, screenshots, app patches): `$session_dir`.
-- Read first: `AGENTS.md` (sections 4 and 5 are the hard-won gotchas),
+- Read first: `docs/AGENTS.md` (sections 4 and 5 are the hard-won gotchas),
   `automation/knowledge/known_issues.md` (what is already known — do not
   re-investigate or "fix" those), and `automation/knowledge/locator_map.md`
   (real element ids per screen).
@@ -79,7 +79,7 @@ will answer questions — decide, act, verify, and write down what you did.
    If you cannot verify a change, undo it exactly (the worktree must end with
    only verified changes) and report it under needs_human.
 5. At most $max_fix_attempts fix attempts per failure, then report what you found.
-6. Never read or print secrets (`.env`, `cross_app_config.json`).
+6. Never read or print secrets (`config/.env`, `config/cross_app_config.json`).
 7. Report only what tool output showed. A run you did not see pass did not pass.
 
 ## After you finish

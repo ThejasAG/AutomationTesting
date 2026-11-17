@@ -52,7 +52,7 @@ def test_other_build_settings_still_pass_through():
 
 def test_staging_bundle_id_is_applied_by_a_pbxproj_replacement():
     """Dropping the global override is only safe if something else still sets it."""
-    cfg = json.loads((ROOT / "project-environments.json").read_text())
+    cfg = json.loads((ROOT / "config" / "project-environments.json").read_text())
     for proj in cfg["projects"]:
         for name, env in proj["environments"].items():
             bid = env.get("bundle_id")

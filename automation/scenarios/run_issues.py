@@ -1,8 +1,10 @@
 """Problems a run saw that did not fail it, shown YELLOW in the report and on Run Details.
 
-A step that did its job passes even when the app made it hard: the app crashed after
-it and was relaunched, a spinner stayed up, an error toast came and went, a screen took
-long to come up, or the automation had to work around a known app bug. Those are still
+A step that did its job passes even when the app made it hard: a spinner stayed up, an
+error toast came and went, a screen took long to come up, or the automation had to work
+around a known app bug. (A CRASH is no longer one of these: since 2026-11-17 it fails
+the segment and stops the run. Older runs' '[APP CRASH] ... relaunched it' lines still
+read yellow.) Those are still
 worth a person's eye, so each is written into the segment's notes as ONE line starting
 with its tag, and the report lists them in yellow under Failed At (red stays for what
 failed and for sums that did not match).

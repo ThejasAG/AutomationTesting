@@ -14,9 +14,3 @@ export function parseServerDate(iso: string): Date {
   return new Date(HAS_TIME.test(iso) && !HAS_ZONE.test(iso) ? `${iso}Z` : iso);
 }
 
-/** Same, but tolerates null/undefined — returns null so callers can render a dash. */
-export function parseServerDateOrNull(iso: string | null | undefined): Date | null {
-  if (!iso) return null;
-  const d = parseServerDate(iso);
-  return isNaN(d.getTime()) ? null : d;
-}

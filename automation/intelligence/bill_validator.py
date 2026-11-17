@@ -5,6 +5,8 @@ Currency: € (Euro)
 """
 import re
 
+from automation import formulas
+
 # Keywords that identify a bill/checkout screen
 BILL_SCREEN_KEYWORDS = [
     "grand total", "total amount", "bill total", "amount due",
@@ -53,31 +55,6 @@ def extract_all_prices(xml):
                     seen.add(val)
 
     return prices
-
-
-def extract_line_items(xml):
-    """Extract item names with their prices from checkout XML.
-    Returns list of (item_name, price) tuples."""
-    items = []
-    # Look for text elements that contain item names followed by prices
-    # Pattern: text="Item Name" ... text="123.45 €" nearby
-    texts = re.findall(r'text="([^"]+)"', xml)
-
-    i = 0
-    while i < len(texts):
-        text = texts[i]
-        # Skip empty, small, and non-item texts
-        if len(text) > 2 and not re.match(r'^[\d.,€₹\s]+$', text):
-            # Look for a price in the next few text elements
-            for j in range(i + 1, min(i + 5, len(texts))):
-                price_match = re.search(r'([\d,]+\.\d{1,2})\s*€?', texts[j])
-                if price_match:
-                    val = _parse_price(price_match.group(1))
-                    if val:
-                        items.append((text.strip(), val))
-                    break
-        i += 1
-    return items
 
 
 def find_labeled_total(xml):
@@ -154,7 +131,7 @@ def validate_bill(xml):
 
     # Get all prices (line items = everything except the total)
     all_prices = extract_all_prices(xml)
-    line_items = [p for p in all_prices if abs(p - displayed_total) > 0.01]
+    line_items = [p for p in all_prices if not formulas.same(p, displayed_total)]
 
     if not line_items:
         result["reason"] = f"Bill screen: total=€{displayed_total:.2f} (no line items to cross-check)"
@@ -171,7 +148,7 @@ def validate_bill(xml):
     calc_parts = [f"€{p:.2f}" for p in line_items]
     result["calculation"] = " + ".join(calc_parts) + f" = €{calculated:.2f}"
 
-    if diff > 0.01:
+    if not formulas.same(displayed_total, calculated):
         result["pass"] = False
         result["reason"] = (
             f"Bill mismatch: displayed=€{displayed_total:.2f}, "
@@ -198,10 +175,10 @@ def validate_coupon(xml, original_total, coupon_value):
     if displayed_total is None:
         return {"pass": False, "reason": "Could not find total after coupon applied"}
 
-    expected = round(original_total - coupon_value, 2)
+    expected = formulas.after_offer(original_total, fixed=coupon_value)
     diff = round(abs(displayed_total - expected), 2)
 
-    if diff > 0.01:
+    if not formulas.same(displayed_total, expected):
         return {
             "pass": False,
             "reason": (

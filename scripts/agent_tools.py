@@ -767,8 +767,8 @@ def cmd_recover(a) -> int:
             print(f"WebDriverAgent stopped on the {role} simulator ({udid[:8]}); the next run starts it again")
         return 0
     with open(os.path.join(session_dir(), "start.log"), "a") as f:
-        subprocess.run(["./start.sh"], cwd=MAIN_ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=1200)
-    print("./start.sh done — now: preflight")
+        subprocess.run(["scripts/start.sh"], cwd=MAIN_ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=1200)
+    print("scripts/start.sh done — now: preflight")
     return 0
 
 

@@ -975,7 +975,7 @@ def test_an_empty_idb_dump_is_not_taken_for_the_screen(monkeypatch, clock):
     """idb times out on an overloaded rig and describe_all gives []: "the sheet is
     gone" must not pass on it, and the last real screen is what comes back."""
     dumps = iter([[], [], [el("Vya Business", 0, 0, 1210, 834, "Application"),
-                           el("addNewItemClose")]] + [[]] * 200)
+                           el("addNewItemClose")]] + [[]] * 400)   # 45s at 0.2s a look
     monkeypatch.setattr(caf._idbd, "describe_all", lambda udid: next(dumps))
     fr = FlowRunner.__new__(FlowRunner)
     els, gone = fr._wait_els("IPAD", lambda es: not fr._has(es, "addNewItemClose"), 10.0)
@@ -2764,9 +2764,13 @@ def test_shares_a_cent_apart_that_add_up_are_written_and_not_flagged(monkeypatch
                       ["Guest 2", "Penne Pollo x 3/2", "26.26", None]]
 
 
-@pytest.mark.parametrize("prices,words", [((26.27, 26.27), "add up to 52.54"),
-                                          ((26.30, 26.23), "differ by 0.07")])
-def test_shares_that_do_not_add_up_or_differ_more_are_a_mismatch(monkeypatch, prices, words):
+@pytest.mark.parametrize("prices,words", [((26.27, 26.27), "(= 52.54 €)"),
+                                          ((26.30, 26.23), "fair shares of the 52.53 € shared: 26.27, 26.26"),
+                                          ((26.25, 26.28), "fair shares")])
+def test_shares_that_are_not_the_fair_shares_are_a_mismatch(monkeypatch, prices, words):
+    """Exactly the fair shares (the user, 2026-11-17): 52.53 / 2 is 26.27 + 26.26 only.
+    26.25 + 26.28 adds up but is not fair; the old one-cent gap rule let 26.27 + 26.26
+    through and so does this one -- the leftover cent has to go somewhere."""
     fr = _runner_with_priced_cards(monkeypatch, {
         "Guest 1": [("Penne Pollo x 3/2", prices[0])],
         "Guest 2": [("Penne Pollo x 3/2", prices[1])]})

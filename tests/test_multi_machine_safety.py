@@ -319,13 +319,6 @@ def test_two_machines_are_distinguishable_in_the_device_list():
     assert owners == {"UDID-A": "mac-a", "UDID-B": "mac-b"}
 
 
-def test_backend_local_simulators_report_the_backend_machine():
-    svc = DeviceDiscoveryService()
-    dev = svc.register_local_device("UDID-LOCAL", "iPhone 16 Pro")
-    assert dev.provider == "local"
-    assert dev.hostname, "backend-owned simulators must name their machine too"
-
-
 def test_hostname_is_optional_so_existing_callers_still_work():
     svc = DeviceDiscoveryService()
     svc.sync_agent_devices("agent-x", [{"id": "UDID-X", "platform": "iOS"}])

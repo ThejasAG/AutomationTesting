@@ -32,6 +32,19 @@ const ISSUE_RE = /^\s*(\[(APP CRASH|APP ERROR|LOADING|STUCK LOADING|NO UI PROGRE
 // Slowness is not shown (the user, 2026-11-04: "dont mention slow steps"); nor are the
 // '[calc] {…}' notes, which are the report's tables (Report button), not steps.
 const HIDDEN_NOTE_RE = /^\s*(\[calc\] |\[SLOW LOAD\]|\[SLOW \/ RECOVERED\]|\[SLOW SCREEN\])/;
+// A screen's pure loading time ('[load] Home screen (C-App) — 3.2s'): shown in yellow when it
+// took more than a second (the user, 2026-11-17: "each screen should load 1 sec or less"),
+// hidden when it was quick.
+const LOAD_RE = /^\s*\[load\] .+ — (?:(\d+(?:\.\d+)?)s|loads indefinitely\b.*)$/;
+const LOAD_LIMIT_S = 1.0;
+const quickLoad = (line: string): boolean => {
+  const m = LOAD_RE.exec(line);
+  return !!m && m[1] !== undefined && parseFloat(m[1]) <= LOAD_LIMIT_S;
+};
+const slowLoad = (line: string): boolean => {
+  const m = LOAD_RE.exec(line);
+  return !!m && (m[1] === undefined || parseFloat(m[1]) > LOAD_LIMIT_S);  // or indefinitely
+};
 
 // ── Scenarios Tab (Android cross-app: Consumer + Business) ───────────────────
 
@@ -92,16 +105,16 @@ function ScenarioRow({ s }: { s: ScenarioResult }) {
           <td colSpan={9} style={{ padding: '10px 40px 14px' }}>
             <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.7 }}>
               {(s.reasons && s.reasons.length ? s.reasons : [s.error || ''])
-                .filter(r => r && !HIDDEN_NOTE_RE.test(r)).map((r, i) => (
+                .filter(r => r && !HIDDEN_NOTE_RE.test(r) && !quickLoad(r)).map((r, i) => (
                 <li key={i} style={isMismatch(r) ? { color: 'var(--danger)', fontWeight: 600 }
-                  : ISSUE_RE.test(r) ? { color: 'var(--warning)' } : undefined}>{r}</li>
+                  : ISSUE_RE.test(r) || slowLoad(r) ? { color: 'var(--warning)' } : undefined}>{r}</li>
               ))}
             </ul>
             {s.screenshot && (
               <div style={{ marginTop: 12 }}>
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: 5 }}>Screen at failure:</div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: 5 }}>Screen when the app crashed:</div>
                 <a href={s.screenshot} target="_blank" rel="noreferrer">
-                  <img src={s.screenshot} alt="screen at failure"
+                  <img src={s.screenshot} alt="screen when the app crashed"
                     style={{ maxWidth: 240, maxHeight: 420, border: '1px solid var(--border-color)', borderRadius: 8, boxShadow: '0 2px 10px rgba(0,0,0,0.35)' }} />
                 </a>
                 <div style={{ color: 'var(--text-muted)', fontSize: '0.68rem', marginTop: 3 }}>click to enlarge</div>

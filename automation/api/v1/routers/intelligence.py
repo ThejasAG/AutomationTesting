@@ -1,85 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from automation.database.config import get_db
-from automation.database.database import get_ai_recommendations, update_ai_recommendation
-import os
-import httpx
 import json
-import uuid
 
 from automation.auth.security import get_current_user
-from automation.intelligence.recommendation import recommendation_engine
-from automation.intelligence.flaky_detector import flaky_detector
-from automation.intelligence.memory import failure_memory
-from automation.intelligence.prediction import prediction_engine
-from automation.intelligence.analytics import analytics_service
 from automation.intelligence.chat import chat_assistant
 
 router = APIRouter(prefix="/intelligence", tags=["intelligence"])
 
 
-def analyze_performance_trend(rows) -> Dict[str, Any]:
-    """Turn recent PerformanceSummary rows (newest-first) into a trend payload.
-
-    Shared by the /projects/{id}/performance-trends endpoint. Flags a
-    regression when the latest score drops >10 points vs the prior run.
-    """
-    ordered = list(reversed(rows))  # oldest → newest for charting
-    trend = [{
-        "run_id": r.run_id,
-        "date": r.created_at.isoformat() if r.created_at else None,
-        "score": r.performance_score,
-        "grade": r.grade,
-    } for r in ordered]
-
-    scores = [t["score"] for t in trend if t["score"] is not None]
-    avg_score = round(sum(scores) / len(scores)) if scores else 0
-    improving = len(scores) >= 2 and scores[-1] >= scores[0]
-
-    regression = None
-    if len(scores) >= 2 and (scores[-2] - scores[-1]) > 10:
-        regression = {
-            "drop": scores[-2] - scores[-1],
-            "from_score": scores[-2],
-            "to_score": scores[-1],
-            "run_id": trend[-1]["run_id"],
-        }
-
-    return {
-        "trend": trend,
-        "improving": improving,
-        "avg_score": avg_score,
-        "regression": regression,
-    }
-
-class RecommendRequest(BaseModel):
-    project_id: str
-    branch: str = "main"
-
 class ChatRequest(BaseModel):
     query: str
     context: Dict[str, Any] = None
-
-class UpdateRecommendationRequest(BaseModel):
-    status: str
-    feedback: Optional[str] = None
-
-@router.get("/metrics")
-def get_metrics(current_user=Depends(get_current_user)):
-    return analytics_service.get_global_metrics()
-
-@router.post("/recommend")
-def get_recommendations(req: RecommendRequest, current_user=Depends(get_current_user)):
-    # In a real impl, we'd lookup the repo path by project_id
-    repo_path = "d:/AutomationTesting/demo-mobile-tests"
-    try:
-        recs = recommendation_engine.generate_recommendations(repo_path, "HEAD")
-        return recs
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/runs/{run_id}/rca")
 def get_run_rca(run_id: str, db: Session = Depends(get_db)):
@@ -111,35 +46,10 @@ def get_run_rca(run_id: str, db: Session = Depends(get_db)):
         "generated_at": report.generated_at.isoformat() if report.generated_at else None,
     }
 
-@router.get("/flaky/{test_name}")
-def get_flaky_status(test_name: str, current_user=Depends(get_current_user)):
-    return flaky_detector.calculate_flakiness(test_name)
-
-@router.get("/predict/{project_id}")
-def get_prediction(project_id: str, current_user=Depends(get_current_user)):
-    return prediction_engine.predict_risk(project_id)
-
-@router.get("/memory/search")
-def search_memory(error: str, test_name: str = "", current_user=Depends(get_current_user)):
-    return failure_memory.search_similar_failures(error, test_name)
-
 @router.post("/chat")
 def ask_chat(req: ChatRequest, current_user=Depends(get_current_user)):
     response = chat_assistant.ask(req.query, req.context)
     return {"reply": response}
-
-@router.get("/recommendations")
-def list_recommendations(status: Optional[str] = None, db: Session = Depends(get_db)):
-    recs = get_ai_recommendations(db, status=status)
-    return {"recommendations": recs}
-
-@router.put("/recommendations/{rec_id}")
-def update_recommendation(rec_id: str, req: UpdateRecommendationRequest, db: Session = Depends(get_db)):
-    rec = update_ai_recommendation(db, rec_id, {"status": req.status, "feedback": req.feedback})
-    if not rec:
-        raise HTTPException(status_code=404, detail="Recommendation not found")
-    return {"status": "ok"}
-
 
 # ── SSE Streaming Chat ────────────────────────────────────────────────────────
 
@@ -278,236 +188,3 @@ def delete_chat_session(
     db.delete(session)
     db.commit()
     return {"deleted": True}
-
-
-# ── Script Generation (unchanged) ────────────────────────────────────────────
-
-class GenerateScriptRequest(BaseModel):
-    provider: str  # ollama (local, no key) | openai | gemini | claude
-    api_key: str = ""   # not needed for the local ollama provider
-    app_name: str
-    platform: str = "Android"
-    framework: str = "Appium + pytest (Python)"
-    requirements: str
-    # Real accessibility ids captured from the running app (locator catalog). When
-    # present, the model is forbidden from inventing selectors — the single biggest
-    # cause of generated scripts that don't run.
-    known_testids: List[str] = []
-    # testIDs folded into a parent: detectable but NOT tappable (need accessible=true).
-    folded_testids: List[str] = []
-
-
-def _locator_section(known: List[str], folded: List[str]) -> str:
-    """The grounding block: the real ids + hard rules against inventing selectors."""
-    if not known and not folded:
-        return (
-            "\nNO LOCATOR CATALOG WAS PROVIDED. You do not know this app's real "
-            "testIDs. For every element, use a clearly-marked placeholder like "
-            '`by_id(driver, "TODO_testid_for_login_button")` and add a comment that '
-            "the id must be confirmed against the app — do NOT present guessed ids "
-            "as if they were real.\n"
-        )
-    lines = ["\nLOCATOR CATALOG — the accessibility ids that actually exist in this app:"]
-    if known:
-        lines.append("USABLE (locate via AppiumBy.ACCESSIBILITY_ID):\n  " + ", ".join(sorted(known)))
-    if folded:
-        lines.append(
-            "FOLDED into a parent — present but NOT individually tappable, do not "
-            "click/type into these:\n  " + ", ".join(sorted(folded))
-        )
-    lines.append(
-        "STRICT RULES:\n"
-        "- Locate elements ONLY by ids in the USABLE list, via AppiumBy.ACCESSIBILITY_ID.\n"
-        "- NEVER invent, guess, or infer a testID that is not in the USABLE list.\n"
-        "- If the scenario needs an element that is not in the catalog, do NOT "
-        "fabricate an id: insert `# TODO: no testID for <element> — needs "
-        "accessible={true}` and stub that step so the rest of the test still runs.\n"
-    )
-    return "\n".join(lines) + "\n"
-
-
-def _call_openai(api_key: str, model: str, system: str, user: str) -> str:
-    resp = httpx.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "temperature": 0.2},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
-
-
-def _call_gemini(api_key: str, user: str) -> str:
-    resp = httpx.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
-        json={"contents": [{"parts": [{"text": user}]}]},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-
-
-def _call_ollama(system: str, user: str) -> str:
-    """Generate via the configured LLM provider (Groq/OpenAI/Ollama).
-
-    Named `_call_ollama` for back-compat; it now routes through the provider so
-    it's fast on Groq. Falls back to local Ollama only if that's what's configured.
-    """
-    from automation.ai.provider import create_provider, default_config
-    # Ask for JSON explicitly in the prompt (works across providers).
-    resp = create_provider(default_config).generate(
-        system, user + "\n\nRespond with valid JSON only.",
-        json_schema={}, max_tokens=4096, temperature=0.2)
-    return resp.content or ""
-
-
-def _call_claude(api_key: str, system: str, user: str) -> str:
-    resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-        json={"model": "claude-haiku-4-5-20251001", "max_tokens": 4096, "system": system, "messages": [{"role": "user", "content": user}]},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["content"][0]["text"]
-
-
-class CaptureLocatorsRequest(BaseModel):
-    device_id: str
-    bundle_id: str
-    appium_url: str = "http://127.0.0.1:4723"
-    platform: str = "iOS"
-
-
-@router.post("/capture-locators")
-def capture_locators(
-    req: CaptureLocatorsRequest,
-    current_user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Connect to a RUNNING app and return its live locator catalog + gap report.
-
-    This is the grounding source for generate-scripts: capture the real testIDs on
-    the current screen, then pass known_testids/folded_testids into generation so
-    the model uses real ids instead of inventing them.
-    """
-    from appium import webdriver
-    from appium.options.ios import XCUITestOptions
-    from automation.intelligence.locator_catalog import parse_accessibility_tree
-    from automation.database.models import TestProject
-    from automation.projects.builder import app_builder
-    from automation.projects.repository import repository_manager
-
-    # Same Debug-React-Native trap as the scenario runner: no Metro means the app
-    # is sitting on the red "No bundle URL present" screen, and the captured tree
-    # would be the error screen's, not the app's. The bundle id is all we have to
-    # find the project with, so a locally-built app maps back to its repo.
-    project = (
-        db.query(TestProject).filter(TestProject.app_bundle_id == req.bundle_id).first()
-    )
-    if project is not None:
-        repo_path = repository_manager.get_repo_path(project.id)
-        metro_ok, metro_msg = app_builder.ensure_metro(repo_path)
-        if not metro_ok:
-            raise HTTPException(status_code=503, detail=metro_msg)
-
-    opts = XCUITestOptions()
-    opts.platform_name = req.platform
-    opts.automation_name = "XCUITest"
-    opts.udid = req.device_id
-    opts.bundle_id = req.bundle_id
-    opts.no_reset = True
-    # Central WDA resolver — was usePrebuiltWDA=True with no derivedDataPath,
-    # so Appium had no idea where the prebuilt build lived.
-    from automation.appium_service import wda as _wda
-    _wda.apply(opts, udid=req.device_id)
-
-    driver = None
-    try:
-        driver = webdriver.Remote(req.appium_url, options=opts)
-        driver.activate_app(req.bundle_id)
-        insp = parse_accessibility_tree(driver.page_source)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not capture locators: {e}")
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-
-    known = sorted({c.testid for c in insp.catalog})
-    folded = sorted(insp.merged - set(known))
-    return {
-        "known_testids": known,
-        "folded_testids": folded,
-        "gaps": [
-            {"type": g.type, "label": g.nearest_text, "parent_id": g.parent_id,
-             "suggested_testid": g.suggested_testid}
-            for g in insp.gaps
-        ],
-    }
-
-
-@router.post("/generate-scripts")
-def generate_scripts(req: GenerateScriptRequest, current_user=Depends(get_current_user)):
-    """Use the user's own LLM API key to generate Appium test scripts and automation.yaml."""
-    SYSTEM_PROMPT = """You are an expert mobile test automation engineer.
-You write clean, production-ready Appium test scripts using Python + pytest and the Page Object Model pattern.
-Always return a JSON object with exactly two keys:
-  - test_script: the complete Python test file as a string
-  - automation_yaml: the complete automation.yaml config as a string
-Do NOT include any markdown fences, explanations, or extra text — only valid JSON."""
-
-    USER_PROMPT = f"""Generate Appium test scripts for the following:
-
-App: {req.app_name}
-Platform: {req.platform}
-Framework: {req.framework}
-
-Test Requirements:
-{req.requirements}
-{_locator_section(req.known_testids, req.folded_testids)}
-Requirements for the generated code:
-1. Use Page Object Model (separate page classes from tests)
-2. Use a pytest conftest.py fixture for the Appium driver session
-3. Driver reads APPIUM_SERVER_URL from environment variable (default http://127.0.0.1:4723)
-4. Include proper assertions, docstrings, and error handling
-5. The automation.yaml must follow this schema exactly:
-   project.name, repository.branch, framework.type, framework.language,
-   environment.platform, environment.app, execution.command, execution.retries,
-   evidence.screenshots, ai.enabled, ai.rca
-
-Return only valid JSON with keys test_script and automation_yaml."""
-
-    if req.provider != "ollama" and not req.api_key:
-        raise HTTPException(status_code=400, detail=f"{req.provider} requires an api_key.")
-
-    try:
-        if req.provider == "ollama":
-            raw = _call_ollama(SYSTEM_PROMPT, USER_PROMPT)
-        elif req.provider == "openai":
-            raw = _call_openai(req.api_key, "gpt-4o-mini", SYSTEM_PROMPT, USER_PROMPT)
-        elif req.provider == "gemini":
-            raw = _call_gemini(req.api_key, SYSTEM_PROMPT + "\n\n" + USER_PROMPT)
-        elif req.provider == "claude":
-            raw = _call_claude(req.api_key, SYSTEM_PROMPT, USER_PROMPT)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown provider: {req.provider}")
-
-        clean = raw.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        clean = clean.strip().rstrip("`")
-
-        data = json.loads(clean)
-        return {"test_script": data["test_script"], "automation_yaml": data["automation_yaml"]}
-
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"LLM API error ({req.provider}): {e.response.text[:300]}")
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"LLM returned invalid JSON: {str(e)}. Raw: {raw[:300]}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

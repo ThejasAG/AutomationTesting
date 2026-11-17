@@ -4,6 +4,7 @@ interface MonacoEditorProps {
   value: string;
   onChange: (value: string) => void;
   language?: string;
+  readOnly?: boolean;
 }
 
 /**
@@ -14,6 +15,7 @@ export default function MonacoEditor({
   value,
   onChange,
   language = 'python',
+  readOnly = false,
 }: MonacoEditorProps) {
   const handleMount: OnMount = (_editor, monaco) => {
     // Override the default dark background to match the platform palette.
@@ -43,6 +45,7 @@ export default function MonacoEditor({
       onChange={(val) => onChange(val ?? '')}
       onMount={handleMount}
       options={{
+        readOnly,
         minimap: { enabled: false },
         fontSize: 14,
         lineNumbers: 'on',

@@ -443,7 +443,7 @@ def restart_backend_if_idle() -> Dict[str, Any]:
         supervised = False
     if not supervised:
         raise Refused("the backend is not running under the supervisor, so it would not come "
-                      "back by itself — restart it with ./stop.sh && ./start.sh")
+                      "back by itself — restart it with scripts/stop.sh && scripts/start.sh")
     import signal
     import threading
     threading.Timer(1.0, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()

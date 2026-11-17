@@ -25,10 +25,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from automation import formulas
+from automation.formulas import fair_shares, shares_ok  # noqa: F401 (callers use ic.*)
+
 Word = Tuple[str, float, float, float, float]       # text, x, y, w, h (screen_text.read_text)
 
-ROW_TOL = 0.011         # one printed figure against another: both rounded to the cent
-SUM_TOL = 0.021         # a sum of the three VAT rows, each rounded on its own
+# Every formula and the cent tolerance: automation/formulas.py.
 SAME_ROW = 7.0          # pt between two words' centres on one row; rows are 18+ apart
 EDGE = 12.0             # pt: a row cut by the screen's edge reads higher than it really is
 
@@ -215,8 +217,8 @@ def seen_of(blocks: List[Block]) -> Dict[str, str]:
     return {}
 
 
-def _adds(calc: float, shown: float, tol: float = SUM_TOL) -> bool:
-    return abs(calc - shown) <= tol
+def _adds(calc: float, shown: float) -> bool:
+    return bool(formulas.same(calc, shown))
 
 
 def _plus(values: Iterable[float]) -> str:
@@ -229,7 +231,7 @@ def eur(v: Optional[float]) -> str:
 
 def _diff(calc: Optional[float], shown: Optional[float]) -> str:
     # + 0.0 turns the -0.0 that rounding a tiny negative leaves into 0.0: '+0.00', not '-0.00'.
-    return "—" if calc is None or shown is None else f"{round(shown - calc, 2) + 0.0:+.2f}"
+    return "—" if calc is None or shown is None else f"{formulas.diff(calc, shown):+.2f}"
 
 
 # ── The report's tables ──────────────────────────────────────────────────────
@@ -270,7 +272,50 @@ def calc_of(note) -> Optional[Dict]:
         table = json.loads(note[len(CALC_PREFIX):])
     except ValueError:
         return None
-    return table if isinstance(table, dict) and table.get("t") else None
+    if not (isinstance(table, dict) and table.get("t")):
+        return None
+    return rejudge(table)
+
+
+def _cell_num(cell) -> Optional[float]:
+    try:
+        return float(str(cell).replace("€", "").replace(",", ".").replace("+", "").strip())
+    except ValueError:
+        return None
+
+
+def rejudge(table: Dict) -> Dict:
+    """Judge a stored table's rows again by their own figures, EXACT TO THE CENT (the user,
+    2026-11-17: "if anywhere 0.01 difference then fail it ... in report show fail 0.01
+    diff"). A run recorded with the old one-cent tolerance then reads as today's would:
+    a PASS row whose Diff is a cent or more is a FAIL; a VAT row whose Excl. + VAT is not
+    its ATI, or whose VAT is above the rate, is a FAIL. Never turns a FAIL into a PASS,
+    and leaves information (None) alone. The 'payments' row is left as judged: its
+    difference can be the Due (change owed back), which explains it."""
+    head = table.get("h") or []
+    rows = [r for r in (table.get("r") or []) if isinstance(r, list) and len(r) > len(head)]
+    if "Diff" in head:
+        k = head.index("Diff")
+        for r in rows:
+            if r[-1] is True and str(r[0]).strip().lower() != "payments":
+                d = _cell_num(r[k])
+                if d is not None and not formulas.same(d, 0.0):
+                    r[-1] = False
+    if {"Excl. Tax", "VAT", "ATI"} <= set(head):
+        ie, iv, ia = head.index("Excl. Tax"), head.index("VAT"), head.index("ATI")
+        rate_at = head.index("Rate") if "Rate" in head else 0
+        for r in rows:
+            if r[-1] is not True:
+                continue
+            excl, vat, ati = _cell_num(r[ie]), _cell_num(r[iv]), _cell_num(r[ia])
+            m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(r[rate_at]))
+            if None in (excl, vat, ati):
+                continue
+            off = not formulas.vat_row_adds(excl, vat, ati)
+            above = bool(m) and not formulas.vat_within_rate(vat, ati, float(m.group(1)))
+            if off or above:
+                r[-1] = False
+    return table
 
 
 def _sum_mismatch(what: str, before: Optional[float], calc: Optional[float],
@@ -285,7 +330,7 @@ def _sum_mismatch(what: str, before: Optional[float], calc: Optional[float],
             return None
         return (f"{what}: before €{before:.2f}, calculated €{calc:.2f} but displayed "
                 f"€{shown:.2f} (diff {shown - calc:+.2f})")
-    if shown < before - 0.005:
+    if shown < before - formulas.TOL:
         return None                     # it fell; by how much is not known
     return f"{what}: before €{before:.2f}, the Total did not fall (displayed €{shown:.2f})"
 
@@ -313,8 +358,7 @@ def offer_check(kind: str, before: Optional[float], shown: Optional[float], offe
              else repr((offer or "")[:30]))
     calc = None
     if before is not None:
-        calc = (round(before * (1 - pct / 100), 2) if pct is not None
-                else round(before - fixed, 2) if fixed is not None else None)
+        calc = formulas.after_offer(before, pct, fixed)
     what = f"{kind} {label}" + (f" ({who})" if who else "")
     problem = _sum_mismatch(what, before, calc, shown)
     head = ["Total before", kind, f"Total after {kind.lower()}", "Displayed", "Diff"]
@@ -325,7 +369,7 @@ def offer_check(kind: str, before: Optional[float], shown: Optional[float], offe
 def tip_check(who: str, before: Optional[float], tip: float,
               shown: Optional[float]) -> Tuple[str, Optional[str]]:
     """A tip: the Total before it plus the tip, against the Total shown."""
-    calc = None if before is None else round(before + tip, 2)
+    calc = None if before is None else formulas.with_tip(before, tip)
     what = f"Tip {tip:.2f} ({who})"
     problem = _sum_mismatch(what, before, calc, shown)
     if problem is None and calc is None:
@@ -341,7 +385,7 @@ def charge_check(what: str, bill: Optional[float], charged: Optional[float],
     if bill is None or charged is None:
         row = [eur(bill), eur(charged), "—", None]
         return calc_note(what, ["Bill displayed", charged_as, "Diff"], [row]), None
-    problem = (None if _adds(bill, charged, ROW_TOL) else
+    problem = (None if _adds(bill, charged) else
                f"{what}: bill displayed €{bill:.2f} but {charged_as.lower()} €{charged:.2f} "
                f"(diff {charged - bill:+.2f})")
     row = [eur(bill), eur(charged), _diff(bill, charged), problem is None]
@@ -367,10 +411,9 @@ def check(blocks: List[Block], gaps: int = 0, cut: bool = False, comps_printed: 
     totals: Dict[str, List[list]] = {}
     vat_rows: Dict[str, List[list]] = {}
 
-    def compare(name: str, what: str, working: str, calc: float, shown: float,
-                tol: float = SUM_TOL) -> None:
+    def compare(name: str, what: str, working: str, calc: float, shown: float) -> None:
         rep.sums += 1
-        ok = _adds(calc, shown, tol)
+        ok = _adds(calc, shown)
         line = f"{name} {what}: {working} = {calc:.2f}, invoice shows {shown:.2f}"
         if ok:
             rep.lines.append(line + " — matches")
@@ -396,15 +439,15 @@ def check(blocks: List[Block], gaps: int = 0, cut: bool = False, comps_printed: 
         total, tip = b.totals[-1], b.tip or 0.0
         for rate, (excl, tax, ati) in sorted(b.vat.items()):
             rep.sums += 2
-            adds = _adds(excl + tax, ati, ROW_TOL)
+            adds = formulas.vat_row_adds(excl, tax, ati)
             line = (f"{name} VAT {rate}%: {excl:.2f} + {tax:.2f} = {excl + tax:.2f}, invoice "
                     f"shows {ati:.2f}")
             if adds:
                 rep.lines.append(line + " — matches")
             else:
                 rep.problems.append(line + f" — off by {abs(excl + tax - ati):.2f}")
-            ceiling = ati * rate / (100 + rate)
-            under = tax <= ceiling + ROW_TOL
+            ceiling = formulas.vat_in(ati, rate)
+            under = formulas.vat_within_rate(tax, ati, rate)
             if not under:
                 rep.problems.append(f"{name} VAT {rate}%: VAT {tax:.2f} on {ati:.2f} is above "
                                     f"the rate (at most {ceiling:.2f})")
@@ -413,23 +456,21 @@ def check(blocks: List[Block], gaps: int = 0, cut: bool = False, comps_printed: 
         if b.vat:
             atis = [v[2] for _, v in sorted(b.vat.items())]
             compare(name, "grand total", f"VAT rows {_plus(atis)}"
-                    + (f" + tip {tip:.2f}" if tip else ""), sum(atis) + tip, total)
+                    + (f" + tip {tip:.2f}" if tip else ""), formulas.vat_rows_total(atis, tip), total)
         else:
             rep.problems.append(f"{name}: no VAT row could be read")
         if b.discount is not None and len(b.totals) > 1:
             compare(name, "discount", f"{b.totals[0]:.2f} - {b.discount:.2f}",
-                    b.totals[0] - b.discount, total)
+                    formulas.after_discount(b.totals[0], b.discount), total)
         if not b.items:
             rep.problems.append(f"{name}: no dish row could be read")
         elif b.name == "Pre-Order" or comps_printed:
-            # Each row is rounded on its own: half a cent per row can add up.
-            tol = 0.01 + 0.005 * (len(b.items) + len(b.comps))
             working = f"{len(b.items)} dishes {sum(b.items):.2f}"
             if b.comps:
                 working += f" - {len(b.comps)} comps {sum(b.comps):.2f}"
             if tip:
                 working += f" + tip {tip:.2f}"
-            compare(name, "dishes", working, sum(b.items) - sum(b.comps) + tip, total, tol)
+            compare(name, "dishes", working, formulas.dishes_total(b.items, b.comps, tip), total)
         else:
             rep.lines.append(f"{name} dishes: {len(b.items)} rows list {sum(b.items):.2f} before "
                              f"comps; this invoice does not print comps, so they are not "
@@ -448,7 +489,7 @@ def check(blocks: List[Block], gaps: int = 0, cut: bool = False, comps_printed: 
             line = (f"{name} payments: {_plus(tendered)} = {sum(tendered):.2f} against Total "
                     f"{total:.2f}" + (f", Due {due:.2f}" if due else "")
                     + (f", the run overpaid {over:.2f}" if over else ""))
-            ok = any(_adds(abs(diff), x) for x in (0.0, due)) or (diff > 0 and _adds(diff, over))
+            ok = formulas.payments_match(sum(tendered), total, due, over)
             # SHORT of the Total: the printed payment lines leave out what was booked on
             # guests -- a share the host paid for them in the C-App, a guest's own cash
             # (MEASURED 2026-11-05, run 3b33a2fe: 310.11 printed of 404.56 = 16.15 + 78.31
@@ -546,7 +587,7 @@ def paid_from_notes(lines: Iterable[Tuple[str, str]], role: Optional[str] = None
         if m:
             bill, tendered = _euro(m.group(1)), _euro(m.group(2))
             out["table"].append(bill)
-            out["overpaid"] = round(out["overpaid"] + max(0.0, tendered - bill), 2)
+            out["overpaid"] = round(out["overpaid"] + max(0.0, formulas.change(tendered, bill)), 2)
         m = _TIP_RE.search(line)
         if m:
             out["tips"].append(_euro(m.group(1)))

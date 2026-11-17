@@ -64,10 +64,6 @@ class PIIConfig:
     def __init__(self, custom_patterns: dict[str, tuple[str, str]] = None):
         self.custom_patterns = custom_patterns or {}
 
-    def add_pattern(self, name: str, pattern: str, replacement: str):
-        """Add custom regex pattern for scrubbing"""
-        self.custom_patterns[name] = (pattern, replacement)
-
     def scrub(self, data: Any) -> Any:
         """Apply all scrubbing patterns to data"""
         if isinstance(data, str):

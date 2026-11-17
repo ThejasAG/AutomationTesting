@@ -45,6 +45,5 @@ def _no_real_app_relaunch(monkeypatch):
         yield
         return
     monkeypatch.setattr(FlowRunner, "_relaunch_business", lambda self, notes, tag: True)
-    # The crash path relaunches whichever app crashed, the same way.
-    monkeypatch.setattr(FlowRunner, "_relaunch_after_crash", lambda self, r, role, notes: True)
+    # (A crash no longer relaunches anything: it stops the run, 2026-11-17.)
     yield

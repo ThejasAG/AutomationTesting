@@ -2778,16 +2778,6 @@ class AppBuilder:
             logger.warning("Could not write artifact metadata %s: %s", path, e)
             return None
 
-    def artifact_metadata(self, app_path: str) -> Dict[str, Any]:
-        """Recorded identity for an artifact, or {} when it predates metadata."""
-        path = os.path.join(os.path.dirname(app_path),
-                            os.path.basename(app_path) + self.METADATA_NAME)
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
     def _git_branch(self, repo_path: str) -> Optional[str]:
         try:
             import subprocess

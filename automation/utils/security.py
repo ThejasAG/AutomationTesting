@@ -4,7 +4,6 @@ Prevents accidental exposure of tokens, API keys, and credentials in logs/respon
 """
 
 import re
-import os
 from typing import Any, Dict
 
 # ── Patterns that identify secrets ─────────────────────────────────────────
@@ -71,15 +70,6 @@ def mask_dict(data: Dict[str, Any], depth: int = 5) -> Dict[str, Any]:
         else:
             masked[key] = value
     return masked
-
-
-def safe_env() -> Dict[str, str]:
-    """
-    Returns os.environ with all sensitive values masked.
-    Use this when logging environment variables.
-    """
-    return {k: mask_string(v) if k.upper() in {s.upper() for s in _SENSITIVE_KEYS} else v
-            for k, v in os.environ.items()}
 
 
 class SecretFilter:

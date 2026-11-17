@@ -21,12 +21,17 @@ import sys
 
 EDITABLE = ("automation", "tests", "scripts")
 # The agent's own guardrails and the tool that records its runs.
+# The platform's start/stop/status/install commands live in scripts/ too; they were
+# outside the agent's reach at the repo root and stay so.
+LIFECYCLE = ("start.sh", "stop.sh", "status.sh", "install.py", "supervise_backend.sh")
 PROTECTED = (os.path.join("automation", "claude_code"), ".claude",
-             os.path.join("scripts", "agent_tools.py"))
+             os.path.join("scripts", "agent_tools.py"),
+             *(os.path.join("scripts", f) for f in LIFECYCLE))
 # In the session folder: the run ledger and transcript are evidence, written by the
 # tools and the runner only.
 LEDGER = ("runs.jsonl", "runs", "transcript.jsonl", "result.json", "gates.json")
-SECRETS = (".env", "cross_app_config.json")
+SECRETS = (os.path.join("config", ".env"), os.path.join("config", "cross_app_config.json"),
+           ".env", "cross_app_config.json")   # the legacy spots, linked in older-commit worktrees
 _SAFE_ARGS = r"(\s+[^;&|`$<>\\\n\r]*)?$"
 BASH_ALLOWED = (
     re.compile(r"^\.venv/bin/python scripts/agent_tools\.py" + _SAFE_ARGS),
@@ -81,7 +86,7 @@ def check(tool: str, inp: dict, cwd: str, env: dict) -> str:
     if tool in ("Read", "Grep", "Glob", "NotebookRead"):
         p = _real(inp.get("file_path") or inp.get("path") or "", cwd)
         if p and p in secrets:
-            return "secrets files (.env, cross_app_config.json) are not readable in agent sessions"
+            return "secrets files (config/.env, config/cross_app_config.json) are not readable in agent sessions"
         return ""
 
     if tool == "Bash":

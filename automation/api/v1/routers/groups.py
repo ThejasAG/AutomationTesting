@@ -9,7 +9,7 @@ affected suites of every app in the same group.
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from pydantic import BaseModel
 import uuid
 
@@ -22,11 +22,6 @@ router = APIRouter(prefix="/groups", tags=["Application Groups"])
 class GroupCreate(BaseModel):
     name: str
     description: str = ""
-
-
-class GroupUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
 
 
 class GroupMembers(BaseModel):
@@ -67,11 +62,6 @@ def list_groups(db: Session = Depends(get_db)):
     return {"groups": [_serialize(g) for g in groups]}
 
 
-@router.get("/{group_id}")
-def get_group(group_id: str, db: Session = Depends(get_db)):
-    return {"group": _serialize(_get_group_or_404(group_id, db))}
-
-
 @router.post("/")
 def create_group(body: GroupCreate, db: Session = Depends(get_db)):
     if db.query(ApplicationGroup).filter(ApplicationGroup.name == body.name).first():
@@ -84,16 +74,6 @@ def create_group(body: GroupCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(group)
     return {"status": "created", "group": _serialize(group)}
-
-
-@router.put("/{group_id}")
-def update_group(group_id: str, body: GroupUpdate, db: Session = Depends(get_db)):
-    group = _get_group_or_404(group_id, db)
-    for key, value in body.model_dump(exclude_unset=True, exclude_none=True).items():
-        setattr(group, key, value)
-    db.commit()
-    db.refresh(group)
-    return {"status": "updated", "group": _serialize(group)}
 
 
 @router.delete("/{group_id}")
@@ -126,29 +106,3 @@ def set_group_members(group_id: str, body: GroupMembers, db: Session = Depends(g
 
     return {"status": "updated", "group": _serialize(_get_group_or_404(group_id, db))}
 
-
-@router.get("/{group_id}/impact-scope")
-def get_impact_scope(group_id: str, db: Session = Depends(get_db)):
-    """Every project a change in this group could affect.
-
-    This is the hook future cross-app impact analysis executes against: it
-    returns the sibling apps whose suites should also run when one app in the
-    group changes.
-    """
-    group = _get_group_or_404(group_id, db)
-
-    return {
-        "group_id": group.id,
-        "group_name": group.name,
-        "scope": [
-            {
-                "project_id": p.id,
-                "name": p.name,
-                "platform": p.platform,
-                "project_type": p.project_type,
-                "default_branch": p.default_branch,
-                "executable": p.clone_status in ("cloned", "ready", "outdated"),
-            }
-            for p in group.projects
-        ],
-    }

@@ -92,15 +92,6 @@ class TestRecommendationEngine:
             "no_coverage": bool(affected_modules) and not runnable,
         }
 
-    def generate_recommendations(self, repo_path: str, commit_sha: str = "HEAD", config_map: Dict = None) -> Dict[str, Any]:
-        """Analyzes a git diff and recommends tests that exist in the clone."""
-        changed_files = git_analyzer.extract_changed_files(repo_path, commit_sha)
-        result = self.recommend_for_files(changed_files, repo_path, config_map)
-        result["explanation"] = self._generate_ai_explanation(
-            changed_files, result["affected_modules"], result["recommended_tests"]
-        )
-        return result
-        
     def _generate_ai_explanation(self, files: List[str], modules: List[str], tests: List[str]) -> str:
         if not files:
             return "No file changes detected, skipping recommendation logic."

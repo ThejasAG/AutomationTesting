@@ -13,7 +13,7 @@ scenario_results table), so the common cases never need Claude:
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 _RULES: List[Tuple[str, str]] = [
     ("INFRA", r"could not proxy command|socket hang up|webdriveragent is not initiali[sz]ed|"
@@ -78,8 +78,3 @@ def classify(run: Any, rows: List[Any]) -> Dict[str, Any]:
         "summary": summary,
     }
 
-
-def first_policy(category: str) -> Optional[str]:
-    """What the orchestrator tries before asking Claude: 'retry' (whole flow, after
-    the rig recovers), 'resume' (from the failed segment), or None."""
-    return {"INFRA": "retry", "TIMING": "resume"}.get(category)

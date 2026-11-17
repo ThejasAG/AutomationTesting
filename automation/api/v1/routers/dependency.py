@@ -44,10 +44,6 @@ _PROJECT_TYPE_TO_SCANNER = {
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
-class ImpactRequest(BaseModel):
-    changed_files: List[str]
-
-
 class AnalyzeRequest(BaseModel):
     changed_files: List[str]
     group_id: Optional[str] = None
@@ -179,20 +175,6 @@ def list_groups(db: Session = Depends(get_db)):
     return {"groups": [_serialize_group(g, db) for g in groups]}
 
 
-@router.get("/groups/{group_id}")
-def get_group(group_id: str, db: Session = Depends(get_db)):
-    """Get a group with its members and the latest dependency graph."""
-    group = _get_group_or_404(group_id, db)
-    latest = _latest_graph(group_id, db)
-
-    return {
-        "group": _serialize_group(group, db),
-        "graph": latest.graph_data if latest else None,
-        "api_endpoints": latest.api_endpoints if latest else None,
-        "scanned_at": latest.scanned_at.isoformat() if latest and latest.scanned_at else None,
-    }
-
-
 @router.post("/groups/{group_id}/scan")
 def scan_group(group_id: str, db: Session = Depends(get_db)):
     """Scan every app in the group for API usage and persist the graph."""
@@ -237,33 +219,6 @@ def scan_group(group_id: str, db: Session = Depends(get_db)):
         # a partial graph as complete.
         "skipped_not_cloned": not_cloned,
     }
-
-
-@router.post("/groups/{group_id}/impact")
-def analyze_impact(
-    group_id: str, body: ImpactRequest, db: Session = Depends(get_db)
-):
-    """Cross-app impact of a set of changed files."""
-    _get_group_or_404(group_id, db)
-
-    latest = _latest_graph(group_id, db)
-    if not latest or not latest.graph_data:
-        raise HTTPException(
-            status_code=400,
-            detail="No dependency graph for this group yet. Run a scan first.",
-        )
-
-    if not body.changed_files:
-        raise HTTPException(status_code=400, detail="changed_files must not be empty.")
-
-    impact = cross_app_analyzer.find_cross_app_impact(
-        body.changed_files, latest.graph_data
-    )
-    impact["group_id"] = group_id
-    impact["graph_scanned_at"] = (
-        latest.scanned_at.isoformat() if latest.scanned_at else None
-    )
-    return impact
 
 
 def _hybrid_app_configs(group: ApplicationGroup, db: Session) -> List[Dict[str, Any]]:

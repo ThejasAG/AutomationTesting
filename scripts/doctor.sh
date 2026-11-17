@@ -38,8 +38,8 @@ else
 fi
 # Any iOS runtime in the supported RANGE will do — we do not pin a version.
 # ios-support.json declares the range; this only reports what is installed.
-MIN_IOS=$(sed -n 's/.*"min_ios"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' ios-support.json 2>/dev/null)
-MAX_IOS=$(sed -n 's/.*"max_ios"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' ios-support.json 2>/dev/null)
+MIN_IOS=$(sed -n 's/.*"min_ios"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' config/ios-support.json 2>/dev/null)
+MAX_IOS=$(sed -n 's/.*"max_ios"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' config/ios-support.json 2>/dev/null)
 MIN_IOS=${MIN_IOS:-16.0}; MAX_IOS=${MAX_IOS:-26.99}
 
 # Major version is all that matters for the range test.
@@ -54,7 +54,7 @@ if [ "${IN_RANGE:-0}" -gt 0 ]; then
   pass "iOS runtime(s) in supported range ${MIN_IOS}-${MAX_IOS}: $(echo $VERS | tr '\n' ' ')"
 elif [ -n "$VERS" ]; then
   bad "installed iOS runtime(s) [$(echo $VERS | tr '\n' ' ')] are outside the supported ${MIN_IOS}-${MAX_IOS}" \
-      "install any iOS ${MIN_IOS%%.*}-${MAX_IOS%%.*} runtime (Xcode > Settings > Components), or raise max_ios in ios-support.json if a newer iOS is now verified"
+      "install any iOS ${MIN_IOS%%.*}-${MAX_IOS%%.*} runtime (Xcode > Settings > Components), or raise max_ios in config/ios-support.json if a newer iOS is now verified"
 else
   bad "no iOS runtime" "Xcode > Settings > Components, or xcodebuild -downloadPlatform iOS"
 fi
@@ -68,14 +68,14 @@ UNUSED=$(top -l 1 -n 0 2>/dev/null | awk '/PhysMem/{print $(NF-1)}' | tr -dc '0-
   || warn "only ${UNUSED}M memory unused" "close browsers/Teams and unused Metro bundlers — this is what kills Metro and makes steps take 120s"; }
 
 echo "== Platform config =="
-[ -f .env ] && pass ".env present" || bad ".env missing" "cp .env.example .env, then fill it in"
-if [ -f .env ]; then
-  grep -q "^DATABASE_URL=sqlite:////" .env && pass "DATABASE_URL is an ABSOLUTE path outside the repo" \
+[ -f config/.env ] && pass "config/.env present" || bad "config/.env missing" "cp config/.env.example config/.env, then fill it in"
+if [ -f config/.env ]; then
+  grep -q "^DATABASE_URL=sqlite:////" config/.env && pass "DATABASE_URL is an ABSOLUTE path outside the repo" \
     || bad "DATABASE_URL not set outside the repo" "DATABASE_URL=sqlite:////Users/<you>/.vya-platform/platform.db  — .db files are in git history and a checkout WILL overwrite an in-repo database"
-  grep -q "^LLM_PROVIDER_TYPE=" .env && grep -q "^OPENAI_API_KEY=" .env \
+  grep -q "^LLM_PROVIDER_TYPE=" config/.env && grep -q "^OPENAI_API_KEY=" config/.env \
     && pass "LLM provider configured" \
     || bad "no LLM key" "LLM_PROVIDER_TYPE=groq + OPENAI_API_KEY=<groq key>. WITHOUT THESE the AI silently returns a canned fake analysis instead of erroring"
-  grep -q "^GITHUB_TOKEN=" .env && pass "GITHUB_TOKEN set" || warn "no GITHUB_TOKEN" "PR listing and PR-QA comments will not work"
+  grep -q "^GITHUB_TOKEN=" config/.env && pass "GITHUB_TOKEN set" || warn "no GITHUB_TOKEN" "PR listing and PR-QA comments will not work"
 fi
 [ -d .venv ] && pass "python venv" || bad "no .venv" "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
 
@@ -98,8 +98,8 @@ echo "== Devices =="
 BOOTED=$(xcrun simctl list devices booted 2>/dev/null | grep -c Booted)
 [ "${BOOTED:-0}" -gt 0 ] && pass "$BOOTED simulator(s) booted" \
   || bad "no simulator booted" "xcrun simctl boot <udid>"
-if [ -f cross_app_config.json ]; then
-  for u in $(grep -oE '"[A-F0-9-]{36}"' cross_app_config.json | tr -d '"' | sort -u); do
+if [ -f config/cross_app_config.json ]; then
+  for u in $(grep -oE '"[A-F0-9-]{36}"' config/cross_app_config.json | tr -d '"' | sort -u); do
     xcrun simctl list devices booted 2>/dev/null | grep -q "$u" \
       && pass "flow device ${u:0:8} booted" \
       || bad "flow device ${u:0:8} NOT booted" "xcrun simctl boot $u   (flows use PINNED devices, not whatever is booted)"

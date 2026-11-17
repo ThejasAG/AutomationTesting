@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const src = fileURLToPath(new URL('./time.ts', import.meta.url));
 const js = execFileSync('npx', ['esbuild', src, '--format=esm', '--log-level=error'], { encoding: 'utf8' });
-const { parseServerDate, parseServerDateOrNull } =
+const { parseServerDate } =
   await import('data:text/javascript,' + encodeURIComponent(js));
 
 // The bug: the API sends naive UTC, so this must NOT be read as local time.
@@ -24,8 +24,5 @@ assert.equal(parseServerDate('2026-08-19T18:32:00+05:30').toISOString(), '2026-0
 // Date-only: must stay untouched. Forcing UTC here shifts the day west of GMT.
 assert.equal(parseServerDate('2026-08-19').toISOString(), '2026-08-19T00:00:00.000Z');
 
-assert.equal(parseServerDateOrNull(null), null);
-assert.equal(parseServerDateOrNull(''), null);
-assert.equal(parseServerDateOrNull('not-a-date'), null);
 
 console.log('ok');

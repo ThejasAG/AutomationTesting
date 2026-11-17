@@ -150,15 +150,6 @@ def create_scenario(body: ScenarioIn, db: Session = Depends(get_db),
     return row.to_dict()
 
 
-@router.get("/{scenario_id}")
-def get_scenario(scenario_id: str, db: Session = Depends(get_db),
-                 current_user=Depends(get_current_user)):
-    row = db.query(SavedScenario).filter(SavedScenario.id == scenario_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Scenario not found.")
-    return row.to_dict()
-
-
 @router.put("/{scenario_id}")
 def update_scenario(scenario_id: str, body: ScenarioIn, db: Session = Depends(get_db),
                     current_user=Depends(get_current_user)):

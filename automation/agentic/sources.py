@@ -103,14 +103,6 @@ def read_file(app: str, path: str, start: int = 1, end: int = 200) -> str:
     return f"{rel} (lines {start}-{min(end, len(lines))} of {len(lines)})\n{body}"
 
 
-def recent_changes(app: str, days: int = 14) -> str:
-    repo = _repo_or_raise(app)
-    out = subprocess.run(
-        ["git", "log", f"--since={int(days)}.days", "-n", "20", "--stat", "--format=%h %ad %s",
-         "--date=short"], cwd=repo, capture_output=True, text=True, timeout=30).stdout
-    return out[:12000] or f"No commits in the last {days} days on the checked-out branch."
-
-
 def knowledge(name: str) -> str:
     path = os.path.join(KNOWLEDGE, name)
     try:

@@ -146,7 +146,7 @@ export default function AgentPage() {
       setRestart({ phase: 'done' });
       load();
     } else {
-      setRestart({ phase: 'idle', error: 'The backend did not come back after 2 minutes — check ./status.sh on the test Mac.' });
+      setRestart({ phase: 'idle', error: 'The backend did not come back after 2 minutes — check scripts/status.sh on the test Mac.' });
     }
   };
 

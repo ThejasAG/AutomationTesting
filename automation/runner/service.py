@@ -1,8 +1,6 @@
 import os
-import threading
 import uuid
 import time
-import json
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -13,7 +11,6 @@ from automation.ai.service import RCAService
 from automation.evidence.collector import EvidenceCollector, EvidenceCollectorConfig
 from automation.reports.generator import ReportGenerator
 
-from automation.projects.repository import repository_manager
 from automation.plugins.appium_framework import AppiumFramework
 
 logger = logging.getLogger(__name__)
@@ -330,17 +327,6 @@ class RunnerService:
                 "event": event_name
             })
             
-    def get_run_status(self, run_id: str) -> Dict[str, Any]:
-        if run_id in self.active_runs:
-            run = self.active_runs[run_id]
-            return {
-                "id": run_id,
-                "status": run["status"],
-                "logs": list(run["logs"]),
-                "duration_ms": run["duration_ms"] if run["end_time"] else (int((time.time() - run["start_time"]) * 1000) if run["start_time"] else 0)
-            }
-        return {"status": "Not Found", "logs": []}
-        
     def stop_run(self, run_id: str) -> bool:
         """Stop a run whether it is executing in THIS process or queued for the
         distributed agent.

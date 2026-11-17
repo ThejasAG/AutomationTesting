@@ -23,7 +23,7 @@ import logging
 import os
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from automation.database.config import SessionLocal
@@ -173,22 +173,6 @@ def find_artifact(project: dict, bundle_id: str) -> Optional[str]:
         if ok:
             return path
     return None
-
-
-def artifact_identity(path: str) -> Dict[str, Optional[str]]:
-    """What an on-disk artifact says it is (branch, commit, environment, …).
-
-    Empty for artifacts built before metadata existed; callers must treat "unknown"
-    as "cannot prove it matches", never as "matches".
-    """
-    meta = app_builder.artifact_metadata(path)
-    return {
-        "bundle_id": meta.get("bundle_id") or app_builder._bundle_id(path),
-        "environment": meta.get("environment"),
-        "branch": meta.get("branch"),
-        "commit": meta.get("commit"),
-        "built_at": meta.get("built_at"),
-    }
 
 
 def _probe_installed(device_id: str, bundle_id: str) -> bool:

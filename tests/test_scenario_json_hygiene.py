@@ -160,12 +160,12 @@ def test_09_to_dict_always_returns_lists(db):
 
 # ── the API contract ────────────────────────────────────────────────────────
 
-def test_10_api_post_then_get_preserves_the_list(db):
+def test_10_api_post_then_list_preserves_the_list(db):
     body = sr.ScenarioIn(name="API", project_id="proj-1",
                          steps=["open app", "tap Login"], covers=["Home", "Login"])
     created = sr.create_scenario(body, db=db, current_user=None)
     assert created["steps"] == ["open app", "tap Login"]
-    fetched = sr.get_scenario(created["id"], db=db, current_user=None)
+    fetched = [s for s in sr.list_scenarios(db=db, current_user=None) if s["id"] == created["id"]][0]
     assert fetched["steps"] == ["open app", "tap Login"]
     assert fetched["covers"] == ["Home", "Login"]
 

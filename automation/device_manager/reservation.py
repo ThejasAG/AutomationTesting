@@ -40,11 +40,6 @@ class Reservation:
     reserved_at: Optional[datetime]
     reserved_state: Optional[str]
 
-    @property
-    def is_held(self) -> bool:
-        return self.reserved_by is not None
-
-
 def _session(db):
     """Use the caller's session when given one, else open our own."""
     if db is not None:

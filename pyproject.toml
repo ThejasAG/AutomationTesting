@@ -31,4 +31,4 @@ dev = [
 include = ["automation*"]
 
 [tool.pytest.ini_options]
-testpaths = ["automation/tests"]
+testpaths = ["tests"]

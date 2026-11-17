@@ -281,30 +281,6 @@ class DeviceDiscoveryService:
             logger.info("hydrated %d device(s) from the database", loaded)
         return loaded
 
-    def devices_for_machine(self, machine_id: str) -> List[Device]:
-        """Persisted devices belonging to one machine — the machine-aware read.
-
-        Nothing allocates on this yet; it exists so the next phase has a source of
-        truth to query instead of a flat udid-keyed dict.
-        """
-        from automation.database.config import SessionLocal
-        from automation.database.models import DeviceRecord
-
-        db = SessionLocal()
-        try:
-            rows = db.query(DeviceRecord).filter(DeviceRecord.machine_id == machine_id).all()
-            return [self._devices_cache.get(r.udid) or Device(
-                id=r.udid, name=r.name or "Unknown", platform=r.platform or "Unknown",
-                provider=r.provider or r.machine_id, hostname=r.hostname,
-                last_seen=r.last_seen,
-            ) for r in rows]
-        except Exception as e:
-            logger.warning("could not read devices for machine %s: %s", machine_id, e)
-            return []
-        finally:
-            db.close()
-
-        
     def sync_agent_devices(self, agent_id: str, devices_data: List[Dict],
                            hostname: Optional[str] = None, db=None):
         """Called by the agent heartbeat API to sync devices connected to remote agents.
@@ -357,21 +333,6 @@ class DeviceDiscoveryService:
         """ONLINE devices with a fresh heartbeat — the only ones safe to run on."""
         return [d for d in self.get_all_devices() if d.status == DeviceStatus.ONLINE]
 
-    def register_local_device(self, udid: str, name: str = "iOS Simulator",
-                              platform: str = "iOS", version: str = "") -> Device:
-        """Register a locally-resolved simulator so runs can target it even when
-        the agent-fed registry is empty (e.g. right after a restart). Idempotent."""
-        dev = Device(
-            id=udid, name=name, manufacturer="Apple", model=name,
-            platform=platform, platform_version=version or "",
-            status=DeviceStatus.ONLINE, provider="local",
-            hostname=_local_hostname(),
-            last_seen=datetime.utcnow(),
-        )
-        self._devices_cache[udid] = dev
-        self._persist(local_machine_id(), dev)
-        return dev
-
     def discover_local_simulators(self, booted_only: bool = True) -> List[Device]:
         """List the Mac's iOS simulators via `xcrun simctl` and register them as
         local devices, so the Automation page shows them even with no agent.
@@ -416,10 +377,6 @@ class DeviceDiscoveryService:
                 self._persist(local_machine_id(), dev)
                 found.append(dev)
         return found
-
-    def refresh_devices(self) -> List[Device]:
-        """Re-scan local simulators (used by the Automation page's refresh)."""
-        return self.discover_local_simulators(booted_only=False)
 
     def get_device(self, device_id: str) -> Optional[Device]:
         return self._devices_cache.get(device_id)
