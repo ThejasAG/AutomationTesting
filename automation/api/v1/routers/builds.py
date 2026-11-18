@@ -165,6 +165,7 @@ class DeployBody(BaseModel):
     device_ids: Optional[List[str]] = None       # default: every discovered simulator
     include_shutdown: bool = True                # boot shut-down sims and install too
     force_build: bool = True
+    clear_app_data: bool = False                 # sign out/reset local app state before install
 
 
 class _Deploy:
@@ -327,6 +328,20 @@ class _Deploy:
                             self.state["results"].append(
                                 {"project": name, "device": d.name, "device_id": d.id,
                                  "stage": "boot", "ok": False, "detail": boot_msg[:300]})
+                            self._advance(self._W_INSTALL)
+                            continue
+                    if body.clear_app_data:
+                        self.log(f"{name} -> {d.name}: clearing app data for "
+                                 f"{built.bundle_id or 'unknown bundle'} …")
+                        cleared, clear_msg = _builder.uninstall(
+                            d.id, built.bundle_id or "", platform)
+                        if not cleared:
+                            detail = str(clear_msg)[:300]
+                            self.log(f"{name} -> {d.name}: app-data reset FAILED — {detail}")
+                            self.state["results"].append(
+                                {"project": name, "device": d.name, "device_id": d.id,
+                                 "stage": "reset", "ok": False, "detail": detail,
+                                 "bundle_id": built.bundle_id})
                             self._advance(self._W_INSTALL)
                             continue
                     prev = _builder.installed_version(d.id, built.bundle_id or "")

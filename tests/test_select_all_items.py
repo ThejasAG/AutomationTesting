@@ -22,12 +22,17 @@ def el(name, label=None):
 class Screen:
     """The Order Summary header: Select All <-> Unselect, per the app's state."""
 
-    def __init__(self, selected, items=True, select_works=True):
+    def __init__(self, selected, items=True, select_works=True, notify_payment=False,
+                 notify_after_select=False):
         self.selected, self.items, self.select_works = selected, items, select_works
+        self.notify_payment = notify_payment
+        self.notify_after_select = notify_after_select
         self.taps = []
 
     def describe_all(self, udid):
         els = [el("sendItemsBtn"), el("addItemsBtn")]
+        if self.notify_payment:
+            els.append(el("notifyPaymentBtn"))
         if self.items:
             # accessibilityLabel on the header Text (OrderSummary.js:628, 642).
             els.append(el("unSelectAll") if self.selected else el("selectAll"))
@@ -41,8 +46,11 @@ class Screen:
         self.taps.append(hit)
         if hit == "unSelectAll":
             self.selected = False
-        elif hit == "selectAll" and self.select_works:
-            self.selected = True
+        elif hit == "selectAll":
+            if self.select_works:
+                self.selected = True
+            if self.notify_after_select:
+                self.notify_payment = True
         return True, "idb"
 
 
@@ -52,11 +60,13 @@ def run(monkeypatch):
     monkeypatch.setattr(caf, "time", types.SimpleNamespace(
         time=lambda: clock["t"], sleep=lambda s: clock.__setitem__("t", clock["t"] + s)))
 
-    def go(screen):
+    def go(screen, resumed=False):
         monkeypatch.setattr(caf._idbd, "describe_all", screen.describe_all)
         monkeypatch.setattr(caf._idbd, "tap", screen.tap)
         runner = FlowRunner.__new__(FlowRunner)
         runner._cur_udid = "IPAD"
+        if resumed:
+            runner._resume = {"start_at": 1}
         notes = []
         return runner._select_all_items(notes), notes, clock["t"]
     return go
@@ -86,6 +96,22 @@ def test_a_select_all_that_does_nothing_is_a_failure(run):
     # Disabled in Payment/Completed (opacity 0.5): the tap lands, nothing changes.
     ok, notes, _ = run(Screen(selected=False, select_works=False))
     assert not ok and "nothing was selected" in notes[-1]
+
+
+def test_a_resumed_order_with_notify_payment_skips_select_all(run):
+    """MEASURED 2026-11-06 (flow_full_event, run 48c7c45e): Notify Payment was
+    visible after all items were served, but the disabled Select All tap failed."""
+    s = Screen(selected=False, select_works=False, notify_payment=True)
+    ok, notes, _ = run(s, resumed=True)
+    assert ok and not s.taps
+    assert "already served" in notes[-1]
+
+
+def test_a_resumed_order_rechecks_notify_payment_after_select_all_noop(run):
+    s = Screen(selected=False, select_works=False, notify_after_select=True)
+    ok, notes, _ = run(s, resumed=True)
+    assert ok and s.taps == ["selectAll"]
+    assert "already served" in notes[-1]
 
 
 def test_the_plain_steps_route_to_the_handler():

@@ -23,9 +23,8 @@
     "reads $(PRODUCT_BUNDLE_IDENTIFIER); a project that hardcodes the id in an",
     ".xcconfig instead will fail the post-build identity check, loudly, by design.",
     "",
-    "api_base_url is deliberately OPTIONAL and unset for Vya: staging and production",
-    "intentionally share one backend here. Do not invent a staging URL just because",
-    "an environment is named 'staging'."
+    "api_base_url is deliberately OPTIONAL. Vya production defaults to",
+    "api.vyapy.com; staging overrides it to vya.xorstack.com."
   ],
   "version": 1,
   "projects": [
@@ -49,7 +48,14 @@
           ],
           "bundle_id": "org.vyapy.sarls.vyaconsumer",
           "configuration": "Debug",
-          "metro_port": 8081
+          "metro_port": 8081,
+          "source_replacements": [
+            {
+              "file": "App/Config/Api.js",
+              "find": "export const API_URL = 'https://vya.xorstack.com';",
+              "replace": "export const API_URL = 'https://api.vyapy.com';"
+            }
+          ]
         },
         "staging": {
           "bundle_id": "org.vyapy.sarls.vyaconsumerstaging",

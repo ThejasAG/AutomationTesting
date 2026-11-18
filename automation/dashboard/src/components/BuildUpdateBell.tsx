@@ -53,6 +53,7 @@ export default function BuildUpdateBell() {
   // ahead of what is installed on the simulator.
   const [apps, setApps] = useState<string[]>(
     () => JSON.parse(localStorage.getItem('deploy_apps') || '[]'));
+  const [clearAppData, setClearAppData] = useState(false);
   const [error, setError] = useState('');
   const poll = useRef<number | null>(null);
 
@@ -140,7 +141,8 @@ export default function BuildUpdateBell() {
     try {
       if (!apps.length) { setError('Pick at least one app to build.'); return; }
       if (!chosen.length) { setError('Pick at least one simulator to install onto.'); return; }
-      await deployLatestBuild(apps, chosen);
+      await deployLatestBuild(apps, chosen, true, clearAppData);
+      setClearAppData(false);
       setDeploy({ status: 'running', steps: [], results: [] });
       startPolling();
     } catch (e) {
@@ -362,6 +364,21 @@ export default function BuildUpdateBell() {
                   </div>
                 )}
               </div>
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginBottom: 16, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={clearAppData}
+                  onChange={(e) => setClearAppData(e.target.checked)}
+                />
+                <span>
+                  <strong>Clear app data before install</strong>
+                  <span style={{ display: 'block', opacity: 0.65, fontSize: 12 }}>
+                    Signs out and clears cached app state on the selected simulators.
+                    Onboarding will run again.
+                  </span>
+                </span>
+              </label>
 
               <button
                 onClick={onDeploy}

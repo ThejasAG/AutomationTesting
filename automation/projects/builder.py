@@ -3156,6 +3156,22 @@ class AppBuilder:
         if not os.path.exists(os.path.join(repo_path, "package.json")):
             return True, "Not a JS project — Metro not needed."
 
+        # A preparation/build may have fixed this tree already, but scenarios can
+        # also point Metro directly at an existing checkout. Apply the same
+        # node_modules fixes before reusing a packager, whose cached graph may
+        # still contain qrcode code that calls the unavailable TextEncoder.
+        try:
+            from automation.projects.preparation import preparation_service
+            fixes = preparation_service.apply_toolchain_fixes(repo_path)
+        except Exception as e:
+            return False, f"Could not apply React Native runtime fixes: {e}"
+        qrcode_failures = [m for m in fixes if "Toolchain fix FAILED" in m
+                           and "qrcode" in m.lower() and "byte-data.js" in m]
+        if qrcode_failures:
+            return False, "; ".join(qrcode_failures)
+        if fixes:
+            self._kill_metro_for_repo(repo_path)
+
         # Point the app at this packager (harmless on 8081; essential off it).
         if udid and bundle_id:
             try:

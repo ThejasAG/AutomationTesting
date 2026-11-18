@@ -1885,9 +1885,12 @@ export async function getBuildUpdates(): Promise<{ projects: BuildUpdateProject[
  *  Omitting deviceIds installs on every discovered simulator — rarely what you want,
  *  so the UI always sends an explicit selection. */
 export async function deployLatestBuild(
-    projectIds?: string[], deviceIds?: string[], includeShutdown = true,
+    projectIds?: string[], deviceIds?: string[], includeShutdown = true, clearAppData = false,
 ): Promise<{ started: boolean; projects: string[] }> {
-    const body: Record<string, unknown> = { include_shutdown: includeShutdown };
+    const body: Record<string, unknown> = {
+        include_shutdown: includeShutdown,
+        clear_app_data: clearAppData,
+    };
     if (projectIds?.length) body.project_ids = projectIds;
     if (deviceIds?.length) body.device_ids = deviceIds;
     const res = await fetch(`${API_BASE}/builds/deploy`, {

@@ -4890,6 +4890,12 @@ class FlowRunner:
         Unselect, and Select All (the app selects every item that can be sent or
         served). Fails in seconds, not STEP_TIMEOUT, when neither is on screen."""
         udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        if getattr(self, "_resume", None):
+            els = _idbd.describe_all(udid)
+            if self._has(els, "notifyPaymentBtn"):
+                notes.append("[ok] select all items — nothing left to select: every item "
+                             "was already served (NOTIFY PAYMENT shows; resumed run)")
+                return True
 
         def on_screen(names):
             els = _idbd.describe_all(udid)
@@ -4924,7 +4930,13 @@ class FlowRunner:
         if not ok:
             notes.append(f"[FAIL] select all items — could not tap Select All ({why})")
             return False
-        if wait_for(self._UNSELECT)[1] is None:
+        els, selected = wait_for(self._UNSELECT)
+        if selected is None:
+            if (getattr(self, "_resume", None)
+                    and self._has(els, "notifyPaymentBtn")):
+                notes.append("[ok] select all items — nothing left to select: every item "
+                             "was already served (NOTIFY PAYMENT shows; resumed run)")
+                return True
             notes.append("[FAIL] select all items — tapped Select All but nothing was "
                          "selected (Unselect never appeared)")
             return False
@@ -7779,6 +7791,1334 @@ class FlowRunner:
                      f"profile ({', '.join(picked)}): {got} row(s) on the order")
         return True
 
+<<<<<<< Updated upstream
+=======
+    # An option radio on the B-App's options pane. The source names it `${name}Btn`
+    # + (price ? ' ' + price : '') (SelectProductOptions.js:415, :506); the INSTALLED
+    # build names it `${name}CheckBtn` (MEASURED 2026-10-29: largeCheckBtn,
+    # vegCheckBtn, nonvegCheckBtn, InsalataconPolloCheckBtn, x≈807 on the pane).
+    # Name stripped of spaces and non-ASCII.
+    _W_OPTION_RE = re.compile(r"^(?P<opt>.+?)(?:CheckBtn|Check|Btn(?: -?\d+(?:\.\d+)?)?)$")
+    # Controls ending like an option that are not one (the iPad's side bar, the pane).
+    _W_NOT_OPTIONS = {"homeBtn", "historyBtn", "menuBtn", "applyOptionBtn", "closeOptionBtn",
+                      "typeSplInstructionBtn", "assignToBtn", "addItemsBtn", "orderFilterBtn"}
+
+    @staticmethod
+    def _option_ticked(udid: str, row: dict, els: List[dict]) -> Optional[bool]:
+        """Is this options-pane radio ticked? The tree does not say; the pixels do.
+        MEASURED 2026-10-29 on the iPad pane (row x807, w173-207): the radio sits 40-52
+        pt in from the row's left edge on its centre line -- a ticked one has a dark dot
+        there (44-48 pt), an empty one only a pale ring. None = could not tell."""
+        x, y, _w, h = _idbd.frame(row)
+        cols = _idbd.sample_colors(udid, [(x + dx, y + h / 2) for dx in range(36, 58, 2)],
+                                   els, radius=1.0)
+        dark = [_idbd.is_dark(c, 200) for c in cols]
+        if all(v is None for v in dark):
+            return None
+        return any(dark[i] and dark[i + 1] for i in range(len(dark) - 1))
+
+    def _pane_into_view(self, udid: str, els: List[dict], row: dict, again):
+        """Scroll the options pane until *row* sits between its top and the floating
+        Apply. MEASURED 2026-10-29 (run 2ff7c13b): the pane opened at its top with
+        'large', 'veg', 'non veg' below Apply (y 779-967 on an 834-high screen) --
+        taps there pressed nothing and the pixel check read Apply's colour.
+        *again(els)* finds the row in a fresh read."""
+        name, frame = _idbd.name, _idbd.frame
+        for _ in range(4):
+            apply_ = next((e for e in els if name(e) == "applyOptionBtn"), None)
+            low = (frame(apply_)[1] if apply_ is not None else _idbd.app_size(els)[1]) - 12
+            high = 110.0
+            x, y, w, h = frame(row)
+            if high <= y and y + h <= low:
+                return els, row
+            mid = (high + low) / 2
+            shift = (y + h / 2) - mid
+            y0 = low - 10 if shift > 0 else high + 10
+            _idbd.swipe(udid, x + min(w, 120) / 2, y0, x + min(w, 120) / 2, y0 - shift,
+                        max(1.0, abs(shift) / 200.0))
+            time.sleep(0.6)
+            els = _idbd.describe_all(udid)
+            row = again(els) or row
+        return els, row
+
+    def _summary_qty(self, udid: str, row_id: str, qty: int, tag: str,
+                     notes: List[str]) -> bool:
+        """Raise a staged line to *qty* with the Summary's '+' (the user's procedure,
+        2026-10-29: add once, then '+', not one tap per unit).
+
+        MEASURED on the installed build: the Summary row is `<pid>card`, `removeItem`
+        or `decrementQuantity`, its count, `incrementQuantity`. That '+' opens the
+        'Custom Selections' panel (AddNewItemSummary.js:723-762) -- one element
+        '<name> <price> € Minus <n> Plus', whose own '+' is found by OCR and tapped
+        until the label reads *qty* -- and the panel closes by its handle (49 pt above
+        the 'Custom Selections' title, centred on the line). Done when the Summary's
+        count reads *qty*."""
+        from automation.scenarios import screen_text
+        name, frame = _idbd.name, _idbd.frame
+        els = _idbd.describe_all(udid)
+        row = next((e for e in els if name(e) == row_id and frame(e)[0] > 700), None)
+        if row is None:
+            notes.append(f"[FAIL] {tag} — the Summary has no {row_id!r} line")
+            return False
+        cy = frame(row)[1] + frame(row)[3] / 2
+        # Two forms of that '+', as in _w_qty: MEASURED 2026-11-02 (run 9f8ad3f6) the app
+        # served by Metro labels it `<pid>Increase`, with the same panel behind it.
+        ids = ("incrementQuantity", row_id[:-len("card")] + "Increase")
+        plus = next((e for e in els if name(e) in ids
+                     and abs(frame(e)[1] + frame(e)[3] / 2 - cy) < 20), None)
+        if plus is None:
+            notes.append(f"[FAIL] {tag} — the Summary line has no '+' (incrementQuantity)")
+            return False
+        _idbd.tap_el(udid, plus, els, scroll=False)
+        line_re = re.compile(r"Minus (\d+) Plus")
+
+        def line(es):
+            return next((e for e in es if line_re.search(name(e) or "")), None)
+
+        els, ln = self._wait_els(udid, line, 6.0)
+        if ln is None:
+            notes.append(f"[FAIL] {tag} — the Summary's '+' did not open Custom Selections")
+            return False
+        x, y, w, h = frame(ln)
+        for _ in range(qty + 2):
+            n = int(line_re.search(name(ln)).group(1))
+            if n >= qty:
+                break
+            # Use the button's explicit accessibility label before OCR. For long
+            # product names, Vision can mistake a plus-like mark in the row for the
+            # counter control and tap the item instead.
+            plus = next((e for e in els if name(e).strip().lower() == "plus"
+                         and x <= frame(e)[0]
+                         and frame(e)[0] + frame(e)[2] <= x + w
+                         and y <= frame(e)[1]
+                         and frame(e)[1] + frame(e)[3] <= y + h), None)
+            tapped, how = (False, "")
+            if plus is not None:
+                tapped, how = _idbd.tap_el(udid, plus, els, scroll=False)
+            else:
+                # OCR the panel from its title down: cropped to the line alone, Vision
+                # dropped the 'X' and '+' glyphs (MEASURED 2026-10-29, run ecacfff9).
+                words = screen_text.read_text(udid, region=(max(0, x - 15), max(0, y - 45),
+                                                             x + w, y + h + 17), accurate=True)
+                # Vision can merge the count and '+' into one word or drop both; infer
+                # the button position from the remaining count or minus glyph.
+                spot = next(((t[1] + t[3] / 2, t[2] + t[4] / 2) for t in words
+                             if t[0].strip() == "+"), None) or next(
+                    ((t[1] + t[3] - t[4] / 2, t[2] + t[4] / 2) for t in words
+                     if re.fullmatch(rf"{n}\s*\S", t[0].strip()) and t[1] > x + w * 0.3), None) or next(
+                    ((t[1] + t[3] / 2 + 30, t[2] + t[4] / 2) for t in words
+                     if t[0].strip() == str(n) and t[1] > x + w * 0.3), None) or next(
+                    ((t[1] + t[3] / 2 + 66, t[2] + t[4] / 2) for t in words
+                     if t[0].strip() in ("X", "x", "-", "–") and t[1] > x + w * 0.3), None)
+                if spot is not None:
+                    tapped, how = _idbd.tap_point(udid, *spot)
+                else:
+                    # The row can grow with selected modifiers, but its counter stays
+                    # directly below the price, not at a fixed offset from the row.
+                    price = next((t for t in words
+                                  if re.search(r"(?:\d+[.,]\d{2}\s*€|€\s*\d+[.,]\d{2})",
+                                               t[0])
+                                  and x <= t[1] + t[3] / 2 <= x + w
+                                  and y <= t[2] + t[4] / 2 <= y + h), None)
+                    if w < 300 or price is None:
+                        notes.append(f"[FAIL] {tag} — Custom Selections shows no '+' to press "
+                                     f"(count {n}; read: {[t[0] for t in words][:8]})")
+                        return False
+                    tapped, how = _idbd.tap_point(
+                        udid, x + w * 0.54, price[2] + price[4] / 2 + 32)
+            if not tapped:
+                notes.append(f"[FAIL] {tag} — could not tap Custom Selections '+' ({how})")
+                return False
+            els, ln2 = self._wait_els(
+                udid, lambda es: line(es) if line(es) is not None and int(
+                    line_re.search(name(line(es))).group(1)) > n else None, 6.0)
+            if ln2 is None:
+                notes.append(f"[FAIL] {tag} — pressed '+' in Custom Selections but the "
+                             f"count stayed {n}")
+                return False
+            ln = ln2
+        title = next((e for e in els if name(e) == "Custom Selections"), None)
+        hy = (frame(title)[1] - 49) if title is not None else y - 71
+        _idbd.tap_point(udid, x + w / 2, hy)
+        els, closed = self._wait_els(udid, lambda es: line(es) is None
+                                     and self._has(es, row_id), 6.0)
+        got = self._tile_count_between(els, row_id)
+        if not closed or got != qty:
+            notes.append(f"[FAIL] {tag} — set {qty} in Custom Selections but the Summary "
+                         f"reads {got}" + ("" if closed else " (the panel stayed open)"))
+            return False
+        notes.append(f"    · {tag}: quantity {qty} via the Summary's '+'")
+        return True
+
+    @staticmethod
+    def _tile_count_between(els: List[dict], row_id: str) -> Optional[int]:
+        """The count on a Summary line: the number level with `<pid>card`, right of it."""
+        name, frame = _idbd.name, _idbd.frame
+        row = next((e for e in els if name(e) == row_id and frame(e)[0] > 700), None)
+        if row is None:
+            return None
+        cy = frame(row)[1] + frame(row)[3] / 2
+        nums = [e for e in els if (name(e) or "").isdigit() and frame(e)[0] > frame(row)[0]
+                and abs(frame(e)[1] + frame(e)[3] / 2 - cy) < 20]
+        return int(name(nums[0])) if nums else None
+
+    def _w_add_done(self, udid: str, product: str, mode: str,
+                    people: List[str]) -> Optional[bool]:
+        """Is *product* already on each person's card? A split must show as a share
+        ('x n/m'), which tells it from a dish the person pre-ordered themselves.
+        None: a card could not be read, so it is not known."""
+        pid = self._squash(product)
+        for who in people:
+            lines = self._owner_lines(udid, who, raw=True)
+            if lines is None:
+                return None
+            hits = [t for t in lines
+                    for m in [self._CARD_LINE_RE.match(t)]
+                    if m and self._squash(m.group("what")) == pid]
+            if not hits or (mode == "split"
+                            and not any(re.search(r" x \d+/\d+$", t) for t in hits)):
+                return False
+        return True
+
+    def _w_add_item(self, r: ScenarioRunner, spec: str, notes: List[str]) -> bool:
+        """`@w_add:<Product>*<qty>[option, …] > assign|split: Name, Name` — the waiter
+        adds a NAMED product, *qty* units with these options, and gives it to the
+        profiles named: Assign (each gets the line) or Split (they share it).
+
+        ADD NEW ITEM (Screens/Event/AddNewItem.js): search `addNewItemInput`, product
+        `${name}Item` (spaces stripped, :89). A product carrying features/modifiers
+        opens the options pane (Event/index.js:844) -- radios `${name}Btn ${price}`,
+        then `applyOptionBtn` (SelectProductOptions.js:672) -- and the SAME product
+        with the same options again adds one more unit (Event/index.js:908). So each
+        unit is one tap (+ options + Apply). `assignToBtn` opens AssignProductModal:
+        profiles `${username}select` (spaces stripped; guests 'Guest1select'), and
+        two `assignProductsBtn`: LEFT Assign (≥1), RIGHT Split (≥2) (Modal:1804,
+        :1829). Done when the order shows a row of the dish for each profile."""
+        tag = f"@w_add:{spec}"
+        left, _, right = (spec or "").partition(">")
+        m = self._C_ADD_RE.match(left)
+        mode, _, who = right.partition(":")
+        mode = mode.strip().lower()
+        people = [p.strip() for p in who.split(",") if p.strip()]
+        if not m or mode not in ("assign", "split") or not people \
+                or (mode == "split" and len(people) < 2):
+            notes.append(f"[FAIL] {tag} — write it as <Product>*<qty>[options] > "
+                         f"assign|split: Name, Name (split needs 2+)")
+            return False
+        product, qty = m.group("name").strip(), int(m.group("qty") or 1)
+        opts = [o.strip() for o in (m.group("opts") or "").split(",") if o.strip()]
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name, frame = _idbd.name, _idbd.frame
+        pid = self._squash(product)          # `${name}Item`, spaces stripped (AddNewItem.js:89)
+        row_id = pid + "card"
+        # A resumed segment re-runs this step, and adding again would double the dish.
+        # A card that cannot be read is looked at once more, never taken as "not added":
+        # MEASURED 2026-11-02 (run 7c4df97b) the 5 split Coca-Cola went on a second time.
+        if getattr(self, "_resume", None):
+            done = self._w_add_done(udid, product, mode, people)
+            if done is None:
+                time.sleep(5.0)
+                done = self._w_add_done(udid, product, mode, people)
+            if done is None:
+                notes.append(f"[FAIL] {tag} — could not read {', '.join(people)}'s card(s), "
+                             f"so it is not known whether the run this one resumes added it; "
+                             f"not adding it again blind")
+                return False
+            if done:
+                notes.append(f"[ok] {tag} — already on {', '.join(people)}'s card(s) (added by "
+                             f"the run this one resumes)")
+                return True
+        els = _idbd.describe_all(udid)
+        before = sum(1 for e in self._order_rows(els) if name(e) == row_id)
+        euros0 = self._dish_total(els, row_id)
+
+        # 1. The ADD NEW ITEM sheet, searched for the product.
+        if not any(name(e) in self._ADD_ITEM_SHEET for e in els):
+            ok, how = _idbd.tap(udid, ["addItemsBtn"], els)
+            if not ok and not self._appium_click_id(r, "addItemsBtn"):
+                notes.append(f"[FAIL] {tag} — could not tap ADD ({how})")
+                return False
+            els, _ = self._wait_els(udid, self._sheet_products, 15.0)
+        # The search (`addNewItemInput`, a real TextField: AddNewItem.js:136) narrows
+        # the list; the whole list is in the tree anyway, so a search that did not
+        # take still leaves the product reachable by its id.
+        # Typed twice if it does not take, the second time only the first two words: on a
+        # loaded Mac the fill can find no field (an unread screen) or the filtering list
+        # drops keys, and the whole list is too long to reach the product. MEASURED
+        # 2026-11-02 (run bc18b3b1): the wine, an empty search box, 'not reachable'.
+        searched = ""
+        if self._has(els, "addNewItemInput"):
+            text = self._search_text(product)
+            for typed in (text, " ".join(text.split()[:2])):
+                ok, _how = _idbd.fill(udid, "addNewItemInput", typed)
+                if ok:
+                    searched = f"searched {typed!r}; "
+                    break
+                _idbd.fill(udid, "addNewItemInput", "")   # never leave a half-typed filter
+                time.sleep(1.0)
+            else:
+                searched = "the search did not take; "
+        find = lambda es: next((e for e in es if name(e) == pid + "Item"), None)  # noqa: E731
+        els, item = self._wait_els(udid, find, 8.0)
+        if item is None:
+            seen = [name(e)[:-4] for e in self._sheet_products(els)][:10]
+            notes.append(f"[FAIL] {tag} — {product!r} is not on the ADD NEW ITEM sheet "
+                         f"({searched}products shown: {', '.join(seen) or 'none'})")
+            return False
+
+        # 2. The product once, with its options; then its quantity in the Summary.
+        def option_rows(es):
+            rows = [e for e in es if self._W_OPTION_RE.match(name(e) or "")
+                    and " " not in name(e).split("Btn")[0]
+                    and name(e) not in self._W_NOT_OPTIONS and frame(e)[0] > 100]
+            checks = [e for e in rows if re.search(r"Check(?:Btn)?$", name(e))]
+            return checks or rows
+
+        ok, how = _idbd.tap_el(udid, item, None)
+        if not ok and r is not None and self._appium_click_id(r, pid + "Item"):
+            ok, how = True, "Appium, scrolled into view"   # WDA scrolls it into view itself
+        if not ok:
+            notes.append(f"[FAIL] {tag} — could not tap {product!r} ({how}; "
+                         f"{searched.rstrip('; ') or 'no search box'})")
+            return False
+        # Every product opens the options pane -- one with no options too (an empty
+        # list is truthy: Event/index.js:844), then it is only Apply.
+        els, pane = self._wait_els(udid, lambda es: self._has(es, "applyOptionBtn")
+                                   or self._has(es, row_id), 8.0)
+        if self._has(els, "applyOptionBtn"):
+            # The pane slides in: a tap while it moves is lost. MEASURED 2026-10-29
+            # (run 07804c12): 'veg' took, 'large' (tapped first) did not.
+            time.sleep(0.8)
+            els = _idbd.describe_all(udid)
+            for opt in opts:
+                want = re.sub(r"[^\x00-\x7f]", "", self._squash(opt)).lower()
+
+                def opt_row(es):
+                    return next((e for e in option_rows(es) if self._W_OPTION_RE.match(
+                        name(e)).group("opt").lower() == want), None)
+
+                row = opt_row(els)
+                if row is None:
+                    offered = sorted({self._W_OPTION_RE.match(name(e)).group("opt")
+                                      for e in option_rows(els)})
+                    notes.append(f"[FAIL] {tag} — the options pane has no {opt!r} "
+                                 f"(it offers: {', '.join(offered) or 'none'})")
+                    return False
+                els, row = self._pane_into_view(udid, els, row, opt_row)
+                if self._option_ticked(udid, row, els):
+                    continue
+                for _ in range(2):
+                    _idbd.tap_el(udid, row, els, scroll=False)
+                    time.sleep(0.6)
+                    els = _idbd.describe_all(udid)
+                    row = opt_row(els) or row
+                    if self._option_ticked(udid, row, els) is not False:
+                        break
+                else:
+                    notes.append(f"[FAIL] {tag} — tapped option {opt!r} twice but its "
+                                 f"radio stays empty")
+                    return False
+            _idbd.tap(udid, ["applyOptionBtn"], els)
+            els, staged = self._wait_els(udid, lambda es: not self._has(es, "applyOptionBtn")
+                                         and self._has(es, row_id), 8.0)
+            if not staged:
+                notes.append(f"[FAIL] {tag} — Apply on the options pane did nothing: a "
+                             f"required option is missing (picked: {', '.join(opts) or 'none'})")
+                return False
+        elif not self._has(els, row_id):
+            notes.append(f"[FAIL] {tag} — tapped {product!r} but it did not reach the "
+                         f"sheet's Summary")
+            return False
+        if qty > 1 and not self._summary_qty(udid, row_id, qty, tag, notes):
+            return False
+
+        # 3. ASSIGN / SPLIT to the named profiles.
+        ok, how = _idbd.tap(udid, ["assignToBtn"])
+        if not ok:
+            notes.append(f"[FAIL] {tag} — added {qty} × {product} but ASSIGN / SPLIT could not "
+                         f"be tapped ({how})")
+            return False
+        els, up = self._wait_els(udid, lambda es: self._profiles(es)
+                                 and self._has(es, "assignProductsBtn"), 10.0)
+        if not up:
+            notes.append(f"[FAIL] {tag} — the 'Assign to or split among' dialog did not open")
+            return False
+        for person in people:
+            pick = self._squash(person) + "select"
+            prof = next((e for e in self._profiles(els) if name(e) == pick), None)
+            if prof is None:
+                notes.append(f"[FAIL] {tag} — no {person!r} on the dialog (profiles: "
+                             f"{', '.join(self._pretty(name(e)[:-6]) for e in self._profiles(els))})")
+                return False
+            if not self._picked(els, prof):
+                els, prof = self._profile_into_view(udid, els, prof)
+                _idbd.tap_el(udid, prof, els)
+                els, done = self._wait_els(udid, lambda es: self._picked(es, prof), 5.0)
+                if not done:
+                    notes.append(f"[FAIL] {tag} — tapped {person} but they did not get selected")
+                    return False
+        extra = [self._pretty(name(p)[:-6]) for p in self._profiles(els)
+                 if self._picked(els, p) and name(p) not in
+                 {self._squash(x) + "select" for x in people}]
+        if extra:
+            notes.append(f"[FAIL] {tag} — the dialog also has {', '.join(extra)} selected")
+            return False
+        btns = sorted((e for e in els if name(e) == "assignProductsBtn"),
+                      key=lambda e: frame(e)[0])
+        btn = btns[0] if mode == "assign" else btns[-1]
+        ok, how = _idbd.tap_el(udid, btn, els, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — could not tap {mode.title()} ({how})")
+            return False
+        want = before + len(people)
+
+        # Landed = the sheet is gone and the dish is on the order for them: a new row
+        # per profile, or -- for a profile that already has the same line -- that
+        # row's price going up (the server merges it; MEASURED 2026-10-29, run
+        # 4da619ce: a second 'Coca-Cola ×2 to Guest 1, Noolu Naga' gave no new row).
+        # The order row shows no quantity, only `${name}card` and its price.
+        #
+        # The app's own commit signal is the sheet closing: on success it closes and
+        # clears its list; a refusal ('Out Of The Quantity For: …') keeps it open with
+        # a toast (Event/index.js:1124-1151). The rows are the proof only while they
+        # are in the tree -- a long order renders just its top rows (MEASURED
+        # 2026-10-29, run 138f7122: 24 Coca-Cola rows before, none rendered after).
+        def closed(es):
+            return self._toast(es) or not any(name(e) in self._ADD_ITEM_SHEET for e in es)
+
+        els, shut = self._wait_els(udid, closed, 20.0)
+        toast = self._toast(els)
+        if not shut or toast:
+            notes.append(f"[FAIL] {tag} — pressed {mode.title()} for {', '.join(people)} but "
+                         + (f"the app said {toast!r}" if toast else "the sheet stayed open"))
+            return False
+
+        # Then the rows, as evidence: after the sheet closes the order redraws EMPTY
+        # and refills from the server -- MEASURED 2026-10-29 on slow staging: 45 s
+        # and more (runs 7e3b2e72, 93764e35; the rows were there afterwards).
+        def landed(es):
+            rows = sum(1 for e in self._order_rows(es) if name(e) == row_id)
+            return rows >= want or (rows >= before and rows and
+                                    self._dish_total(es, row_id) > euros0 + 0.005)
+
+        els, done = self._wait_els(udid, landed, 60.0)
+        got = sum(1 for e in self._order_rows(els) if name(e) == row_id)
+        if done:
+            lines = [f"+{self._dish_total(els, row_id) - euros0:.2f} € on the order"]
+        elif got:
+            lines = [f"its rows read {self._dish_total(els, row_id):.2f} € (was {euros0:.2f})"]
+        else:
+            lines = ["the sheet closed; the order had not redrawn its rows after 60 s"]
+        self._w_lines = getattr(self, "_w_lines", []) + [
+            {"product": product, "qty": qty, "options": opts, "mode": mode, "to": people}]
+        notes.append(f"[ok] {tag} — added {qty} × {product}"
+                     + (f" ({', '.join(opts)})" if opts else "")
+                     + f", {'assigned to' if mode == 'assign' else 'split among'} "
+                     + f"{', '.join(people)}: {before} → {got} row(s), "
+                     + ", ".join(lines))
+        return True
+
+    # `@w_qty:<Profile>/<Product> =N | +N | -N | remove`
+    _W_QTY_RE = re.compile(r"^\s*(?P<who>[^/]+?)\s*/\s*(?P<what>.+?)\s+(?P<op>[+=-]\d+|remove)\s*$")
+
+    def _profile_region(self, els: List[dict], profile: str):
+        """(card, y_top, y_bottom) of *profile*'s accordion on the payment panel: from
+        its `${username}accordionCard` down to the next card (the cards read
+        'G Guest1accordionCard \\uf10c', so the id is matched inside the label)."""
+        want = self._squash(profile) + "accordionCard"
+        cards = sorted(((e, m.group(1)) for e in els
+                        for m in [self._CARD_ID_RE.search(_idbd.name(e))] if m),
+                       key=lambda c: _idbd.frame(c[0])[1])
+        for i, (e, cid) in enumerate(cards):
+            if cid == want:
+                top = _idbd.frame(e)[1]
+                bottom = _idbd.frame(cards[i + 1][0])[1] if i + 1 < len(cards) else 1e9
+                return e, top, bottom
+        return None, 0.0, 0.0
+
+    def _panel_into_view(self, udid: str, els: List[dict], e: dict, again):
+        """Drag the payment panel (its left column, clear of the controls) until *e*
+        is on screen, 120 pt from either edge. *again(els)* re-finds it."""
+        frame = _idbd.frame
+        _w, h = _idbd.app_size(els)
+        for _ in range(4):
+            x, y, w, eh = frame(e)
+            if 120 <= y and y + eh <= h - 120:
+                return els, e
+            shift = (y + eh / 2) - h / 2
+            y0 = h * 0.8 if shift > 0 else h * 0.2
+            _idbd.swipe(udid, 900, y0, 900, y0 - max(-h * 0.55, min(h * 0.55, shift)),
+                        max(1.0, min(abs(shift), h * 0.55) / 200.0))
+            time.sleep(0.6)
+            els = _idbd.describe_all(udid)
+            e = again(els) or e
+        return els, e
+
+    def _w_qty(self, spec: str, notes: List[str]) -> bool:
+        """`@w_qty:<Profile>/<Product> =N|+N|-N|remove` — set / change a profile's
+        quantity of a dish, or remove it, before it is sent to the kitchen. `=N` is the
+        form to use in a flow: a resumed segment re-runs its steps, and '=6' on a
+        line already at 6 has nothing to do, where '+1' would add another.
+
+        PaymentDetails.js:1258-1270: inside the profile's accordion (tap
+        `${username}accordionCard` to open it), an unsent, unsplit, not pre-ordered
+        line carries CustomCounter's `${name}Increase`, `${name}Decrease` (count ≥ 2)
+        and `${name}Remove` (count < 2) (Components/CustomCounter/index.js:9-12),
+        which post assaignProducts '+' / 'x'. The ids repeat in every open accordion,
+        so only the ones between this profile's card and the next are used. Done when
+        the count between them moved (remove: the line left the accordion)."""
+        tag = f"@w_qty:{spec}"
+        m = self._W_QTY_RE.match(spec or "")
+        if not m:
+            notes.append(f"[FAIL] {tag} — write it as <Profile>/<Product> =N | +N | -N | remove")
+            return False
+        who, what, op = m.group("who"), m.group("what"), m.group("op")
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name, frame = _idbd.name, _idbd.frame
+        pid = self._squash(what)
+
+        # MEASURED 2026-10-29 (installed build): the line is the text '<Product> x <n>'
+        # inside the card, and its stepper is the generic `decrementQuantity` (n ≥ 2)
+        # / `removeItem` (n = 1), the count, `incrementQuantity` -- not the source's
+        # `${name}Increase`, which is kept as a fallback.
+        ids = {"Increase": ("incrementQuantity", pid + "Increase"),
+               "Decrease": ("decrementQuantity", pid + "Decrease"),
+               "Remove": ("removeItem", pid + "Remove")}
+        line_re = re.compile(rf"^{re.escape(what)} x (\d+)$")
+
+        def line(es):
+            card, top, bottom = self._profile_region(es, who)
+            if card is None:
+                return None
+            return next((e for e in es if line_re.match(name(e) or "")
+                         and top < frame(e)[1] < bottom
+                         and frame(card)[0] - 10 <= frame(e)[0] <= frame(card)[0] + frame(card)[2]),
+                        None)
+
+        def mine(es, kind):
+            ln = line(es)
+            if ln is None:
+                return None
+            cy = frame(ln)[1] + frame(ln)[3] / 2
+            return next((e for e in es if name(e) in ids[kind] and frame(e)[0] > frame(ln)[0]
+                         and abs(frame(e)[1] + frame(e)[3] / 2 - cy) < 16), None)
+
+        def count(es) -> Optional[int]:
+            ln = line(es)
+            return int(line_re.match(name(ln)).group(1)) if ln is not None else None
+
+        els = _idbd.describe_all(udid)
+        card, _top, _bottom = self._profile_region(els, who)
+        if card is None:
+            notes.append(f"[FAIL] {tag} — no {who!r} card on the payment panel")
+            return False
+        if mine(els, "Increase") is None:              # its accordion is closed
+            _idbd.tap_el(udid, card, els)
+            els, _ = self._wait_els(udid, lambda es: mine(es, "Increase"), 6.0)
+        if mine(els, "Increase") is None:
+            if op == "remove" and getattr(self, "_resume", None) and line(els) is None:
+                notes.append(f"[ok] {tag} — {what} is not in {who}'s card: removed by the "
+                             f"run this one resumes")
+                return True
+            notes.append(f"[FAIL] {tag} — {who}'s card shows no quantity control for "
+                         f"{what} (only unsent, unsplit, not pre-ordered lines have one)")
+            return False
+        n0 = count(els)
+        if op.startswith("="):
+            k = int(op[1:]) - (n0 or 0)
+            steps = ["Increase"] * k if k > 0 else ["Decrease"] * -k
+            if not steps:
+                notes.append(f"[ok] {tag} — {who}'s {what} is already {n0}")
+                return True
+        else:
+            steps = (["Increase"] * int(op[1:]) if op.startswith("+")
+                     else ["Decrease"] * int(op[1:]) if op.startswith("-")
+                     else ["Decrease"] * max(0, (n0 or 1) - 1) + ["Remove"])
+        for suffix in steps:
+            ctl = mine(els, suffix)
+            if ctl is None:
+                notes.append(f"[FAIL] {tag} — no {suffix.lower()} control on {who}'s "
+                             f"{what} line (count {count(els)}; − shows only from 2, remove "
+                             f"only at 1)")
+                return False
+            before = count(els)
+            # The payment panel scrolls: drag it so the control is on screen -- MEASURED
+            # 2026-10-29 (run 91d9d03a): Guest 3's '−' below the fold was "not
+            # reachable" for tap_el's own scroll.
+            els, ctl = self._panel_into_view(udid, els, ctl, lambda es: mine(es, suffix))
+            ok, how = _idbd.tap_el(udid, ctl, els, scroll=False)
+            if not ok and how == "not reachable":
+                # The panel drag can miss its scroll view; let the element-scoped
+                # driver make one more targeted attempt before failing the step.
+                els = _idbd.describe_all(udid)
+                ctl = mine(els, suffix) or ctl
+                ok, how = _idbd.tap_el(udid, ctl, els, scroll=True)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — could not tap {who}'s {suffix.lower()} on "
+                             f"{what} ({how})")
+                return False
+            if suffix == "Remove":
+                # Gone from an OPEN card: when the card holds other lines, they must show,
+                # since a card the reload folded hides every line, this one too.
+                def lines(es):
+                    card, top, bottom = self._profile_region(es, who)
+                    return [] if card is None else [
+                        e for e in es if self._CARD_LINE_RE.match(name(e) or "")
+                        and top < frame(e)[1] < bottom]
+                others = len(lines(els)) > 1
+
+                def gone(es):
+                    return line(es) is None and (bool(lines(es)) or not others)
+                deadline = time.time() + 180.0
+                while True:
+                    els, done = self._wait_els(udid, gone, 30.0)
+                    if done or time.time() >= deadline:
+                        break
+                    card = self._profile_region(els, who)[0]
+                    if line(els) is None and card is not None:
+                        _idbd.tap_el(udid, card, els)       # folded: open it again
+                if not done:
+                    notes.append(f"[FAIL] {tag} — tapped Remove but {what} is still in "
+                                 f"{who}'s card after 180s")
+                    return False
+                break
+            # The change goes through the server, which reloads the whole order
+            # (MEASURED 2026-10-29, run bfaa5994: 'stayed at 5', and it read 6 a minute
+            # later; 2026-11-02, runs ab74e635 and 0fc4ea4a: 'stayed at 2' after 60s, and
+            # it read 1 afterwards). The reload can fold the card, hiding the count: it is
+            # opened again rather than read as unchanged.
+            deadline = time.time() + 180.0
+            while True:
+                els, moved = self._wait_els(udid, lambda es: count(es) not in (None, before),
+                                            30.0)
+                if moved or time.time() >= deadline:
+                    break
+                if count(els) is None:
+                    card = self._profile_region(els, who)[0]
+                    if card is not None:
+                        _idbd.tap_el(udid, card, els)
+            if not moved:
+                seen = count(els)
+                notes.append(f"[FAIL] {tag} — tapped {suffix} but {who}'s {what} "
+                             + (f"stayed at {before}" if seen is not None
+                                else f"could not be read on the card (was {before})")
+                             + " after 180s")
+                return False
+        notes.append(f"[ok] {tag} — {who}'s {what}: "
+                     + (f"{n0} → removed" if op == "remove" else f"{n0} → {count(els)}"))
+        return True
+
+    _CARD_LINE_RE = re.compile(r"^(?P<what>.+?) x \d+(?:/\d+)?$")
+
+    def _owner_lines(self, udid: str, profile: str, raw: bool = False) -> Optional[List[str]]:
+        """The dishes (ids; *raw*: the line texts) on *profile*'s card: its lines read
+        '<Product> x <n>' or '... x <n>/<m>' for a share (MEASURED 2026-10-29:
+        'Coca-Cola® Light 1.0l x 5/5', 'Pizza Salamees x 6/2'). The card is opened when
+        its lines do not show."""
+        # Wait for the card: right after the order opens, the payment panel draws its
+        # cards a moment later (MEASURED 2026-10-29, run a2635b0c: 'no Roopa D card').
+        els, found = self._wait_els(udid, lambda es: self._profile_region(es, profile)[0], 20.0)
+        if not found:
+            # Something covers the payment panel (a leftover ADD sheet replaces it with
+            # its Summary): clear it once and look again. MEASURED 2026-10-29 (run
+            # 42a50c32): 'no Guest 5 card' for 86s while the card was there afterwards.
+            if any(_idbd.name(e) in self._ADD_ITEM_SHEET for e in els):
+                _idbd.tap(udid, ["addNewItemClose"], els)
+            self._list_view(udid)
+            els, _ = self._wait_els(udid, lambda es: self._profile_region(es, profile)[0], 15.0)
+        for attempt in (1, 2):
+            card, top, bottom = self._profile_region(els, profile)
+            if card is None:
+                return None
+            # Inside the card's own column: below the LAST card the region runs to the
+            # screen's end, and the order pane's '<Product> x <n>' texts are there too
+            # (MEASURED 2026-10-29, run a1d0235d: Guest 5 read 'Pizza Salamees x 1').
+            cx, _cy, cw, _ch = _idbd.frame(card)
+            lines = [(_idbd.name(e) if raw else self._squash(m.group("what"))) for e in els
+                     for m in [self._CARD_LINE_RE.match(_idbd.name(e) or "")]
+                     if m and top < _idbd.frame(e)[1] < bottom
+                     and cx - 10 <= _idbd.frame(e)[0] <= cx + cw]
+            if lines or attempt == 2:
+                return lines
+            els, card = self._panel_into_view(
+                udid, els, card, lambda es: self._profile_region(es, profile)[0])
+            _idbd.tap_el(udid, card, els, scroll=False)
+            time.sleep(1.5)
+            els = _idbd.describe_all(udid)
+        return []
+
+    def _long_press_card(self, udid: str, profile: str) -> bool:
+        from automation.scenarios.idb_coords import to_device
+        els = _idbd.describe_all(udid)
+        card, _t, _b = self._profile_region(els, profile)
+        if card is None:
+            return False
+        els, card = self._panel_into_view(udid, els, card,
+                                          lambda es: self._profile_region(es, profile)[0])
+        x, y, w, h = _idbd.frame(card)
+        # Left of centre: the card's right end is its radio.
+        px, py = to_device(udid, x + w * 0.35, y + h / 2)
+        _idbd._idb(["ui", "tap", "--udid", udid, "--duration", "1.2", str(int(px)), str(int(py))])
+        return True
+
+    def _focus_profile(self, udid: str, profile: str, tag: str,
+                       notes: List[str]) -> Optional[List[dict]]:
+        """Show only *profile*'s lines on the order: LONG-press their
+        `${username}accordionCard` (Accordion/index.js:111 handlePerson). MEASURED
+        2026-10-29: a long-press on Guest 1 left their 5 rows (of 34), a second one
+        all 34 again -- it TOGGLES -- and the order redraws 6-8 s later (longer on slow
+        staging). A plain tap only opens the card.
+
+        Judged by CONTENT, not by "the rows changed": the order is focused when its
+        rows are exactly the dishes on the person's card. MEASURED (run e786709b): a
+        long-press while another person was focused turned the focus OFF, the 33 rows
+        were taken for Guest 1's, and the step swiped someone else's line."""
+        name = _idbd.name
+        owner = self._owner_lines(udid, profile)
+        if owner is None:
+            notes.append(f"[FAIL] {tag} — no {profile!r} card on the payment panel")
+            return None
+        if not owner:
+            notes.append(f"[FAIL] {tag} — {profile}'s card lists no lines")
+            return None
+
+        most = [0]
+
+        def focused(es):
+            rows = [name(e)[:-4] for e in self._order_rows(es)]
+            most[0] = max(most[0], len(rows))
+            if not rows:
+                return False
+            if sorted(rows) == sorted(owner):
+                return True
+            # Voided lines stay in the focused list but leave the card: MEASURED 2026-11-02,
+            # Guest 1 focused showed the Coca-Cola on their card plus a voided Penne Pollo
+            # and Pizza Salamees, struck through. So: every line on the card, and far fewer
+            # rows than everyone's (a press that turned the focus OFF shows them all).
+            from collections import Counter
+            have, need = Counter(rows), Counter(owner)
+            return (all(have[k] >= v for k, v in need.items())
+                    and len(rows) < most[0] and len(rows) <= len(owner) + 6)
+
+        # A long-press toggles, so it is pressed again only when the order was READ
+        # after the last one and is not focused on them: when it could not be read
+        # (idb timing out), it is waited for -- a second press would undo a focus that
+        # worked (MEASURED 2026-10-29, run f28812d1). A READ with no rows is different:
+        # the pane is empty, and only a press brings it back (MEASURED 2026-10-31, run
+        # 401fcc95: right after SEND, 0 rows for the whole wait and no second press).
+        # 30s between presses: on a big order the redraw can take longer than 14s, and the
+        # next press would undo it (MEASURED 2026-11-02, run f5610b18: no focus in 240s).
+        # Time the iPad could not be read does not count against the 110s (up to 300s in
+        # all): MEASURED 2026-11-02 (run 28127405, the order took 129s to open) "it shows
+        # 0" after 474s, and by hand right after, the same focus took 30s.
+        els, hit = self._wait_els(udid, focused, 2.0, reads=1)
+        presses, now = 0, time.time()
+        deadline, hard = now + 110.0, now + 300.0
+        while not hit and presses < 3 and time.time() < min(deadline, hard):
+            t0 = time.time()
+            if presses == 0 or els:
+                if self._long_press_card(udid, profile):
+                    presses += 1
+            els, hit = self._wait_els(udid, focused, 30.0)
+            if not els:
+                deadline += time.time() - t0
+        if not hit:
+            seen = (f"it shows {len(self._order_rows(els))}" if els
+                    else "the iPad's screen could not be read: idb timing out")
+            notes.append(f"[FAIL] {tag} — long-pressed {profile}'s card but the order does "
+                         f"not show just their {len(owner)} line(s) ({seen})")
+            return None
+        self._focused = profile
+        self._focused_rows = len(self._order_rows(els))
+        notes.append(f"    · {tag}: showing only {profile}'s lines ({len(owner)})")
+        return els
+
+    def _unfocus_profile(self, udid: str, tag: str, notes: List[str]) -> None:
+        """Back to everyone's lines: long-press the focused card again (it toggles);
+        done when the order lists more than that person's lines.
+
+        Read in the list view: MEASURED 2026-10-31 (run 80740c69) @w_move ended in the
+        grid view with no rows, so 39 rows read as 0 and the next Select All found
+        nothing. And never pressed when everyone already shows: it would focus again."""
+        who = getattr(self, "_focused", "")
+        if not who:
+            return
+        self._list_view(udid)
+        owner = self._owner_lines(udid, who) or []
+        # More rows than the FOCUSED list had, which can exceed the card (voided lines).
+        floor = max(len(owner), getattr(self, "_focused_rows", 0))
+        more = lambda es: len(self._order_rows(es)) > floor  # noqa: E731
+        _els, done = self._wait_els(udid, more, 2.0, reads=1)
+        for _ in range(2):
+            if done:
+                break
+            self._long_press_card(udid, who)
+            _els, done = self._wait_els(udid, more, 14.0)
+        if done:
+            self._focused = ""
+            return
+        notes.append(f"    · {tag}: could not show everyone's lines again")
+
+    _W_ON_RE = re.compile(r"^\s*(?P<what>[^@]+?)\s*@\s*(?P<who>[^>*=]+?)\s*"
+                          r"(?:\*\s*(?P<n>\d+|all)|=\s*(?P<keep>\d+))?\s*(?:>\s*(?P<to>.+))?$")
+
+    def _row_money(self, els: List[dict], row: dict) -> Optional[float]:
+        p = self._row_price(els, row)
+        m = self._MONEY_RE.match(_idbd.name(p) or "") if p is not None else None
+        return float(m.group(1).replace(",", ".")) if m else None
+
+    def _done_before(self, notes: List[str], tag: str) -> bool:
+        """In a RESUMED run, a row action the app refuses as 'already …' (split, comp)
+        was done by the run this one resumes: the segment re-runs its steps. Turns
+        that refusal into a pass, noted as such. Never in a fresh run."""
+        last = notes[-1] if notes else ""
+        if getattr(self, "_resume", None) and "[FAIL]" in last and "already" in last.lower():
+            notes[-1] = (f"[ok] {tag} — already done by the run this one resumes "
+                         f"(the app said: {last.split('said', 1)[-1].strip()[:80]})")
+            return True
+        return False
+
+    def _w_split(self, spec: str, notes: List[str]) -> bool:
+        """`@w_split:<Product>@<Owner> > Name, Name` — swipe the owner's line of a dish
+        left, SPLIT it with the people named.
+
+        The owner's line is found by showing only their lines (_focus_profile). The
+        SPLIT dialog (AssignSplitProductModal) hides the owner and is an Overlay --
+        people are tapped by their shown name, each confirmed by `${name}close`
+        joining its ids; Apply is `assignProductsBtn`. splitProducts shares the WHOLE
+        line among the people + the owner (Event/index.js:1770). Done when the
+        owner's row costs its share: price / (k + 1)."""
+        tag = f"@w_split:{spec}"
+        m = self._W_ON_RE.match(spec or "")
+        people = [p.strip() for p in ((m.group("to") or "") if m else "").split(",") if p.strip()]
+        if not m or not people:
+            notes.append(f"[FAIL] {tag} — write it as <Product>@<Owner> > Name, Name")
+            return False
+        what, who = m.group("what"), m.group("who")
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name = _idbd.name
+        # A resumed segment re-runs this step: the card shows a split line as
+        # '<Product> x <n>/<m>' (MEASURED 2026-10-29: 'Pizza Salamees x 6/2'), and the
+        # app refuses to split it again (run 40a23d54) without a toast to read.
+        if getattr(self, "_resume", None):
+            share = re.compile(rf"^{re.escape(what)} x \d+/\d+$")
+            if any(share.match(t) for t in self._owner_lines(udid, who, raw=True) or []):
+                notes.append(f"[ok] {tag} — {who}'s {what} is already split (by the run "
+                             f"this one resumes)")
+                return True
+        self._list_view(udid)                  # rows swipe only in the list view
+        els = self._focus_profile(udid, who, tag, notes)
+        if els is None:
+            return False
+        row = next((e for e in self._order_rows(els) if name(e) == self._squash(what) + "card"),
+                   None)
+        if row is None:
+            notes.append(f"[FAIL] {tag} — {who} has no {what} line")
+            return False
+        price0 = self._row_money(els, row)
+
+        def dialog_ids(es) -> List[str]:
+            ov = self._overlay(es, "assignProductsBtn")
+            ids = name(ov).split() if ov is not None else []
+            return ids if any(t.endswith("select") and t not in self._NOT_PROFILES
+                              for t in ids) else []
+
+        els = self._row_action(udid, row, "SPLIT", dialog_ids, tag, notes)
+        if els is None:
+            done = self._done_before(notes, tag)
+            self._unfocus_profile(udid, tag, notes)
+            return done
+        box = self._box(els, "split")
+        for person in people:
+            pick = self._squash(person)
+            if f"{pick}select" not in dialog_ids(els):
+                notes.append(f"[FAIL] {tag} — {person} is not offered (ids: "
+                             f"{' '.join(t for t in dialog_ids(els) if t.endswith('select'))})")
+                return False
+            ok, how = self._ocr_tap_person(udid, box, person)
+            els, sel = self._wait_els(udid, lambda es: f"{pick}close" in dialog_ids(es), 5.0)
+            if not ok or not sel:
+                notes.append(f"[FAIL] {tag} — {how}; {person} did not get selected")
+                return False
+        els = self._overlay_taps(udid, els, "split", ["Apply"], "assignProductsBtn", tag, notes)
+        if els is None:
+            return False
+        want = round(price0 / (len(people) + 1), 2) if price0 else None
+
+        def shared(es):
+            r = self._same_row(es, row) or next(
+                (e for e in self._order_rows(es) if name(e) == name(row)), None)
+            p = self._row_money(es, r) if r is not None else None
+            return p if p is not None and want is not None and abs(p - want) <= 0.02 else None
+
+        els, now = self._wait_els(udid, shared, 45.0)   # the order redraws after the server
+        if now is None:
+            r = next((e for e in self._order_rows(els) if name(e) == name(row)), None)
+            notes.append(f"[FAIL] {tag} — applied the split but {who}'s {what} costs "
+                         f"{self._row_money(els, r) if r is not None else '?'} €, expected "
+                         f"{want} ({price0} / {len(people) + 1})")
+            return False
+        self._unfocus_profile(udid, tag, notes)
+        notes.append(f"[ok] {tag} — split {who}'s {what} with {', '.join(people)}: "
+                     f"{price0:.2f} € → {now:.2f} € each")
+        return True
+
+    def _card_qty(self, udid: str, who: str, what: str) -> Tuple[int, str]:
+        """(units, '<line>; <line>') of *what* on *who*'s card -- a share 'x 6/2' counts
+        its 6 -- for before/after proofs."""
+        lines = [t for t in self._owner_lines(udid, who, raw=True) or []
+                 if self._CARD_LINE_RE.match(t)
+                 and self._squash(self._CARD_LINE_RE.match(t).group("what")) == self._squash(what)]
+        units = sum(int(re.search(r" x (\d+)", t).group(1)) for t in lines)
+        return units, "; ".join(lines)
+
+    _UNITS_COUNT_RE = re.compile(r"(?:removeItem|decrementQuantity) (\d+) incrementQuantity")
+
+    def _units_set(self, udid: str, marker: str, want: Optional[int], tag: str,
+                   notes: List[str]) -> Optional[int]:
+        """On the 'Select which items to …' Overlay (CompAndVoidProductModal), raise
+        the count to *want* units (None = all of them) and return it.
+
+        MEASURED 2026-10-29: its ids read 'Select which items to Void Penne Pollo
+        removeItem 1 incrementQuantity ApplyBtn' -- the COUNT is in there -- and the
+        counter's glyphs OCR as one token '(× 1+'; its '+' is that token's right end.
+        The count starts at 1 and stops at the line's quantity (3 for a 3-unit line
+        split two ways)."""
+        from automation.scenarios import screen_text
+        name = _idbd.name
+
+        def now(es) -> Optional[int]:
+            ov = self._overlay(es, marker)
+            m = self._UNITS_COUNT_RE.search(name(ov)) if ov is not None else None
+            return int(m.group(1)) if m else None
+
+        els = _idbd.describe_all(udid)
+        n = now(els)
+        if n is None:
+            notes.append(f"[FAIL] {tag} — the 'which items' dialog shows no count")
+            return None
+        for _ in range(12):
+            if want is not None and n >= want:
+                break
+            box = self._box(els, "units")
+            words = screen_text.read_text(udid, region=box, accurate=True)
+            plus = next((t for t in words if "+" in t[0]), None)
+            if plus is not None:
+                point = (plus[1] + plus[3] - 9, plus[2] + plus[4] / 2)
+            else:
+                # The overlay includes the product name even though its controls
+                # collapse to one accessibility element. Use that visible row as
+                # the anchor if Vision also drops the count or places it oddly.
+                overlay = self._overlay(els, marker)
+                label = name(overlay) if overlay is not None else ""
+                item = re.search(r"\b(?:Void|Comp)\s+(.+?)\s+"
+                                 r"(?:removeItem|decrementQuantity)\b", label)
+                product = next((t for t in words if item and
+                                self._text_matches(t[0], item.group(1))), None)
+                counters = [t for t in words if re.search(
+                    rf"(?<!\d){n}(?!\d)", t[0])]
+                if product is not None:
+                    row_y = product[2] + product[4] / 2
+                    counter = min(counters, key=lambda t: abs(
+                        t[2] + t[4] / 2 - row_y), default=None)
+                    if counter is not None and abs(
+                            counter[2] + counter[4] / 2 - row_y) > 40:
+                        counter = None
+                    row_y = (counter[2] + counter[4] / 2) if counter else row_y
+                elif counters:
+                    counter = min(counters, key=lambda t: abs(
+                        t[2] + t[4] / 2 - (box[1] + box[3]) / 2))
+                    row_y = counter[2] + counter[4] / 2
+                else:
+                    notes.append(f"[FAIL] {tag} — could not locate the quantity row "
+                                 f"on the 'which items' dialog (count {n}; "
+                                 f"OCR: {[t[0] for t in words][:8]})")
+                    return None
+                point = (box[2] - 35, row_y)
+            tapped, how = _idbd.tap_point(udid, *point)
+            if not tapped:
+                notes.append(f"[FAIL] {tag} — could not tap '+' on the 'which items' "
+                             f"dialog ({how})")
+                return None
+            els, _ = self._wait_els(udid, lambda es: (now(es) or 0) > n, 3.0)
+            if (now(els) or 0) <= n:
+                if want is None:
+                    break                      # at the line's quantity: all of it
+                notes.append(f"[FAIL] {tag} — the count stops at {n}, {want} asked")
+                return None
+            n = now(els)
+        return n
+
+    def _w_void(self, spec: str, notes: List[str], reason: str = "entryError") -> bool:
+        """`@w_void:<Product>@<Owner>*<N|all>` — VOID N units (all = the whole line) of
+        the owner's line of a dish; `=K` voids down to K units left, the form for a flow
+        (a resumed segment re-runs it, and '=5' on a line already at 5 does nothing).
+        Swipe it, VOID, a reason, Apply, the units (_units_set), Next (`ApplyBtn`). VOID is refused once the kitchen prepared the
+        item (splitCall, Event/index.js:1709). Done when the owner's line left their
+        lines, or (part of it) its price fell."""
+        tag = f"@w_void:{spec}"
+        m = self._W_ON_RE.match(spec or "")
+        if not m or m.group("to"):
+            notes.append(f"[FAIL] {tag} — write it as <Product>@<Owner>*<N|all> or =<K>")
+            return False
+        what, who = m.group("what"), m.group("who")
+        want = None if (m.group("n") or "all") == "all" else int(m.group("n"))
+        all_units = want is None
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name = _idbd.name
+        rid = self._squash(what) + "card"
+        card0 = self._card_qty(udid, who, what)
+        if all_units:
+            want = card0[0]
+        if m.group("keep") is not None:
+            want = card0[0] - int(m.group("keep"))
+            if want <= 0:
+                notes.append(f"[ok] {tag} — {who}'s {what} is already at {card0[0]} "
+                             f"({card0[1] or 'no line'})")
+                return True
+        self._list_view(udid)                  # rows swipe only in the list view
+        els = self._focus_profile(udid, who, tag, notes)
+        if els is None:
+            return False
+        row = next((e for e in self._order_rows(els) if name(e) == rid), None)
+        if row is None:
+            self._unfocus_profile(udid, tag, notes)
+            if getattr(self, "_resume", None) and all_units:
+                notes.append(f"[ok] {tag} — {who} has no {what} line: voided by the run "
+                             f"this one resumes")
+                return True
+            notes.append(f"[FAIL] {tag} — {who} has no {what} line")
+            return False
+        els = self._row_action(udid, row, "VOID", lambda es: self._overlay(es, reason),
+                               tag, notes)
+        if els is None:
+            return False
+        els = self._overlay_taps(udid, els, "void", [self._REASON_TEXT[reason], "Apply"],
+                                 reason, tag, notes)
+        if els is None:
+            return False
+        units = 1
+        els, ov = self._wait_els(udid, lambda es: self._overlay(es, "ApplyBtn"), 3.0)
+        if ov is not None:                     # quantity > 1: which units
+            units = self._units_set(udid, "ApplyBtn", want, tag, notes)
+            if units is None:
+                return False
+            els = self._overlay_taps(udid, _idbd.describe_all(udid), "units", ["Next"],
+                                     "ApplyBtn", tag, notes)
+            if els is None:
+                return False
+
+        # The proof is the owner's card: its line 'x 6/2' became 'x 5/2', or left.
+        # (The focused order list redraws -- a row missing for a moment is no proof.)
+        self._unfocus_profile(udid, tag, notes)
+        after = card0
+        for _ in range(5):
+            after = self._card_qty(udid, who, what)
+            if after[0] < card0[0]:
+                break
+            time.sleep(2.5)
+        if after[0] >= card0[0]:
+            toast = self._toast(_idbd.describe_all(udid)) or self._screen_toast(udid)
+            notes.append(f"[FAIL] {tag} — the void did not take: {who}'s card still reads "
+                         f"{card0[1] or 'nothing'} for {what}" + (f" ({toast!r})" if toast else ""))
+            return False
+        notes.append(f"[ok] {tag} — voided {units} unit(s) of {who}'s {what} "
+                     f"({self._pretty(reason).lower()}): {card0[1]} → "
+                     f"{after[1] or 'the line left their card'}")
+        return True
+
+    _GRID_ICON, _LIST_ICON = "", ""     # the order's two view toggles, no ids
+
+    def _list_view(self, udid: str) -> bool:
+        """The order in its LIST view, where rows swipe (VOID / COMP / SPLIT). The grid
+        view (ASSIGN / SPLIT, `assignOrSplitBtn`) does not swipe -- MEASURED 2026-10-29:
+        three swipes on a grid row showed nothing. Toggle by the list icon."""
+        name = _idbd.name
+        for _ in range(3):
+            els = _idbd.describe_all(udid)
+            if not self._has(els, "assignOrSplitBtn"):
+                return True
+            icon = next((e for e in els if name(e) == self._LIST_ICON), None)
+            if icon is None:
+                return False
+            _idbd.tap_el(udid, icon, els, scroll=False)
+            self._wait_els(udid, lambda es: not self._has(es, "assignOrSplitBtn"), 4.0)
+        return not self._has(_idbd.describe_all(udid), "assignOrSplitBtn")
+
+    def _ocr_tap_name(self, udid: str, box, text: str) -> Tuple[bool, str]:
+        """Tap *text* on an Overlay by OCR, also when Vision merged it with its
+        neighbour (MEASURED 2026-10-29: 'Guest 2 Guest 3' as one word): the part's
+        centre is placed by its share of the word's characters."""
+        from automation.scenarios import screen_text
+        words = screen_text.read_text(udid, region=box, accurate=True)
+        for t, x, y, w, h in words:
+            if self._text_matches(t, text):
+                return _idbd.tap_point(udid, x + w / 2, y + h / 2)[0], f"{text!r} (OCR)"
+        for t, x, y, w, h in words:
+            at = t.find(text)
+            if at >= 0 and len(t) > len(text):
+                cx = x + w * (at + len(text) / 2) / len(t)
+                return _idbd.tap_point(udid, cx, y + h / 2)[0], f"{text!r} inside {t!r} (OCR)"
+        return False, f"{text!r} is not on the dialog (it reads: {[t for t, *_ in words][:12]})"
+
+    @staticmethod
+    def _shown_name(person: str) -> str:
+        """What OCR can match of *person*'s name on a dialog. preprod-2-May18 puts a real
+        second word on its own line, 'Noolu' over 'Naga', and keeps 'Guest 1' and 'Roopa D'
+        on one (Util/participant.js:47-50)."""
+        first, _, rest = person.strip().partition(" ")
+        return person.strip() if not rest or re.fullmatch(r"\d+|[A-Za-z]\.?", rest) else first
+
+    def _ocr_tap_person(self, udid: str, box, person: str) -> Tuple[bool, str]:
+        """Tap a person's name on a dialog's avatar row. The row scrolls sideways and OCR
+        sees only what shows (MEASURED 2026-11-02: with 7 people Guest 4 was cut off at the
+        dialog's edge), so it is dragged left, then back, until the name shows."""
+        want = self._shown_name(person)
+        x0, y0, x1, y1 = box
+        y = y0 + (y1 - y0) * 0.41        # the avatars' row on the 'split' box
+        how = ""
+        for step in (0, -1, -1, 1, 1, 1):
+            if step:
+                a, b = (x1 - 40, x0 + 40) if step < 0 else (x0 + 40, x1 - 40)
+                _idbd.swipe(udid, a, y, b, y, 1.5)
+                time.sleep(0.8)
+            ok, how = self._ocr_tap_name(udid, box, want)
+            if ok:
+                return True, how
+        return False, how
+
+    def _w_grid(self, spec: str, mode: str, notes: List[str]) -> bool:
+        """`@w_move:<Product>@<Owner> > Name` / `@w_gsplit:<Product>@<Owner> > Name, …`
+        — after SEND, move the owner's line to another person (Assign) or share it
+        with others (Split), on the order's grid view.
+
+        Event screen (OrderSummary.js:578-623, 1522; Modal AssignSplitProductModal in
+        move mode): show only the owner's lines (long-press, _focus_profile), the grid
+        toggle (2nd icon, no id: '\\uec56'), tick the line, `assignOrSplitBtn` ->
+        'Assign to or split among…' -- an Overlay listing EVERY profile, the owner too
+        (MEASURED 2026-10-29). Assign wants exactly one other person (assignToUser
+        'moveProduct'); Split at least two, the owner among them (multipleSplitProducts).
+        Refused after Notify Payment. Done when the owner's card no longer lists the
+        dish (move) or lists it as a share 'x n/m' (split), and the others' cards
+        list it."""
+        tag = f"@w_{'move' if mode == 'assign' else 'gsplit'}:{spec}"
+        m = self._W_ON_RE.match(spec or "")
+        people = [p.strip() for p in ((m.group("to") or "") if m else "").split(",") if p.strip()]
+        if not m or not people or (mode == "assign" and len(people) != 1):
+            notes.append(f"[FAIL] {tag} — write it as <Product>@<Owner> > Name"
+                         + (", Name" if mode == "split" else " (one person)"))
+            return False
+        what, who = m.group("what"), m.group("who")
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name = _idbd.name
+        pid = self._squash(what)
+        on_card = lambda lines: [t for t in lines if self._CARD_LINE_RE.match(t)  # noqa: E731
+                                 and self._squash(self._CARD_LINE_RE.match(t).group("what")) == pid]
+        mine0 = on_card(self._owner_lines(udid, who, raw=True) or [])
+        if getattr(self, "_resume", None):
+            # A resumed segment re-runs this step; the cards say whether it was done.
+            if mode == "assign" and not mine0 and on_card(
+                    self._owner_lines(udid, people[0], raw=True) or []):
+                notes.append(f"[ok] {tag} — {what} is already {people[0]}'s (moved by the "
+                             f"run this one resumes)")
+                return True
+            if mode == "split" and any(re.search(r" x \d+/\d+$", t) for t in mine0):
+                notes.append(f"[ok] {tag} — {who}'s {what} is already shared ({mine0}; by "
+                             f"the run this one resumes)")
+                return True
+        if not mine0:
+            notes.append(f"[FAIL] {tag} — {who}'s card lists no {what}")
+            return False
+        els = self._focus_profile(udid, who, tag, notes)
+        if els is None:
+            return False
+        if not self._has(els, "assignOrSplitBtn"):
+            grid = next((e for e in els if name(e) == self._GRID_ICON), None)
+            if grid is None:
+                notes.append(f"[FAIL] {tag} — no grid toggle on the order")
+                return False
+            _idbd.tap_el(udid, grid, els, scroll=False)
+            els, _ = self._wait_els(udid, lambda es: self._has(es, "assignOrSplitBtn"), 6.0)
+        row = next((e for e in self._order_rows(els) if name(e) == pid + "card"), None)
+        if row is None:
+            notes.append(f"[FAIL] {tag} — the grid shows no {what} line of {who}")
+            return False
+        els, row = self._row_into_view(udid, els, row)
+        if row is None:
+            notes.append(f"[FAIL] {tag} — could not bring {what} onto the screen")
+            return False
+        # The header reads Unselect while any line is ticked: clear it first, so the
+        # tap below TICKS this line (MEASURED 2026-10-29: a leftover tick made the tap
+        # un-tick it, and ASSIGN / SPLIT then opened nothing).
+        if self._has(els, "unSelectAll"):
+            _idbd.tap(udid, ["unSelectAll"], els)
+            els, _ = self._wait_els(udid, lambda es: not self._has(es, "unSelectAll"), 4.0)
+            row = self._same_row(els, row) or row
+        _idbd.tap_el(udid, row, els, scroll=False)
+        els, ticked = self._wait_els(udid, lambda es: self._has(es, "unSelectAll"), 4.0)
+        if not ticked:
+            notes.append(f"[FAIL] {tag} — tapped {who}'s {what} line but it did not get ticked")
+            return False
+        ok, how = _idbd.tap(udid, ["assignOrSplitBtn"])
+        els, ov = self._wait_els(udid, lambda es: self._overlay(es, "assignProductsBtn"), 8.0)
+        if ov is None:
+            toast = self._toast(els) or self._screen_toast(udid)
+            notes.append(f"[FAIL] {tag} — ASSIGN / SPLIT did not open its dialog"
+                         + (f" ({toast!r})" if toast else f" ({how})"))
+            return False
+        time.sleep(0.8)
+        box = self._box(els, "split")
+        picks = people if mode == "assign" else [who] + [p for p in people if p != who]
+        for person in picks:
+            sel = self._squash(person)
+            ok, how = self._ocr_tap_person(udid, box, person)
+            els, done = self._wait_els(udid, lambda es: f"{sel}close" in name(
+                self._overlay(es, "assignProductsBtn") or {}).split(), 5.0)
+            if not ok or not done:
+                notes.append(f"[FAIL] {tag} — {how}; {person} did not get selected")
+                return False
+        els = self._overlay_taps(udid, els, "split", ["Assign" if mode == "assign" else "Split"],
+                                 "assignProductsBtn", tag, notes)
+        if els is None:
+            return False
+        # Back to the list view and everyone's lines, then read the cards. Settle
+        # first: toggled while the dialog was still closing, the view stayed on the
+        # grid (MEASURED 2026-10-29) and the next Select All found nothing.
+        time.sleep(1.5)
+        if not self._list_view(udid):
+            notes.append(f"    · {tag}: could not switch the order back to its list view")
+        self._unfocus_profile(udid, tag, notes)
+
+        def landed():
+            now = on_card(self._owner_lines(udid, who, raw=True) or [])
+            if mode == "assign":
+                gone = len(now) < len(mine0)
+                there = bool(on_card(self._owner_lines(udid, people[0], raw=True) or []))
+                return gone and there, now
+            shared = any(re.search(r" x \d+/\d+$", t) for t in now)
+            return shared, now
+
+        for _ in range(4):
+            ok, now = landed()
+            if ok:
+                break
+            time.sleep(3.0)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — pressed {'Assign' if mode == 'assign' else 'Split'} "
+                         f"but {who}'s card still reads {now or 'nothing'} for {what}")
+            return False
+        notes.append(f"[ok] {tag} — "
+                     + (f"moved {who}'s {what} to {people[0]}" if mode == "assign" else
+                        f"split {who}'s {what} with {', '.join(people)}: {who}'s card "
+                        f"reads {now}"))
+        return True
+
+    _COMP_PCTS = (5, 10, 15, 25, 30, 40, 100)       # the dialog's chips (Modal:5885)
+
+    def _w_comp(self, spec: str, notes: List[str], reason: str = "managerDiscretion") -> bool:
+        """`@w_comp:<Product>@<Owner>*<N|all>:<pct>` — COMP N units (all = the whole
+        line) of the owner's line by pct % (a chip: 5 10 15 25 30 40 100).
+
+        As _comp_item -- swipe, COMP, a reason and a discount chip (both required, none
+        preselected), Apply, all on an Overlay tapped by text -- then, for a line of
+        quantity > 1, the 'which items' dialog (_units_set; Next is
+        `assignProductsBtn`). COMP is refused before Serve and after Notify Payment
+        (splitCall, Event/index.js:1750). Done when the owner's line shows its
+        'COMP n%' mark (OrderSummary.js:844)."""
+        tag = f"@w_comp:{spec}"
+        head, _, pct_s = (spec or "").rpartition(":")
+        m = self._W_ON_RE.match(head)
+        if not m or m.group("to") or not pct_s.strip().isdigit() \
+                or int(pct_s) not in self._COMP_PCTS:
+            notes.append(f"[FAIL] {tag} — write it as <Product>@<Owner>*<N|all>:<pct> "
+                         f"(pct one of {', '.join(map(str, self._COMP_PCTS))})")
+            return False
+        what, who, pct = m.group("what"), m.group("who"), int(pct_s)
+        want = None if (m.group("n") or "all") == "all" else int(m.group("n"))
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        if want is None:
+            want = self._card_qty(udid, who, what)[0]
+        name, mark = _idbd.name, f"{pct}%"
+        rid = self._squash(what) + "card"
+        self._list_view(udid)                  # rows swipe only in the list view
+        els = self._focus_profile(udid, who, tag, notes)
+        if els is None:
+            return False
+        row = next((e for e in self._order_rows(els) if name(e) == rid), None)
+        if row is None:
+            notes.append(f"[FAIL] {tag} — {who} has no {what} line")
+            self._unfocus_profile(udid, tag, notes)
+            return False
+        marks = sum(1 for e in els if name(e) == mark)
+        price0 = self._row_money(els, row)
+        # A resumed segment re-runs this step: the row already carrying its 'COMP n%'
+        # mark was comped by the run this one resumes.
+        # Any row of the dish: comping one unit splits it onto its own row, which carries
+        # the mark (MEASURED 2026-11-02: Guest 4's Margherita, 'COMP 10%' on the 1-unit row).
+        if getattr(self, "_resume", None) and any(
+                name(e) == mark for r in self._order_rows(els) if name(r) == rid
+                for e in self._row_line(els, r)):
+            self._unfocus_profile(udid, tag, notes)
+            notes.append(f"[ok] {tag} — {who}'s {what} already shows 'COMP {mark}' (by the run "
+                         f"this one resumes)")
+            return True
+        got = None
+        for attempt in (1, 2):
+            got = self._row_action(udid, row, "COMP", lambda es: self._overlay(es, "5Btn"),
+                                   tag, notes)
+            if got is not None:
+                break
+            # Serve posts asynchronously (see _comp_item), and right after SERVE the
+            # dialog can fail to open with no message (MEASURED 2026-10-29, run
+            # 040c74be; the same comp opened a minute later): retry once.
+            if attempt == 1 and "already" not in (notes[-1] if notes else "").lower():
+                notes[-1] = notes[-1].replace("[FAIL]", "[retry]")
+                time.sleep(4.0)
+                els = _idbd.describe_all(udid)
+                row = self._same_row(els, row) or row
+                continue
+            done = self._done_before(notes, tag)
+            self._unfocus_profile(udid, tag, notes)
+            return done
+        reason = self._comp_reason(got, reason) or reason
+        els = self._comp_pick(udid, got, reason, pct, tag, notes)
+        if els is None:
+            return False
+        def units_up(es):
+            # The comp dialog's Apply is assignProductsBtn too: the units dialog is the
+            # one whose ids carry a count.
+            ov = self._overlay(es, "assignProductsBtn")
+            return ov if ov is not None and self._UNITS_COUNT_RE.search(name(ov)) else None
+
+        units = 1
+        els, ov = self._wait_els(udid, units_up, 3.0)
+        if ov is not None:                     # quantity > 1: which units
+            units = self._units_set(udid, "assignProductsBtn", want, tag, notes)
+            if units is None:
+                return False
+            els = self._overlay_taps(udid, _idbd.describe_all(udid), "units", ["Next"],
+                                     "assignProductsBtn", tag, notes)
+            if els is None:
+                return False
+        # 45s: the server applies the comp and the whole order redraws (MEASURED 2026-11-02:
+        # 'COMP 10%' showed after the old 12s, the comp itself had worked).
+        els, done = self._wait_els(udid, lambda es: sum(1 for e in es if name(e) == mark) > marks,
+                                   45.0)
+        if not done:
+            toast = self._toast(els) or self._screen_toast(udid)
+            notes.append(f"[FAIL] {tag} — pressed Apply but {who}'s {what} shows no "
+                         f"'COMP {mark}'" + (f" ({toast!r})" if toast else ""))
+            return False
+        r2 = self._same_row(els, row)
+        price1 = self._row_money(els, r2) if r2 is not None else None
+        self._unfocus_profile(udid, tag, notes)
+        notes.append(f"[ok] {tag} — comped {units} unit(s) of {who}'s {what} at {mark} "
+                     f"({self._pretty(reason).lower()})"
+                     + (f"; {price0:.2f} € → {price1:.2f} €" if price0 and price1 is not None
+                        else ""))
+        return True
+
+>>>>>>> Stashed changes
     def _split_item(self, notes: List[str]) -> bool:
         """Swipe a row of the dish just assigned to everyone -> SPLIT -> one more
         profile -> Apply. AssignSplitProductModal hides the row's owner
@@ -8265,12 +9605,1890 @@ class FlowRunner:
         notes.append(f"[ok] {tag} — {payer} pays for {', '.join(others) or 'nobody else'}")
         return True
 
+<<<<<<< Updated upstream
+=======
+    def _open_card(self, udid: str, who: str, inside: str):
+        """(els, card, control): *who*'s payment card opened until *inside* (an id in
+        it: tipBtn, discountBtn, ...) shows within it; control None when it does not."""
+        name, frame = _idbd.name, _idbd.frame
+
+        def ctl(es):
+            card, top, bottom = self._profile_region(es, who)
+            if card is None:
+                return None
+            return next((e for e in es if name(e) == inside and top < frame(e)[1] < bottom), None)
+
+        # Not one raw read: an empty dump or the panel's reload spinner (after a Pay
+        # For Apply, PaymentDetails.js:4838) shows no card, and the caller then took
+        # "no control" for "this build has none" (a false [skip] of the discount).
+        els, card = self._wait_els(udid, lambda es: self._profile_region(es, who)[0], 30.0)
+        card, _t, _b = self._profile_region(els, who)
+        if card is not None and ctl(els) is None:
+            els, card = self._panel_into_view(udid, els, card,
+                                              lambda es: self._profile_region(es, who)[0])
+            _idbd.tap_el(udid, card, els, scroll=False)
+            els, _ = self._wait_els(udid, ctl, 6.0)
+        c = ctl(els)
+        if c is not None:
+            els, c = self._panel_into_view(udid, els, c, ctl)
+        return els, self._profile_region(els, who)[0], c
+
+    def _pay_for_named(self, payer: str, people: List[str], notes: List[str]) -> bool:
+        """`@w_pay_for:<Payer> > Name, Name` — on the payer's OWN card: Pay For
+        (`payForBtn`), pick those people, Apply. Every card carries a payForBtn
+        (PaymentDetails.js:2573), so the button is taken from the payer's card --
+        MEASURED 2026-10-29: the first one on screen was another person's. When the
+        dialog is slow to open, Pay For is tapped once more; the payer is NOT made the
+        payer through E-Payment first (the user, 2026-11-04: "remove this step").
+
+        The dialog ('For whom do you like to pay… ?') is an Overlay on the installed
+        build: ONE element with every id ('NooluNagaselect NooluNagaclose
+        Guest3select … applyPayment'), payer preselected. People are tapped by their
+        shown name, confirmed by '<Name>close' joining the ids; Apply by its text."""
+        tag = f"@w_pay_for:{payer} > {', '.join(people)}"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name = _idbd.name
+        self._payer_card = self._squash(payer) + "accordionCard"
+
+        def ids(es) -> List[str]:
+            ov = self._overlay(es, "applyPayment")
+            if ov is not None:
+                return name(ov).split()
+            return [name(e) for e in es] if self._has(es, "applyPayment") else []
+
+        els = _idbd.describe_all(udid)
+        # Already done (a resumed run): the payer's card lists 'Paid for <Name>' for each
+        # (MEASURED 2026-11-04 after run ce8ba9e5). The dialog would not even open --
+        # Pay For is live only for the CURRENT payer (PaymentDetails.js:2573-2575).
+        if not ids(els):
+            els, card, _btn = self._open_card(udid, payer, "payForBtn")
+            _c, top, bottom = self._profile_region(els, payer)
+            listed = {name(e).strip() for e in els if top < _idbd.frame(e)[1] < bottom}
+            if card is not None and people and all(f"Paid for {p}" in listed for p in people):
+                self._paid_for_others = list(people)
+                total = self._payer_card_total(els, card)
+                notes.append(f"[ok] {tag} — {payer} already pays for {', '.join(people)} "
+                             f"(the card lists 'Paid for …'; done by the run this one resumes)"
+                             + (f"; their card's Total reads {total:.2f} €"
+                                if total is not None else ""))
+                notes.append(invoice_check.calc_note(
+                    f"Pay for others ({payer})", ["Pays for", "Total displayed"],
+                    [[", ".join(people), invoice_check.eur(total), None]]))
+                return True
+        for attempt in (1, 2):
+            if ids(els):
+                break
+            els, card, btn = self._open_card(udid, payer, "payForBtn")
+            if btn is None:
+                notes.append(f"[FAIL] {tag} — {payer}'s card shows no Pay For")
+                return False
+            _idbd.tap_el(udid, btn, els, scroll=False)
+            els, up = self._wait_els(udid, ids, 12.0)
+            if up:
+                if attempt > 1:
+                    notes.append(f"    [warn] {tag} — Pay For on {payer}'s card opened its "
+                                 f"dialog only on the second tap")
+                break
+        if not ids(els):
+            notes.append(f"[FAIL] {tag} — Pay For on {payer}'s card did not open its dialog "
+                         f"(tapped twice)")
+            return False
+        time.sleep(0.8)
+        box = self._box(els, "split")
+        for person in people:
+            sel = self._squash(person)
+            if f"{sel}close" in ids(els):
+                continue
+            if f"{sel}select" not in ids(els):
+                offered = [t[:-6] for t in ids(els) if t.endswith("select")]
+                notes.append(f"[FAIL] {tag} — {person} is not offered ({', '.join(offered)})")
+                return False
+            el = next((e for e in els if name(e) == f"{sel}select"), None)
+            if el is not None:
+                els, el = self._profile_into_view(udid, els, el)
+            ok, how = (_idbd.tap_el(udid, el, els) if el is not None
+                       else self._ocr_tap_person(udid, box, person))
+            els, done = self._wait_els(udid, lambda es: f"{sel}close" in ids(es), 5.0)
+            if not done:
+                notes.append(f"[FAIL] {tag} — {how}; {person} did not get selected")
+                return False
+        if self._has(els, "applyPayment"):
+            _idbd.tap(udid, ["applyPayment"], els)
+        else:
+            self._ocr_tap(udid, box, "Apply")
+        els, gone = self._wait_els(udid, lambda es: not ids(es), 10.0)
+        if not gone:
+            notes.append(f"[FAIL] {tag} — Apply did not close the Pay For dialog")
+            return False
+        self._paid_for_others = list(people)
+        els, _ = self._wait_els(udid, lambda es: self._profile_region(es, payer)[0], 10.0)
+        total = self._payer_card_total(els, self._profile_region(els, payer)[0])
+        notes.append(f"[ok] {tag} — {payer} pays for {', '.join(people)}"
+                     + (f"; their card's Total reads {total:.2f} €" if total is not None else ""))
+        notes.append(invoice_check.calc_note(
+            f"Pay for others ({payer})", ["Pays for", "Total displayed"],
+            [[", ".join(people), invoice_check.eur(total), None]]))
+        return True
+
+    def _w_payer(self, who: str, notes: List[str]) -> bool:
+        """`@w_payer:<Name>` — the next @pay:<method> pays on THIS person's card, opened
+        (and brought on screen) so its methods show: a guest's card far down the panel
+        stayed closed and @pay found no methods (MEASURED 2026-10-29, Guest 5)."""
+        self._payer_card = self._squash(who) + "accordionCard"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        btn = None
+        for inside in ("paidCashPaymentBtn", "cashPaymentBtn"):
+            _els, _card, btn = self._open_card(udid, who, inside)
+            if btn is not None:
+                break
+        notes.append(f"[ok] @w_payer:{who} — the next payment is {who}'s"
+                     + ("" if btn is not None else " (their card shows no payment method)"))
+        return True
+
+    def _w_tip(self, spec: str, notes: List[str]) -> bool:
+        """`@w_tip:<Name> <euros>` — a tip on that person's card: `tipBtn` (shown while
+        they have none, PaymentDetails.js) opens the keypad -- digit keys
+        `VirtualKeyboard-0..9`, the amount in `userAmountInput`, `userInputBtn`. A
+        whole-euro amount: the decimal key has no id. The card's Total it leaves is
+        checked ([mismatch] when wrong; the payment goes on)."""
+        tag = f"@w_tip:{spec}"
+        who, _, amount = (spec or "").rpartition(" ")
+        if not who or not amount.isdigit():
+            notes.append(f"[FAIL] {tag} — write it as <Name> <whole euros>")
+            return False
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        els, card, btn = self._open_card(udid, who, "tipBtn")
+        if btn is None:
+            if getattr(self, "_resume", None) and card is not None:
+                name, frame = _idbd.name, _idbd.frame
+                _card, top, bottom = self._profile_region(els, who)
+
+                def row_amount(label: str) -> Optional[float]:
+                    title = next((e for e in els if name(e).strip().lower() == label.lower()
+                                  and top < frame(e)[1] < bottom), None)
+                    if title is None:
+                        return None
+                    tx, ty, _tw, th = frame(title)
+                    cy = ty + th / 2
+                    values = []
+                    for e in els:
+                        ex, ey, _ew, eh = frame(e)
+                        match = self._MONEY_RE.match(name(e).strip())
+                        if match and top < ey < bottom and ex >= tx \
+                                and abs(ey + eh / 2 - cy) < 18:
+                            values.append(float(match.group(1).replace(",", ".")))
+                    return values[-1] if values else None
+
+                tip = row_amount("Tip")
+                due = row_amount("Due")
+                if tip is not None and abs(tip - int(amount)) < 0.005:
+                    notes.append(f"[ok] {tag} — {who}'s card already shows a {tip:.2f} € tip; "
+                                 "not adding it again on resume")
+                    self._tips = {**getattr(self, "_tips", {}), who: tip}
+                    return True
+                if due is not None and due < 0.005:
+                    if tip is not None:
+                        self._tips = {**getattr(self, "_tips", {}), who: tip}
+                    notes.append(f"[skip] {tag} — {who}'s card is already paid (Due "
+                                 f"{due:.2f} €); not changing a completed payment"
+                                 + (f"; its Tip is {tip:.2f} €" if tip is not None else ""))
+                    return True
+            notes.append(f"[FAIL] {tag} — {who}'s card shows no Tip (tipBtn: it shows only "
+                         f"once payment is notified, while no tip is set)")
+            return False
+        # Already set (a resumed run): the button prints it ('3.00 €', OCR -- MEASURED
+        # 2026-11-04 after run ce8ba9e5) and stays; tipping again reads as a mismatch.
+        from automation.scenarios import screen_text
+        bx, by, bw, bh = _idbd.frame(btn)
+        on_btn = " ".join(t[0] for t in screen_text.read_text(
+            udid, region=(bx - 4, by - 4, bx + bw + 4, by + bh + 4), els=els, accurate=True))
+        m = re.search(r"(\d+(?:[.,]\d+)?)\s*€", on_btn)
+        if m and abs(float(m.group(1).replace(",", ".")) - int(amount)) < 0.005:
+            notes.append(f"[ok] {tag} — {who}'s tip is already {m.group(1)} € (the run this "
+                         f"one resumes set it); not tipping again")
+            self._tips = {**getattr(self, "_tips", {}), who: float(amount)}
+            return True
+        total0 = self._payer_card_total(els, card)
+        _idbd.tap_el(udid, btn, els, scroll=False)
+        els, pad = self._wait_els(udid, lambda es: self._has(es, "userInputBtn"), 6.0)
+        if not pad:
+            notes.append(f"[FAIL] {tag} — Tip did not open the keypad")
+            return False
+        # The payment's own keypad (keys named by their digit, MEASURED 2026-10-29), typed
+        # and READ BACK: a lost tap used to send an empty tip (0) and still pass.
+        got = self._keypad_type(udid, amount)
+        m = re.search(r"\d+(?:[.,]\d+)?", got or "")
+        if not m or abs(float(m.group(0).replace(",", ".")) - int(amount)) > 0.005:
+            notes.append(f"[FAIL] {tag} — typed {amount} on the tip keypad but it reads "
+                         f"{got!r}; not pressing Input")
+            return False
+        _idbd.tap(udid, ["userInputBtn"])
+        want = (total0 or 0) + int(amount)
+
+        def risen(es):
+            t = self._payer_card_total(es, self._profile_region(es, who)[0])
+            return t if t is not None and abs(t - want) < 0.015 else None
+
+        els, now = self._wait_els(udid, risen, 10.0)
+        shown = now if now is not None else self._payer_card_total(
+            els, self._profile_region(els, who)[0])
+        notes.append(f"[ok] {tag} — {who}'s Total {invoice_check.eur(total0)} € + tip {amount} €; "
+                     f"the Total displays {invoice_check.eur(shown)} €")
+        self._money_check(notes, tag, *invoice_check.tip_check(who, total0, float(amount), shown))
+        self._tips = {**getattr(self, "_tips", {}), who: float(amount)}
+        return True
+
+    def _w_discount(self, who: str, notes: List[str]) -> bool:
+        """`@w_discount:<Name>` — the restaurant's coupon on that person's payment:
+        `discountBtn` opens ApplyDiscountCoupon (Screens/Event/ApplyDiscountCoupon.js):
+        this restaurant's business coupons valid today, tiles '{n}% OFFER' / '{n}€
+        OFFER' with no ids -- the first is tapped by its text; applying closes the
+        sheet. Staging 2026-10-29 has one: 'Coupon Festival', 5 % above 10 €. The
+        card's Total it leaves is checked against the tile's value ([mismatch] when
+        wrong, a refusal toast included; the payment goes on)."""
+        tag = f"@w_discount:{who}"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        els, card, btn = self._open_card(udid, who, "discountBtn")
+        if btn is None:
+            # MEASURED 2026-10-29: the B-App on main has NO Discount on the payment card
+            # (E-Payment, Cash, Food Voucher only); preprod-2-May18 has it. On main it is an
+            # app gap, reported -- not a test fault and not faked. Only when the OPEN card
+            # shows its methods and still no Discount.
+            els2, card2, methods = self._open_card(udid, who, "epaymentBtn")
+            _c, top, bottom = self._profile_region(els2, who)
+            if methods is not None and any(_idbd.name(e) == "discountBtn"
+                                           and top < _idbd.frame(e)[1] < bottom for e in els2):
+                els, card, btn = self._open_card(udid, who, "discountBtn")
+        if btn is None:
+            if methods is not None:
+                notes.append(f"[skip] {tag} — this business-app build has no Discount on "
+                             f"{who}'s payment card (only E-Payment / Cash / Food Voucher; the "
+                             f"source has discountBtn). REPORTED: the discount cannot be tested "
+                             f"on this build")
+                return True
+            notes.append(f"[FAIL] {tag} — {who}'s card shows no Discount (after payment is "
+                         f"notified; locked once they paid)")
+            return False
+        # Already applied (a resumed run): the tile prints this person's share as
+        # '-x.xx €' (PaymentDetails.js:2480-2496), and a tap on the applied coupon
+        # REMOVES it, leaving the sheet open (ApplyDiscountCoupon.js:86-135).
+        bx, by, _bw, bh = _idbd.frame(btn)
+        held = next((_idbd.name(e).strip() for e in els
+                     if re.match(r"^-\s?\d+[.,]\d{2}\s*€$", _idbd.name(e).strip())
+                     and abs(_idbd.frame(e)[0] - bx) <= 40
+                     and by + bh - 6 <= _idbd.frame(e)[1] <= by + bh + 40), None)
+        if held:
+            notes.append(f"[ok] {tag} — a coupon is already applied to {who}'s payment "
+                         f"({held}); not tapping it again (that would remove it)")
+            self._tiles_home(udid, who)
+            return True
+        total0 = self._payer_card_total(els, card)
+        # The four method tiles scroll sideways inside the card and Discount is the last:
+        # MEASURED 2026-11-04 (run f2adc613) it sat at x 1159-1247 in a card ending at
+        # 1171, so the tap landed off the card and no sheet opened.
+        if card is not None and _idbd.frame(card)[2] > 0:
+            els, btn = self._tile_into_card(udid, els, card, btn)
+        _idbd.tap_el(udid, btn, els, scroll=False)
+        time.sleep(2.0)
+        from automation.scenarios import screen_text
+        # Tiles read '5% OFFER' / '2€ OFFER'; the heading 'Select a coupon to offer to
+        # client' must not pass for one. The list loads behind a spinner on preprod-2-May18
+        # (ApplyDiscountCoupon.js:46), so one read is not enough.
+        offers, words, deadline = [], [], time.time() + 10.0
+        while True:
+            words = screen_text.read_text(udid, accurate=True)
+            offers = [t for t in words if t[0].strip().upper().endswith("OFFER")]
+            if offers or time.time() >= deadline:
+                break
+            time.sleep(1.0)
+        if not offers:
+            toast = self._screen_toast(udid)
+            notes.append(f"[FAIL] {tag} — the discount sheet lists no '% OFFER' coupon "
+                         f"(none valid today for the business app?)"
+                         + (f" ({toast!r})" if toast else ""))
+            return False
+        t = offers[0]
+        offer = t[0].strip()
+        if not re.search(r"\d", offer):
+            # preprod-2-May18 prints the value on its own line just above 'OFFER' ('10%'
+            # over 'OFFER', 16pt apart, MEASURED 2026-11-04): the check needs it.
+            val = next((w for w in words
+                        if re.fullmatch(r"\d+(?:[.,]\d+)?\s*(?:%|€)", w[0].strip())
+                        and abs((w[1] + w[3] / 2) - (t[1] + t[3] / 2)) <= 30
+                        and 0 < t[2] - w[2] <= 40), None)
+            if val is not None:
+                offer = f"{val[0].strip()} {offer}"
+        _idbd.tap_point(udid, t[1] + t[3] / 2, t[2] + t[4] / 2)
+
+        def fell(es):
+            v = self._payer_card_total(es, self._profile_region(es, who)[0])
+            return v if v is not None and total0 is not None and v < total0 - 0.005 else None
+
+        # The server applies it and pushes the new totals on the socket: slower than a
+        # local sum, and it can refuse (minimum spend, one coupon at a time) with a toast.
+        els, now = self._wait_els(udid, fell, 20.0)
+        toast = "" if now is not None else (self._toast(els) or self._screen_toast(udid))
+        if now is None:
+            # A refused coupon leaves the sheet open over the card (it closes only on a
+            # successful apply, ApplyDiscountCoupon.js:131-135): its backdrop closes it.
+            head = next((w for w in screen_text.read_text(udid)
+                         if w[0].startswith("Select a coupon")), None)
+            if head is not None:
+                _idbd.tap_point(udid, head[1] + head[3] / 2, head[2] - 70)
+                els, now = self._wait_els(udid, fell, 6.0)
+        shown = now if now is not None else self._payer_card_total(
+            els, self._profile_region(els, who)[0])
+        notes.append(f"[ok] {tag} — applied {offer!r}: {who}'s Total {invoice_check.eur(total0)} € "
+                     f"→ {invoice_check.eur(shown)} €" + (f" ({toast!r})" if toast else ""))
+        # The tip is not discounted (MEASURED 2026-11-04: -26.49 € on 264.90 € with or
+        # without the 3 € tip): check the items, then add the tip back.
+        tip = getattr(self, "_tips", {}).get(who, 0.0)
+        if tip and total0 is not None and shown is not None:
+            table, problem = invoice_check.offer_check(
+                "Discount", round(total0 - tip, 2), round(shown - tip, 2), offer,
+                f"{who}, tip {tip:.2f} € left out")
+        else:
+            table, problem = invoice_check.offer_check("Discount", total0, shown, offer, who)
+        self._money_check(notes, tag, table,
+                          problem and problem + (f" (the app said {toast!r})" if toast else ""))
+        # The row was slid to reach Discount: back to E-Payment for the payment (the
+        # user, 2026-11-04; run ce8ba9e5's @pay:epay found it off the card, x 758).
+        self._tiles_home(udid, who)
+        return True
+
+    def _tiles_home(self, udid: str, who: str) -> None:
+        """*who*'s row of payment tiles slid back to its start, E-Payment in the card."""
+        els = _idbd.describe_all(udid)
+        card, top, bottom = self._profile_region(els, who)
+        tile = next((e for e in els if _idbd.name(e) in ("epaymentBtn", "paidEpaymentBtn")
+                     and top < _idbd.frame(e)[1] < bottom), None)
+        if card is not None and tile is not None:
+            self._tile_into_card(udid, els, card, tile)
+
+    def _tile_into_card(self, udid: str, els: List[dict], card: dict,
+                        tile: dict) -> Tuple[List[dict], dict]:
+        """Slide a card's sideways row of tiles (E-Payment, Cash, Food Voucher, Discount)
+        until *tile* lies inside the card: the row scrolls only ~90pt, so one long swipe
+        reaches its end (MEASURED 2026-11-04: 220pt moved it 89.5pt)."""
+        cx, _cy, cw, _ch = _idbd.frame(card)
+        ident = _idbd.name(tile)
+        for _ in range(3):
+            x, y, w, h = _idbd.frame(tile)
+            if x >= cx and x + w <= cx + cw - 2:
+                break
+            left = x + w > cx + cw - 2
+            x0, x1 = (cx + cw * 0.85, cx + cw * 0.2) if left else (cx + cw * 0.2, cx + cw * 0.85)
+            _idbd.swipe(udid, x0, y + h / 2, x1, y + h / 2, 0.5)
+            time.sleep(1.0)
+            els = _idbd.describe_all(udid) or els
+            tile = next((e for e in els if _idbd.name(e) == ident), tile)
+        return els, tile
+
+    def _send_if_any(self, r, notes: List[str]) -> bool:
+        """`@send_if_any` — SEND what is not sent yet; nothing unsent passes. A line
+        moved or split after SEND came back UNSENT in Phase 4 (SEND reappeared) and
+        stayed sent in Phase 7 (MEASURED 2026-10-29, same booking), so a fixed
+        'Select All + SEND' cannot be written for it."""
+        tag = "@send_if_any"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        self._list_view(udid)
+        # Select All, and once more if it shows nothing: MEASURED 2026-11-02 (run
+        # faa47a06, a loaded Mac) the tap did not take, "nothing unsent" passed, and
+        # the diners' new dishes never reached the kitchen.
+        # MEASURED 2026-11-04 (runs 4f64e3f3, f0e40851): with four of the diners' dishes
+        # showing the 'Order' badge, Select All selected them (Unselect) but SEND was not
+        # drawn: it needs the screen's btnState (OrderSummary.js:1216-1219), which the
+        # order's load works out from the state BEFORE the reload (Event/index.js:357-370)
+        # and a later update corrects -- a minute later the same tap offered SEND. The
+        # step took Unselect alone for "prepared lines, not ours" and passed. So while a
+        # badge shows, keep the selection and wait for SEND, tapping Select All again
+        # only when nothing is selected (up to 2 min); a badge left is a FAIL.
+        picked = lambda es: (self._has(es, "sendItemsBtn") or self._has(es, "unSelectAll")  # noqa: E731
+                             or self._has(es, "serveItemsBtn"))
+        send = lambda es: self._has(es, "sendItemsBtn")  # noqa: E731
+        started, taps = time.time(), 0
+        hidden_since, badges = None, 0           # SEND missing while badges showed
+        els = _idbd.describe_all(udid)
+        while True:
+            if not self._has(els, "unSelectAll"):
+                _idbd.tap(udid, ["selectAll"])
+                taps += 1
+                els, _any = self._wait_els(udid, picked, 10.0)   # >= 3 real looks
+            if not send(els) and self._has(els, "unSelectAll") and self._unsent_orders(els):
+                if hidden_since is None:
+                    hidden_since, badges = time.time(), self._unsent_orders(els)
+                els, _any = self._wait_els(udid, send, 10.0)
+            if send(els) or time.time() - started >= 120.0 or (
+                    not self._unsent_orders(els)
+                    and (taps >= 2 or self._has(els, "unSelectAll"))):
+                break
+        if hidden_since is not None and send(els) and \
+                time.time() - hidden_since >= _iss.slow_screen_seconds():
+            notes.append(f"    {_iss.GLITCH} {tag} — SEND was not shown for "
+                         f"{time.time() - hidden_since:.0f}s while {badges} line(s) showed "
+                         f"the 'Order' badge (the order's btnState is stale after it loads)")
+        if self._has(els, "sendItemsBtn"):
+            self._sent_if_any = True
+            return FlowRunner._handle_special(self, r, "@send_to_kitchen", notes)
+        self._sent_if_any = False
+        if self._has(els, "unSelectAll"):
+            _idbd.tap(udid, ["unSelectAll"], els)          # prepared lines: not ours
+        unsent = self._unsent_orders(els)
+        if unsent:
+            notes.append(f"[FAIL] {tag} — {unsent} line(s) still show the 'Order' badge (a "
+                         f"diner's dish not with the kitchen), but {taps} Select All tap(s) "
+                         f"in {time.time() - started:.0f}s offered no SEND")
+            return False
+        notes.append(f"[ok] {tag} — nothing unsent: every line is with the kitchen already")
+        return True
+
+    @staticmethod
+    def _unsent_orders(els: List[dict]) -> int:
+        """Rows a diner ordered in the C-App that are NOT with the kitchen yet: only they
+        carry the 'Order' badge (OrderSummary.js:823-829, `menu_ordered && !isKitchen`),
+        beside their `<name>card` row. A waiter's own unsent line has no badge."""
+        rows = [_idbd.frame(e)[1] for e in els if _idbd.name(e).endswith("card")]
+        return sum(1 for e in els
+                   if _idbd.name(e) == "Order" and e.get("type") == "StaticText"
+                   and any(abs(_idbd.frame(e)[1] - y) <= 6 for y in rows))
+
+    def _kitchen_ready_if_sent(self, r, notes: List[str]) -> bool:
+        """`@kitchen_ready_if_sent` — ready what the last `@send_if_any` sent. When it sent
+        nothing, the board rightly has none of this order (MEASURED 2026-10-31, run
+        a5c56083: 'nothing unsent', then 'In Queue 00'). Lines that WERE sent must arrive,
+        so that still fails if they do not. A resumed run does not know: the board decides."""
+        if getattr(self, "_sent_if_any", None) is True:
+            return self._kitchen_ready(r, notes)
+        mine = getattr(self, "_booked_ticket", "")
+        els = self._kitchen_board(self._business_udid(), notes)
+        if any(c["ticket"] == mine for c in self._kitchen_cards(els)):
+            return self._kitchen_ready(r, notes)
+        notes.append(f"[ok] @kitchen_ready_if_sent — ticket {mine}: nothing was sent back to "
+                     f"the kitchen, so there is nothing to ready")
+        return True
+
+    def _serve_if_any(self, r, notes: List[str]) -> bool:
+        """`@serve_if_any` — SERVE what is prepared and not served yet; nothing left passes.
+        Select All offers SERVE only for prepared lines, and the earlier serve may have
+        taken them all when a split's lines stayed sent (see _send_if_any)."""
+        tag = "@serve_if_any"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        self._list_view(udid)
+        _idbd.tap(udid, ["selectAll"])
+        els, _any = self._wait_els(udid, lambda es: self._has(es, "serveItemsBtn")
+                                   or self._has(es, "sendItemsBtn"), 8.0)
+        if self._has(els, "sendItemsBtn"):
+            notes.append(f"[FAIL] {tag} — lines are still unsent: SEND is on offer, not SERVE")
+            return False
+        if not self._has(els, "serveItemsBtn"):
+            if self._has(els, "unSelectAll"):
+                _idbd.tap(udid, ["unSelectAll"], els)
+            notes.append(f"[ok] {tag} — nothing left to serve")
+            return True
+        ok, how = _idbd.tap(udid, ["serveItemsBtn"], els)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — could not tap SERVE ({how})")
+            return False
+        notes.append(f"[ok] {tag} — served the prepared lines")
+        return True
+
+    # ── Invoices, review ─────────────────────────────────────────────────────
+    INVOICE_SCREENS = 16
+    INVOICE_READ_S = 0.7 * STEP_TIMEOUT      # the same step also has to open the invoice
+
+    # Words only the invoice prints ('Total' is on the order screen too).
+    _INVOICE_WORDS = ("invoice", "vat", "excl", "on prem", "pre-order", "paid by")
+
+    def _invoice_up(self, udid: str, box, els) -> bool:
+        """Is an invoice on screen? One quick OCR look at *box* for its words."""
+        from automation.scenarios import screen_text
+        words = screen_text.read_text(udid, region=box, els=els)
+        return any(w in t[0].lower() for t in words for w in self._INVOICE_WORDS)
+
+    def _read_invoice(self, udid: str, box=None, els=None) -> Dict[str, str]:
+        """What an open invoice shows, by OCR (its rows carry no ids): every row. It is
+        longer than the screen (MEASURED 2026-10-29: the Pre-Order lines filled it, VAT and
+        Total below), so it is read, dragged up and read again until the screen stops
+        changing. invoice_check makes one list of the screens and splits it into blocks,
+        kept for _check_invoice.
+
+        Returned: the VAT rows and Total of its LAST block, the grand total. The Pre-Order
+        block prints its own Total and VAT table first (InvoiceModal, Components/Modal/
+        index.js:3416/3804), so stopping at the first VAT rows reads the wrong block."""
+        from automation.scenarios import invoice_check, screen_text
+        pages: List[list] = []
+        last, ended = None, box is None
+        deadline = time.time() + self.INVOICE_READ_S
+        for _ in range(self.INVOICE_SCREENS):
+            words = screen_text.read_text(udid, region=box, els=els, accurate=True)
+            seen = [t[0] for t in words]
+            if seen == last:
+                ended = True
+                break
+            pages.append(words)
+            last = seen
+            if box is None or time.time() > deadline:
+                break
+            x0, y0, x1, y1 = box
+            _idbd.swipe(udid, (x0 + x1) / 2, y0 + (y1 - y0) * 0.8, (x0 + x1) / 2,
+                        y0 + (y1 - y0) * 0.25, 1.2)
+            time.sleep(0.8)
+        rows, gaps = invoice_check.stitch(pages)
+        blocks = invoice_check.parse(rows)
+        self._invoice_read = (blocks, gaps, not ended)
+        out = invoice_check.seen_of(blocks)
+        if not out and rows:
+            out["_head"] = " ".join(r.text for r in rows[:3])[:80]
+        return out
+
+    def _run_notes(self) -> List[Tuple[str, str]]:
+        """(segment role, note) for every note this run has saved, the carried-over
+        segments' too: unlike what a step keeps in memory, they outlive a resume."""
+        run_id = getattr(self, "run_id", None)
+        if not run_id:
+            return []
+        roles = {str(seg["num"]): seg["role"] for seg in self.flow["segments"]}
+        with SessionLocal() as db:
+            rows = db.query(ScenarioResult).filter_by(run_id=run_id).all()
+            rows.sort(key=lambda r: int(r.scenario_num) if str(r.scenario_num).isdigit() else 0)
+            return [(roles.get(str(row.scenario_num), ""), str(line))
+                    for row in rows for line in (row.reasons or [])]
+
+    def _diner_label(self) -> str:
+        """Whose phone a C-App step is on, for the report: the host or the participant."""
+        return "participant" if getattr(self, "_cur_role", "") == "participant" else "host"
+
+    def _money_check(self, notes: List[str], tag: str, table: str,
+                     problem: Optional[str]) -> None:
+        """A calculation's table for the run's report (invoice_check.calc_note) and its
+        mismatch: noted, not failed, so the segment goes on; @invoice_verdict fails the
+        run on it at the end."""
+        notes.append(table)
+        if problem:
+            notes.append(f"{invoice_check.MISMATCH_PREFIX}{tag} — {problem}")
+
+    def _check_invoice(self, tag: str, notes: List[str], comps_printed: bool,
+                       role: Optional[str] = None, title: str = "Invoice") -> None:
+        """Recalculate the invoice just read (invoice_check.check): the sums go in the
+        notes, its tables for the report, one that does not match as '[mismatch]'. The step
+        still passes, so the table gets closed and the next invoice read in this same run,
+        which takes over an hour; @invoice_verdict fails the run on them at the end."""
+        blocks, gaps, cut = self._invoice_read
+        lines = self._run_notes()
+        paid = invoice_check.paid_from_notes(lines, role) if lines else None
+        report = invoice_check.check(blocks, gaps, cut, comps_printed, paid, title)
+        notes.extend(f"    · {line}" for line in report.lines)
+        notes.extend(report.tables)
+        notes.extend(f"{invoice_check.MISMATCH_PREFIX}{tag} — {problem}"
+                     for problem in report.problems)
+
+    def _invoice_verdict(self, notes: List[str]) -> bool:
+        """`@invoice_verdict` — the run's calculations, summed up: every one that did not
+        match (a payment's or an invoice's) is named again as a red `[mismatch]` line, and
+        the step passes -- the user's rule for the money checks ("if any mismatch ... show
+        only that line red and continue"; 2026-11-04: "make the 21 passed"). It fails only
+        when no invoice was really checked (a resumed run can carry its invoice segments
+        over from code that did not check them)."""
+        tag = "@invoice_verdict"
+        lines = [line for _, line in self._run_notes()] + notes
+        if not any("invoice checked:" in line for line in lines):
+            notes.append(f"[FAIL] {tag} — no invoice was checked in this run")
+            return False
+        bad = list(dict.fromkeys(line[len("[mismatch] "):] for line in lines
+                                 if line.startswith("[mismatch] ")))
+        if bad:
+            notes.extend(f"[mismatch] {tag} — {b}" for b in bad)
+            notes.append(f"[ok] {tag} — the invoices were checked; {len(bad)} calculation(s) "
+                         f"did not match (red above)")
+            return True
+        notes.append(f"[ok] {tag} — every invoice added up")
+        return True
+
+    def _close_invoice(self, udid: str) -> None:
+        name = _idbd.name
+        els = _idbd.describe_all(udid)
+        btn = next((e for e in els if name(e).lower() in ("back", "close", "invoiceclose",
+                                                          "closeinvoice", "printclose")), None)
+        if btn is not None:
+            _idbd.tap_el(udid, btn, els, scroll=False)
+        else:
+            w, h = _idbd.app_size(els)
+            _idbd.swipe(udid, w / 2, h * 0.15, w / 2, h * 0.9, 0.3)
+        time.sleep(1.0)
+
+    def _w_invoice(self, notes: List[str]) -> bool:
+        """`@w_invoice` — the waiter's EVENT invoice: grid view, its print icon (the
+        grid's `addItemsBtn`), `eventInvoice`, Print Now (`assignProductsBtn`) opens
+        InvoiceModal (Modal/index.js:2752; no ids, read by OCR). Needs the payment
+        completed. Done when the invoice shows its Total; its sums are recalculated then
+        (_check_invoice), against everything everyone paid in this run."""
+        tag = "@w_invoice"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        name = _idbd.name
+        if getattr(self, "_booking_done", None):
+            return self._history_invoice(udid, tag, notes)
+        els = _idbd.describe_all(udid)
+        # Print Now opens it only once the payment is complete ('Payment Not Completed'
+        # otherwise: Modal/index.js:2530-2536), which the server confirms seconds after
+        # the last Confirm; Close Table is the sign (OrderSummary.js:1358).
+        if not self._has(els, "closeTableBtn"):
+            self._list_view(udid)
+            els, paid = self._wait_els(udid, lambda es: self._has(es, "closeTableBtn"), 60.0)
+            if not paid:
+                notes.append(f"    · {tag}: Close Table has not appeared after 60s (the "
+                             f"payment may not be complete); printing anyway")
+        if not self._has(els, "assignOrSplitBtn"):
+            grid = next((e for e in els if name(e) == self._GRID_ICON), None)
+            if grid is not None:
+                _idbd.tap_el(udid, grid, els, scroll=False)
+                els, _ = self._wait_els(udid, lambda es: self._has(es, "assignOrSplitBtn"), 6.0)
+        ok, how = _idbd.tap(udid, ["addItemsBtn"], els)      # the PRINT icon in grid view
+        els, up = self._wait_els(udid, lambda es: self._has(es, "eventInvoice")
+                                 or self._overlay(es, "eventInvoice"), 8.0)
+        if not up:
+            notes.append(f"[FAIL] {tag} — the print icon did not open the invoice choice "
+                         f"({how})")
+            return False
+        if self._has(els, "eventInvoice"):
+            _idbd.tap(udid, ["eventInvoice"], els)
+        else:
+            self._ocr_tap(udid, self._box(els, "units"), "Event Invoice")
+        time.sleep(1.0)
+        btns = [e for e in _idbd.describe_all(udid) if name(e) == "assignProductsBtn"]
+        if btns:
+            _idbd.tap_el(udid, btns[-1], None, scroll=False)
+        else:
+            w, h = _idbd.app_size(els)
+            self._ocr_tap(udid, (0, h * 0.4, w, h), "Print Now")
+        # The invoice sheet: centred, ~455 pt wide (MEASURED 2026-10-29 on the iPad). It
+        # can take 30s+ on a loaded Mac, so its text is waited for before it is read.
+        deadline, toast = time.time() + 45.0, ""
+        while True:
+            time.sleep(3.0)
+            els = _idbd.describe_all(udid)
+            toast = toast or self._toast(els) or self._screen_toast(udid)
+            w, h = _idbd.app_size(els)
+            box = (w / 2 - 240, 40, w / 2 + 240, h - 30)
+            if self._invoice_up(udid, box, els) or time.time() >= deadline:
+                break
+        seen = self._read_invoice(udid, box, els)
+        if "Total" not in seen:
+            notes.append(f"[FAIL] {tag} — the event invoice did not open or shows no Total"
+                         + (f" ({toast!r})" if toast else "") + f"; read: {seen}")
+            return False
+        # Closed by a tap beside it (its backdrop): it has no close control in the tree.
+        _idbd.tap_point(udid, 150, h * 0.5)
+        time.sleep(1.2)
+        self._list_view(udid)
+        notes.append(f"[ok] {tag} — event invoice: " + "; ".join(seen.values()))
+        self._check_invoice(tag, notes, comps_printed=False, title="Event invoice (iPad)")
+        return True
+
+    def _history_invoice(self, udid: str, tag: str, notes: List[str]) -> bool:
+        """The EVENT invoice of a booking the app has completed, from the waiter's History
+        (historyBtn): one `historyCard` per order (its ticket in its pixels only, read by
+        OCR), and the tapped one's complete invoice rendered inline by the same
+        InvoiceModal, left of the list (History/OrderSummary.js:6-9; MEASURED 2026-11-04
+        on 5606: the invoice in x 100-800, the list from x 822)."""
+        from automation.scenarios import screen_text
+        name, frame = _idbd.name, _idbd.frame
+        mine = getattr(self, "_booked_ticket", "")
+        els = _idbd.describe_all(udid)
+        # The list can come up BLANK -- no card, no 'History Not Found', no spinner (its
+        # FlatList clips its rows, removeClippedSubviews, MyHistory.js) -- and neither a
+        # second History tap, Home and back, nor a relaunch brought it back; a pull to
+        # refresh did, at once (MEASURED 2026-11-04, runs ba67d113, 1182e5de).
+        if not self._has(els, "historyCard"):
+            _idbd.tap(udid, ["historyBtn"], els)
+        for attempt in range(4):
+            els, _ = self._wait_els(udid, lambda es: self._has(es, "historyCard"), 10.0)
+            if self._has(els, "historyCard"):
+                if attempt:
+                    notes.append(f"    {_iss.GLITCH} {tag} — the waiter's History list was "
+                                 f"blank until it was pulled to refresh ({attempt} pull(s))")
+                break
+            w, h = _idbd.app_size(els)
+            _idbd.swipe(udid, w - 210, h * 0.3, w - 210, h * 0.78, 0.6)   # pull to refresh
+        cards = [e for e in els if name(e) == "historyCard"]
+        words = screen_text.read_text(udid, els=els) if cards else []
+
+        def holds(c) -> bool:
+            x, y, w, h = frame(c)
+            return any(t[0].strip() == mine and x <= t[1] <= x + w and y <= t[2] <= y + h
+                       for t in words)
+        card = next((c for c in cards if mine and holds(c)), None)
+        if card is None:
+            notes.append(f"[FAIL] {tag} — booking {mine} is completed, and its card is not in "
+                         f"the waiter's History ({len(cards)} card(s) listed)")
+            return False
+        _idbd.tap_el(udid, card, els)
+        w, h = _idbd.app_size(els)
+        box = (100, 30, frame(card)[0] - 10, h - 20)
+        deadline = time.time() + 45.0
+        while True:
+            time.sleep(2.0)
+            els = _idbd.describe_all(udid) or els
+            if self._invoice_up(udid, box, els) or time.time() >= deadline:
+                break
+        seen = self._read_invoice(udid, box, els)
+        if "Total" not in seen:
+            notes.append(f"[FAIL] {tag} — booking {mine}'s invoice in History shows no Total; "
+                         f"read: {seen}")
+            return False
+        notes.append(f"[ok] {tag} — event invoice (History, booking {mine} completed): "
+                     + "; ".join(seen.values()))
+        self._check_invoice(tag, notes, comps_printed=False, title="Event invoice (iPad)")
+        return True
+
+    def _c_finished_card(self, udid: str, notes: List[str], tag: str) -> Optional[List[dict]]:
+        """The Wallet's Finished tab with THIS run's event opened (View PDF, Rebook).
+
+        MEASURED 2026-10-29: a Finished event is a `${restaurant}Card` header with its
+        time ('13:55') below -- no `…finishedCard` id -- and a tap on its row opens it:
+        `finishedCardclose`, `finishedRebook`, `finishedViewPdf` (CardData.js:2370)
+        appear. The event is found by this run's booked time, scrolling the list."""
+        name, frame = _idbd.name, _idbd.frame
+        slot = getattr(self, "_booked_slot", "") or ""
+        els = _idbd.describe_all(udid)
+        if not self._has(els, "finishedBlock"):
+            _idbd.tap(udid, ["walletTab", "Wallet"], els)
+            els, _ = self._wait_els(udid, lambda es: self._has(es, "finishedBlock"), 10.0)
+        _idbd.tap(udid, ["finishedBlock"])
+        els, _ = self._wait_els(udid, lambda es: self._has(es, "walletFinishedSearchInput"), 8.0)
+        w, h = _idbd.app_size(els)
+        times = re.compile(r"^\d{1,2}:\d{2}$")
+
+        def mine(es):
+            """THIS run's card's time ON screen (TODAY + slot, this restaurant)."""
+            return next((t for t in self._finished_card_times(es, slot)
+                         if 0 < frame(t)[1] < h - 80), None)
+
+        # The card first where it is (the user, 2026-11-04: "the card is already there on
+        # the screen but it is scrolling again"): on screen, or in the tree below / above
+        # it, brought into view; the list from its top only when it is not in the tree.
+        known = self._finished_card_times(els, slot)
+        for _ in range(4):
+            if not known or mine(els) is not None:
+                break
+            dy = frame(known[0])[1] - h * 0.45
+            _idbd.swipe(udid, w / 2, h * 0.6, w / 2, h * 0.6 - max(-h * 0.5, min(h * 0.5, dy)),
+                        0.8)
+            time.sleep(1.0)
+            els = _idbd.describe_all(udid) or els
+            known = self._finished_card_times(els, slot)
+        if not known:
+            for _ in range(4):                 # from the TOP of the list
+                _idbd.swipe(udid, w / 2, h * 0.3, w / 2, h * 0.85, 0.2)
+                time.sleep(0.4)
+
+        def opened(es):
+            """View PDF / Rebook INSIDE this event's card: below its time, above the
+            next event's (another event may be the open one)."""
+            me = mine(es)
+            if me is None:
+                return False
+            y0 = frame(me)[1]
+            below = [frame(e)[1] for e in es if times.match(name(e) or "") and frame(e)[1] > y0]
+            y1 = min(below) if below else 1e9
+            return any(name(e) in ("finishedViewPdf", "finishedRebook")
+                       and y0 < frame(e)[1] < y1 for e in es)
+
+        when = None
+        for _ in range(10):
+            els = _idbd.describe_all(udid)
+            when = mine(els)
+            if when is not None:
+                break
+            _idbd.swipe(udid, w / 2, h * 0.75, w / 2, h * 0.35, 1.2)
+            time.sleep(0.8)
+        if when is None:
+            notes.append(f"[FAIL] {tag} — the Finished tab lists no event at {slot or '?'}")
+            return None
+        if opened(els):
+            return els                         # already open
+        x, y, _w, hh = frame(when)
+        for _ in range(2):                     # the row TOGGLES open / closed
+            _idbd.tap_point(udid, x + 150, y + hh / 2)
+            els, up = self._wait_els(udid, opened, 6.0)
+            if up:
+                break
+        return els
+
+    def _c_rating_prompt(self, udid: str, notes: List[str], tag: str) -> Optional[List[dict]]:
+        """THIS run's event's rating prompt: Wallet → Upcoming → the event (unfolded by
+        its time) → `${host}orderCardCompleted` ('Completed', UpcomingCard.js:4924) →
+        'How was your experience …?' with `star1..star5` and `skipReviewCard`.
+        MEASURED 2026-10-29: the paid event stays under Upcoming until it is rated or
+        skipped; the Finished tab has no rating for it yet."""
+        name = _idbd.name
+        els = _idbd.describe_all(udid)
+        if self._has(els, "star1"):
+            return els
+        if not self._has(els, "upcomingBlock"):
+            _idbd.tap(udid, ["walletTab", "Wallet"], els)
+            self._wait_els(udid, lambda es: self._has(es, "upcomingBlock"), 10.0)
+        _idbd.tap(udid, ["upcomingBlock"])
+        time.sleep(1.5)
+        slot = getattr(self, "_booked_slot", "") or ""
+        els = self._unfold_event(udid, slot, _norm(CONSUMER_NAME)) if slot else _idbd.describe_all(udid)
+        btn = next((e for e in els if name(e).endswith("orderCardCompleted")), None)
+        if btn is None:
+            notes.append(f"[FAIL] {tag} — the {slot} event shows no 'Completed' (is it paid "
+                         f"in full? already rated or skipped?)")
+            return None
+        _idbd.tap_el(udid, btn, els)
+        els, up = self._wait_els(udid, lambda es: self._has(es, "star1"), 8.0)
+        if not up:
+            notes.append(f"[FAIL] {tag} — 'Completed' did not open the rating prompt")
+            return None
+        return els
+
+    def _c_finished_prompt(self, udid: str) -> Tuple[List[dict], Optional[dict], Optional[dict]]:
+        """(screen, stars, skip) of THIS run's event's rating prompt in the Wallet's
+        FINISHED tab. MEASURED 2026-11-04 (run efeb8678, preprod-2-May18): an event the
+        app completed itself (paid in full) leaves Upcoming at once, and its Finished card
+        asks 'How was your experience?' -- the stars `Restuarantrating` (sic) and
+        `finishedSkipReview`, just above its date and time (Wallet/Finished.js:664-690).
+        The card is found by TODAY + the booked time under the restaurant's card; (screen,
+        None, None) when no card offers the prompt."""
+        name, frame = _idbd.name, _idbd.frame
+        slot = getattr(self, "_booked_slot", "") or ""
+        self._finished_card_seen = False
+        els = _idbd.describe_all(udid)
+        if not self._has(els, "finishedBlock"):
+            _idbd.tap(udid, ["walletTab", "Wallet"], els)
+            els, _ = self._wait_els(udid, lambda es: self._has(es, "finishedBlock"), 10.0)
+        _idbd.tap(udid, ["finishedBlock"])
+        els, _ = self._wait_els(udid, lambda es: self._has(es, "walletFinishedSearchInput"), 8.0)
+        w, h = _idbd.app_size(els)
+        # The screen as it is first, and stop at THIS run's card, prompt or not: the user,
+        # 2026-11-04 (seg 21, 199s): "the time and card of the event is already there on the
+        # screen but it is not clicking, it is scrolling again". The tree holds the whole
+        # list, so a card below the screen is found without scrolling too.
+        got = self._finished_prompt_in(els, slot)
+        if got or self._finished_card_seen:
+            return els, (got or (None, None))[0], (got or (None, None))[1]
+        for _ in range(4):                     # from the TOP of the list
+            _idbd.swipe(udid, w / 2, h * 0.3, w / 2, h * 0.85, 0.2)
+            time.sleep(0.4)
+
+        last = None
+        for _ in range(10):
+            els = _idbd.describe_all(udid) or els
+            got = self._finished_prompt_in(els, slot)
+            if got or self._finished_card_seen:
+                return els, (got or (None, None))[0], (got or (None, None))[1]
+            seen = [round(frame(e)[1]) for e in els if name(e).endswith("Card")]
+            if seen == last:
+                break                          # the end of the list
+            last = seen
+            _idbd.swipe(udid, w / 2, h * 0.75, w / 2, h * 0.35, 0.6)
+            time.sleep(0.8)
+        return els, None, None
+
+    def _finished_tap(self, udid: str, els: List[dict], which: int) -> Tuple[bool, str]:
+        """Tap this run's Finished card's stars (*which* 0) or Skip (1), scrolled on screen
+        first: MEASURED 2026-11-04 (run 2a061572) Skip sat at y 1036 of an 874pt screen
+        and the tap's own scroll gave 'not reachable' -- the step went on as if tapped."""
+        slot = getattr(self, "_booked_slot", "") or ""
+        w, h = _idbd.app_size(els)
+        for _ in range(5):
+            got = self._finished_prompt_in(els, slot)
+            if not got or got[which] is None:
+                return False, "the card's rating prompt is not on the list"
+            y = _idbd.frame(got[which])[1]
+            if 140 <= y <= h - 120:
+                return _idbd.tap_el(udid, got[which], els, scroll=False)
+            shift = max(-h * 0.5, min(h * 0.5, y - h * 0.55))
+            _idbd.swipe(udid, w / 2, h * 0.6, w / 2, h * 0.6 - shift, 0.8)
+            time.sleep(1.0)
+            els = _idbd.describe_all(udid) or els
+        return False, "could not bring the card's rating prompt on screen"
+
+    def _finished_card_times(self, es: List[dict], slot: str) -> List[dict]:
+        """The time labels of THIS run's Finished cards: *slot* printed under TODAY, below
+        this restaurant's card (another day's or restaurant's event at the same time is
+        not ours). The tree holds cards off screen too, at y < 0 or y > the screen."""
+        name, frame = _idbd.name, _idbd.frame
+        out = []
+        for t in (e for e in es if slot and name(e) == slot):
+            ty = frame(t)[1]
+            today = any(name(e) == "TODAY" and ty - 40 <= frame(e)[1] <= ty for e in es)
+            card = max((e for e in es if name(e).endswith("Card")
+                        and ty - 140 <= frame(e)[1] < ty), key=lambda e: frame(e)[1],
+                       default=None)
+            if today and card is not None and name(card) == self._RESTAURANT_CARD:
+                out.append(t)
+        return out
+
+    def _finished_prompt_in(self, es: List[dict], slot: str):
+        """(stars, skip) of the Finished card printing TODAY and *slot* under this
+        restaurant's card, on this screen; None when no such card asks for a rating.
+        Seeing the card without a prompt sets self._finished_card_seen."""
+        name, frame = _idbd.name, _idbd.frame
+        for t in self._finished_card_times(es, slot):
+            ty = frame(t)[1]
+            near = lambda ident, lo, hi: min(  # noqa: E731
+                (e for e in es if name(e) == ident and ty - lo <= frame(e)[1] <= ty + hi),
+                key=lambda e: abs(frame(e)[1] - ty), default=None)
+            self._finished_card_seen = True
+            stars, skip = near("Restuarantrating", 90, 0), near("finishedSkipReview", 40, 5)
+            if stars is not None or skip is not None:
+                return stars, skip
+        return None
+
+    def _c_rate(self, stars: str, notes: List[str]) -> bool:
+        """`@c_rate:<1-5>` — rate the restaurant: the prompt's star N opens the Review
+        screen (Wallet/Review.js), a line of feedback is typed into its text box, and
+        `submitReview` sends it. Done when the Review screen closed."""
+        tag = f"@c_rate:{stars}"
+        if stars not in ("1", "2", "3", "4", "5"):
+            notes.append(f"[FAIL] {tag} — stars must be 1-5")
+            return False
+        udid = getattr(self, "_cur_udid", "") or self._consumer_udid()
+        # The Finished tab first: on preprod-2-May18 a paid event is there at once (see
+        # _c_finished_prompt); the old Upcoming 'Completed' prompt is the fallback.
+        els, prompt, _skip = self._c_finished_prompt(udid)
+        if prompt is None and self._finished_card_seen and getattr(self, "_rerun", False):
+            notes.append(f"[ok] {tag} — the event's Finished card asks for no rating any more "
+                         f"(rated by the run this one resumes)")
+            return True
+        if prompt is not None:
+            ok, how = self._finished_tap(udid, els, 0)   # a star opens the Review screen
+            if not ok:
+                notes.append(f"[FAIL] {tag} — could not tap the Finished card's stars ({how})")
+                return False
+            els, up = self._wait_els(udid, lambda es: self._has(es, "submitReview"), 12.0)
+            if not up:
+                notes.append(f"[FAIL] {tag} — the Finished card's stars did not open the "
+                             f"Review screen")
+                return False
+        else:
+            els = self._c_rating_prompt(udid, notes, tag)
+            if els is None:
+                notes[-1] += " — nor does its Finished card ask 'How was your experience?'"
+                return False
+        _idbd.tap(udid, [f"star{stars}"], els)
+        els, up = self._wait_els(udid, lambda es: self._has(es, "submitReview"), 10.0)
+        if not up:
+            notes.append(f"[FAIL] {tag} — star {stars} did not open the Review screen")
+            return False
+        box = next((e for e in els if e.get("type") in ("TextView", "TextField")
+                    or _idbd.name(e) == "writeFeedback"), None)
+        typed = ""
+        if box is not None:
+            _idbd.tap_el(udid, box, els)
+            time.sleep(0.6)
+            _idbd._idb(["ui", "text", "--udid", udid, "Great evening - automated full event"])
+            _idbd.press_return(udid)
+            typed = " with feedback"
+        _idbd.tap(udid, ["submitReview"])
+        els, gone = self._wait_els(udid, lambda es: not self._has(es, "submitReview"), 12.0)
+        if not gone:
+            notes.append(f"[FAIL] {tag} — Submit did not close the Review screen")
+            return False
+        notes.append(f"[ok] {tag} — rated {stars}★{typed} and submitted")
+        return True
+
+    def _c_skip_review(self, notes: List[str]) -> bool:
+        """`@c_skip_review` — skip the rating: the event's 'Completed' prompt
+        `skipReviewCard` (it posts skipReview). MEASURED 2026-10-29: right after, the
+        Finished list still offered Skip -- it had not refreshed -- and minutes later
+        it offered none, while View PDF still opened the invoice. Done when the prompt
+        is gone."""
+        tag = "@c_skip_review"
+        udid = getattr(self, "_cur_udid", "") or self._consumer_udid()
+        els, _stars, skip = self._c_finished_prompt(udid)       # see _c_rate
+        if skip is None and self._finished_card_seen and getattr(self, "_rerun", False):
+            notes.append(f"[ok] {tag} — the event's Finished card asks for no rating any more "
+                         f"(skipped or rated by the run this one resumes)")
+            return True
+        if skip is not None:
+            ok, how = self._finished_tap(udid, els, 1)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — could not tap Skip on the Finished card ({how})")
+                return False
+            slot = getattr(self, "_booked_slot", "") or ""
+            els, gone = self._wait_els(
+                udid, lambda es: bool(es) and self._finished_prompt_in(es, slot) is None, 10.0)
+            if not gone:
+                notes.append(f"[FAIL] {tag} — tapped Skip on the Finished card but its "
+                             f"rating prompt stayed")
+                return False
+            notes.append(f"[ok] {tag} — skipped the rating (the event's Finished card)")
+            return True
+        els = self._c_rating_prompt(udid, notes, tag)
+        if els is None:
+            notes[-1] += " — nor does its Finished card ask 'How was your experience?'"
+            return False
+        _idbd.tap(udid, ["skipReviewCard"], els)
+        els, gone = self._wait_els(udid, lambda es: not self._has(es, "skipReviewCard"), 8.0)
+        if not gone:
+            notes.append(f"[FAIL] {tag} — tapped Skip but the rating prompt stayed")
+            return False
+        notes.append(f"[ok] {tag} — skipped the rating")
+        return True
+
+    def _c_invoice(self, notes: List[str]) -> bool:
+        """`@c_invoice` — the diner's invoice: Finished tab, the event, View PDF
+        (`finishedViewPdf`, Wallet/CardData.js:2370) -> an in-app invoice built from the
+        event (no ids; read by OCR) -> `back`. The app shows View PDF only while the
+        rating was NOT skipped (`!data.skipReview`, CardData.js:2368) -- reported, not
+        worked around. Done when the invoice shows its Total; its sums are recalculated
+        then (_check_invoice), against what this diner paid in this run."""
+        tag = "@c_invoice"
+        udid = getattr(self, "_cur_udid", "") or self._consumer_udid()
+        els = self._c_finished_card(udid, notes, tag)
+        if els is None:
+            return False
+        if not self._has(els, "finishedViewPdf"):
+            notes.append(f"[FAIL] {tag} — the finished event has no View PDF (the source "
+                         f"hides it when `data.skipReview`, CardData.js:2368; on 2026-10-29 it "
+                         f"still showed after a skip)")
+            return False
+        # View PDF sits low in the opened event, often below the screen (MEASURED
+        # 2026-10-29: y 1123 on an 874-high phone): drag it into view, then tap.
+        from automation.scenarios import screen_text
+        w, h = _idbd.app_size(els)
+        is_invoice = lambda: any(k in t[0].upper() for t in screen_text.read_text(udid)  # noqa: E731
+                                 for k in ("RESERVATION", "VAT 3", "TOTAL"))
+        for attempt in (1, 2):
+            pdf = next((e for e in _idbd.describe_all(udid) if _idbd.name(e) == "finishedViewPdf"),
+                       None)
+            if pdf is None:
+                break
+            for _ in range(4):
+                y = _idbd.frame(pdf)[1]
+                if 100 < y < h - 100:
+                    break
+                _idbd.swipe(udid, w / 2, h * 0.75, w / 2, h * 0.3, 1.2)
+                time.sleep(0.8)
+                pdf = next((e for e in _idbd.describe_all(udid)
+                            if _idbd.name(e) == "finishedViewPdf"), pdf)
+            _idbd.tap_el(udid, pdf, None, scroll=False)
+            time.sleep(2.5)
+            if is_invoice():
+                break
+        # The whole screen as the box, so it scrolls down to the grand Total: the first
+        # screen holds only the Pre-Order block's Total (MEASURED 2026-10-29: 168.27).
+        seen = self._read_invoice(udid, (0, 60, w, h - 40), els)
+        if "Total" not in seen:
+            notes.append(f"[FAIL] {tag} — View PDF opened no readable invoice; read: {seen}")
+            return False
+        self._close_invoice(udid)
+        notes.append(f"[ok] {tag} — the invoice: " + "; ".join(seen.values()))
+        self._check_invoice(tag, notes, comps_printed=True,
+                            role=getattr(self, "_cur_role", None),
+                            title=f"Invoice of the {self._diner_label()} (phone)")
+        return True
+
+    # ── C-App payment: pay for others, coupon, tip ──────────────────────────
+    def _c_sheet_total(self, els: List[dict]) -> Optional[float]:
+        return self._card_amount(els, "Total")
+
+    def _c_pay_for(self, spec: str, notes: List[str]) -> bool:
+        """`@c_pay_for:Name, Name` — on the C-App's 'Would you also like to pay for…'
+        sheet (Components/Modal/index.js:4853), pick these people -- avatars
+        `${username}pay`, a picked one gets a second element with the same id -- and
+        Proceed (`proceedPayment`). It opens after Checkout when more than one person
+        is unpaid. Done when the payment sheet (E-Payment) is up."""
+        tag = f"@c_pay_for:{spec}"
+        people = [p.strip() for p in (spec or "").split(",") if p.strip()]
+        udid = getattr(self, "_cur_udid", "") or self._consumer_udid()
+        name = _idbd.name
+        pid = lambda e: self._squash(name(e)).lower()  # noqa: E731
+        els, up = self._wait_els(udid, lambda es: self._has(es, "proceedPayment"), 12.0)
+        if not up:
+            notes.append(f"[FAIL] {tag} — the 'pay for others' sheet did not open (it shows "
+                         f"when more than one person is still unpaid)")
+            return False
+        for person in people:
+            want = self._squash(person).lower() + "pay"
+            hits = [e for e in els if pid(e) == want]
+            if not hits:
+                shown = sorted({name(e)[:-3] for e in els if pid(e).endswith("pay")
+                                and name(e) not in ("Mepay",)})
+                notes.append(f"[FAIL] {tag} — {person} is not offered (offered: "
+                             f"{', '.join(shown) or 'nobody'})")
+                return False
+            if len(hits) >= 2:
+                continue                       # already picked
+            _idbd.tap_el(udid, hits[0], els)
+            els, ok = self._wait_els(udid, lambda es: sum(1 for e in es if pid(e) == want) >= 2
+                                     or self._toast(es), 5.0)
+            if self._toast(els) or sum(1 for e in els if pid(e) == want) < 2:
+                notes.append(f"[FAIL] {tag} — {person} did not get picked"
+                             + (f" ({self._toast(els)!r})" if self._toast(els) else ""))
+                return False
+        _idbd.tap(udid, ["proceedPayment"], els)
+        els, sheet = self._wait_els(udid, lambda es: self._has(es, "ePayment")
+                                    or self._has(es, "eApplyCoupons"), 15.0)
+        if not sheet:
+            notes.append(f"[FAIL] {tag} — Proceed did not open the payment sheet")
+            return False
+        self._paid_for_others = people
+        total = self._c_sheet_total(els)
+        notes.append(f"[ok] {tag} — paying for {', '.join(people)} too"
+                     + (f"; the sheet's Total reads {total:.2f} €" if total is not None else ""))
+        notes.append(invoice_check.calc_note(
+            f"Pay for others ({self._diner_label()})", ["Pays for", "Total displayed"],
+            [[", ".join(people), invoice_check.eur(total), None]]))
+        return True
+
+    def _c_coupon(self, notes: List[str]) -> bool:
+        """`@c_coupon` — Apply Coupons (`eApplyCoupons`, Modal/index.js:6458): the list
+        of coupons this diner OWNS (ApplyCoupon/index.js, no code entry); a tap applies
+        one. MEASURED 2026-10-29 on the installed build: an owned coupon reads '31.5%
+        OFFER 31.5 31.5 - In 2 Days' (not `${price}Coupon`), and a diner who owns none
+        sees 'NO COUPONS DATA FOUND' and `couponGetMore` -- 'Buy Coupons' with the
+        restaurant's coupons for XP ('31.5% off … 0': free); the first is taken then.
+        Done once a coupon is applied; the Total it leaves is checked against the
+        coupon's value ([mismatch] when wrong, and the payment goes on)."""
+        tag = "@c_coupon"
+        udid = getattr(self, "_cur_udid", "") or self._consumer_udid()
+        name = _idbd.name
+        els = _idbd.describe_all(udid)
+        total0 = getattr(self, "_c_total_before_coupon", None) or self._c_sheet_total(els)
+        if not self._has(els, "couponClose"):
+            ok, how = _idbd.tap(udid, ["eApplyCoupons"], els)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — no Apply Coupons on the payment sheet ({how})")
+                return False
+        owned = lambda es: [e for e in es if "OFFER" in name(e).upper()  # noqa: E731
+                            or (name(e).endswith("Coupon")
+                                and name(e) not in ("eApplyCoupons", "applyCoupon"))]
+        els, got = self._wait_els(udid, owned, 8.0)
+        took = ""
+        if not got and self._has(els, "couponGetMore"):
+            _idbd.tap(udid, ["couponGetMore"], els)
+            els, offers = self._wait_els(udid, lambda es: [e for e in es
+                                                           if "% off" in name(e)], 8.0)
+            if offers:
+                took = name(offers[0]).split(" On ")[0]
+                _idbd.tap_el(udid, offers[0], els)
+                els, got = self._wait_els(udid, owned, 10.0)
+        if not got:
+            notes.append(f"[FAIL] {tag} — the diner owns no coupon for this event and none "
+                         f"could be taken from Buy Coupons")
+            return False
+        coupon = name(got[0])[:40]
+        _idbd.tap_el(udid, got[0], els)
+        time.sleep(1.5)
+        if self._has(_idbd.describe_all(udid), "couponClose"):
+            _idbd.tap(udid, ["couponClose"])
+
+        def fell(es):
+            v = self._c_sheet_total(es)
+            return v if v is not None and total0 is not None and v < total0 - 0.005 else None
+
+        els, now = self._wait_els(udid, fell, 10.0)
+        shown = now if now is not None else self._c_sheet_total(els)
+        notes.append(f"[ok] {tag} — " + (f"took {took!r} from Buy Coupons; " if took else "")
+                     + f"applied {coupon!r}: Total {invoice_check.eur(total0)} € → "
+                     f"{invoice_check.eur(shown)} €")
+        self._money_check(notes, tag, *invoice_check.offer_check(
+            "Coupon", total0, shown, coupon, self._diner_label()))
+        return True
+
+    def _c_tip(self, amount: str, notes: List[str]) -> bool:
+        """`@c_tip:<euros>` — the tip field `ePayTip` (an amount; the app strips commas,
+        so a dot). The Total it leaves is checked ([mismatch] when wrong; the payment
+        goes on)."""
+        tag = f"@c_tip:{amount}"
+        udid = getattr(self, "_cur_udid", "") or self._consumer_udid()
+        try:
+            tip = float(amount)
+        except ValueError:
+            notes.append(f"[FAIL] {tag} — the tip must be a number (dot for decimals)")
+            return False
+        els = _idbd.describe_all(udid)
+        total0 = self._c_sheet_total(els)
+        ok, how = _idbd.fill(udid, "ePayTip", f"{tip:.2f}")
+        if not ok:
+            _idbd.tap(udid, ["ePayTip"], els)
+            time.sleep(0.5)
+            _idbd._idb(["ui", "text", "--udid", udid, f"{tip:.2f}"])
+            _idbd.press_return(udid)
+        want = (total0 or 0) + tip
+        els, now = self._wait_els(udid, lambda es: (lambda v: v if v is not None and
+                                  abs(v - want) < 0.015 else None)(self._c_sheet_total(es)), 8.0)
+        shown = now if now is not None else self._c_sheet_total(els)
+        notes.append(f"[ok] {tag} — Total {invoice_check.eur(total0)} € + tip {tip:.2f} €; the "
+                     f"Total displays {invoice_check.eur(shown)} €")
+        self._money_check(notes, tag, *invoice_check.tip_check(
+            self._diner_label(), total0, tip, shown))
+        return True
+
+    def _filter_orders(self, r: ScenarioRunner, notes: List[str], status: str = "Reserved") -> bool:
+        """Apply the My Orders status filter (Screens/Orders/index.js's `Filter`,
+        rendered via Components/Modal/index.js). It is a magnus Overlay — its
+        options (Reserved/In Progress/Order/Serve/Payment Notified/Payment
+        Completed) and Apply carry no accessibility id, the same trap
+        locator_map.md documents for VOID/COMP/SPLIT — so they are picked by
+        OCR text with the same `_ocr_tap` those tokens already use. The 'N
+        result(s) shown for « status »' line (Orders/index.js:425) renders
+        OUTSIDE the overlay in the normal tree, so it proves the filter
+        actually took effect, not just that the sheet closed."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        tag = f"@filter_orders:{status}"
+        ok, how = self._ocr_tap(udid, None, status)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — {how}")
+            return False
+        time.sleep(0.6)
+        ok2, how2 = self._ocr_tap(udid, None, "Apply")
+        if not ok2:
+            notes.append(f"[FAIL] {tag} — picked {status!r} ({how}) but {how2}")
+            return False
+
+        def _narrowed(es) -> bool:
+            return any("result" in _idbd.name(e).lower() and "shown" in _idbd.name(e).lower()
+                       for e in es)
+
+        els, done = self._wait_els(udid, _narrowed, 8.0)
+        line = ""
+        if done:
+            line = next((_idbd.name(e) for e in els if "result" in _idbd.name(e).lower()
+                        and "shown" in _idbd.name(e).lower()), "")
+        else:
+            # The info line can render without reaching the accessibility tree on
+            # some builds (see idb_coords/_choose_card's 'content vs. screen' notes
+            # elsewhere in this file) — OCR reads the pixels regardless, the same
+            # fallback @void_item/@notify_payment rely on.
+            for _ in range(6):
+                if self._ocr_sees(udid, "result"):
+                    done = True
+                    break
+                time.sleep(1.0)
+        if not done:
+            notes.append(f"[FAIL] {tag} — tapped {status!r} and Apply but the narrowed-list "
+                         f"'result(s) shown for' line never appeared")
+            return False
+        notes.append(f"[ok] {tag} — {how}; {how2}" + (f"; {line!r}" if line else "; confirmed by OCR"))
+        return True
+
+    # BookingCard (Components/BookingCard/index.js:59-102) is ONE accessible element,
+    # '<Name>card<Status>', so its ⋮ -- a TouchableOpacity with no id (styles.option:
+    # padding 8, marginEnd 10) at the right of the card's top row -- is tapped at an
+    # offset from the card's top-right corner. The touchable's frame includes the
+    # card's margins (ml="md", my="lg"); the top row is a 16pt margin + a 13pt name.
+    _CARD_MENU_OFFSETS = ((26.0, 36.0), (26.0, 26.0))
+    _MENU_UP = ("resetTableBtn", "confirmEventBtn", "cancelEvent", "transferBtn")
+    _ORDER_UP = ("selectAllItemsBtn", "addItemsBtn", "closeEventModal", "AssignTableBtn")
+
+    @staticmethod
+    def _assigned_table(notes: List[str]) -> str:
+        """The table @assign_table picked earlier in this segment ('I2'), else ''."""
+        for n in reversed(notes):
+            m = re.search(r"@assign_table — assigned '([^']+)'", n)
+            if m:
+                t = re.sub(r"^tableChip", "", m.group(1))
+                return "" if re.fullmatch(r"T\d+AssignAnyBtn", t) else t
+        return ""
+
+    @staticmethod
+    def _same_table(seen: str, table: str) -> bool:
+        """OCR reads table 'I16' as '116' (measured, see _open_from_panel)."""
+        def key(s: str) -> str:
+            s = re.sub(r"[^a-z0-9]", "", (s or "").lower())
+            return s.translate(str.maketrans("il|o", "1110"))
+        return bool(table) and key(seen) == key(table)
+
+    def _row_menu_cards(self, els: List[dict], hour_lbl: str,
+                        want: str = "inprogress") -> List[dict]:
+        """This diner's cards with status *want* (In Progress by default) in the
+        booked hour's row, left to right."""
+        name, frame = _idbd.name, _idbd.frame
+        hours = [(name(e), frame(e)[1] + frame(e)[3] / 2) for e in els
+                 if re.fullmatch(r"\d{2}:00", name(e))]
+        out = []
+        for e in els:
+            lbl = name(e)
+            if "card" not in lbl.lower() or frame(e)[2] <= 60:
+                continue
+            who, status = self._split_card(lbl)
+            if CONSUMER_NAME.lower() not in who.lower() or status != want:
+                continue
+            near = min(hours, key=lambda h: abs(h[1] - (frame(e)[1] + 20)), default=None)
+            if near and near[0] == hour_lbl:
+                out.append(e)
+        return sorted(out, key=lambda e: frame(e)[0])
+
+    def _bring_menu_into_view(self, udid: str, hour_lbl: str, k: int, dx: float, dy: float,
+                              want: str = "inprogress") -> Tuple[Optional[dict], List[dict], str]:
+        """Scroll the board until the k-th card's ⋮ point is on the board, left of the
+        My Orders panel. Returns (card, els, why-not)."""
+        frame = _idbd.frame
+        last = None
+        for _ in range(8):
+            els = _idbd.describe_all(udid)
+            cards = self._row_menu_cards(els, hour_lbl, want)
+            if len(cards) <= k:
+                return None, els, f"{len(cards)} '{want}' card(s) in the {hour_lbl} row"
+            card = cards[k]
+            w_app, h_app = _idbd.app_size(els)
+            head = next((e for e in els if _idbd.name(e).startswith("My Orders")), None)
+            # The hour row's scroll view is clipped well left of the My Orders title.
+            # MEASURED (run 20d429b3, 12:00 row with 5 cards): the title at x≈823, the
+            # row cut off at x≈737. With 'title - 30' the drag started at x≈752 --
+            # outside the row, so nothing moved -- and a ⋮ in the clipped strip
+            # counted as on the board.
+            right = (frame(head)[0] - 90) if head else w_app * 0.60
+            x, y, w, h = frame(card)
+            px, py = x + w - dx, y + dy
+            if 0.25 * h_app <= py <= 0.8 * h_app and 0 <= px <= right - 8:
+                return card, els, ""
+            if frame(card) == last:
+                return None, els, f"the {hour_lbl} card did not move when the board was scrolled"
+            last = frame(card)
+            if not 0.25 * h_app <= py <= 0.8 * h_app:
+                hour = next((e for e in els if _idbd.name(e) == hour_lbl), None)
+                col = _idbd.centre(hour)[0] if hour else x / 2   # the hours column
+                travel = min(max(abs(py - 0.5 * h_app), 80.0), 0.4 * h_app)
+                start = 0.75 * h_app if py > 0.5 * h_app else 0.3 * h_app
+                end = start - travel if py > 0.5 * h_app else start + travel
+                _idbd.swipe(udid, col, start, col, end, max(1.0, travel / 200.0))
+            else:                                   # off to the right: drag the row left
+                row_y = y + h / 2
+                travel = min(px - (right - 60), 0.6 * right)
+                _idbd.swipe(udid, right - 40, row_y, right - 40 - travel, row_y,
+                            max(1.0, travel / 200.0))
+            time.sleep(0.8)
+        return None, _idbd.describe_all(udid), "could not scroll the card's ⋮ onto the board"
+
+    def _reset_table(self, notes: List[str]) -> bool:
+        """`@reset_table` -- My Bookings: the booking's ⋮ menu → Reset table → Confirm →
+        'Reset' on the app's Alert (Screens/Home/index.js `_resetTable`), on THIS run's
+        booking after @assign_table put it In Progress.
+
+        Finds the card with the board's 'Table' filter (tableBtn) on: only bookings
+        holding a table are listed there (Screens/Home/index.js:1149-1152). With
+        several of this diner's In Progress cards in the booked hour's row (shared
+        account, earlier runs), the one showing the table @assign_table picked is
+        ours; with no way to tell, it refuses rather than reset someone else's.
+
+        Proves the reset: the success toast, AND this card leaving the Table view
+        (a booking without a table is not listed there). Restores the 'All' filter.
+        canResetTable (Util/canResetTable.js) disables the option on a booking with
+        items, a kitchen order or a bill; the app then refuses -- reported, not retried."""
+        tag = "@reset_table"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        m = re.match(r"^(\d{1,2})", getattr(self, "_booked_slot", "") or "")
+        if not m:
+            notes.append(f"[FAIL] {tag} — no booked slot known: book in an earlier segment")
+            return False
+        hour_lbl = f"{int(m.group(1)):02d}:00"
+        if not self._waiter_board(notes):
+            return False
+        ok, how = _idbd.tap(udid, ["tableBtn"])
+        if not ok:
+            notes.append(f"[FAIL] {tag} — the board's Table filter (tableBtn): {how}")
+            return False
+        els, cards = self._wait_els(udid, lambda es: self._row_menu_cards(es, hour_lbl), 8.0)
+        if not cards:
+            notes.append(f"[FAIL] {tag} — no In Progress card for '{CONSUMER_NAME}' in the "
+                         f"{hour_lbl} row of the Table view (was a table assigned?)")
+            return False
+        before = len(cards)
+        table = self._assigned_table(notes)
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        k = 0
+        if before > 1:
+            if not table:
+                notes.append(f"[FAIL] {tag} — {before} In Progress cards for "
+                             f"'{CONSUMER_NAME}' in the {hour_lbl} row and the assigned table "
+                             f"is unknown: refusing to reset a booking that may not be this run's")
+                return False
+            from automation.scenarios import screen_text
+            k, seen = None, []
+            for i in range(before):
+                card, els, why = self._bring_menu_into_view(udid, hour_lbl, i, dx, dy)
+                if card is None:
+                    seen.append(f"#{i + 1}: {why}")
+                    continue
+                texts = [t for t, *_ in screen_text.read_text(udid, region=self._corners(card))]
+                if any(self._same_table(t, table) for t in texts):
+                    k = i
+                    break
+                seen.append(f"#{i + 1}: {' '.join(texts)[:40]!r}")
+            if k is None:
+                notes.append(f"[FAIL] {tag} — {before} In Progress cards for "
+                             f"'{CONSUMER_NAME}' in the {hour_lbl} row, none showing table "
+                             f"{table}: " + "; ".join(seen))
+                return False
+            notes.append(f"    · {before} In Progress cards in the {hour_lbl} row; "
+                         f"#{k + 1} shows table {table} — this run's")
+        menu_els, opened = [], False
+        for dx, dy in self._CARD_MENU_OFFSETS:
+            card, els, why = self._bring_menu_into_view(udid, hour_lbl, k, dx, dy)
+            if card is None:
+                notes.append(f"[FAIL] {tag} — {why}")
+                return False
+            x, y, w, _h = _idbd.frame(card)
+            _idbd.tap_point(udid, x + w - dx, y + dy)
+            menu_els, opened = self._wait_els(
+                udid, lambda es: any(self._has(es, i) for i in self._MENU_UP + self._ORDER_UP), 6.0)
+            if opened and any(self._has(menu_els, i) for i in self._MENU_UP):
+                break
+            if not opened and self._ocr_sees(udid, "Select an action"):
+                break
+            # The tap hit the card body: the booking opened. Back to the board.
+            notes.append(f"    · the tap at ({x + w - dx:.0f}, {y + dy:.0f}) did not open the "
+                         f"⋮ menu" + (" (it opened the booking)" if opened else ""))
+            opened = False
+            if not self._waiter_board(notes):
+                return False
+        else:
+            notes.append(f"[FAIL] {tag} — the ⋮ menu of '{_idbd.name(card)}' never opened")
+            return False
+        for ident, text in (("resetTableBtn", "Reset table"), ("confirmEventBtn", "Confirm")):
+            if self._has(menu_els, ident):
+                ok, how = _idbd.tap(udid, [ident], menu_els, scroll=False)
+            else:                                   # the Overlay hides its ids from idb
+                ok, how = self._ocr_tap(udid, None, text)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — {ident}: {how}")
+                return False
+            time.sleep(0.6)
+        els, alert = self._wait_els(udid, lambda es: self._has(es, "Reset"), 6.0)
+        if not alert:
+            from automation.scenarios import screen_text
+            said = next((t for t, *_ in screen_text.read_text(udid)
+                         if "not allowed" in t.lower()), "")
+            notes.append(f"[FAIL] {tag} — Confirm did not bring up the 'Reset table' alert"
+                         + (f"; the app said {said!r}" if said else
+                            " (Reset table is disabled when canResetTable is false)"))
+            return False
+        ok, how = _idbd.tap(udid, ["Reset"], els, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — the alert's Reset button: {how}")
+            return False
+        if not self._see_text("Table has been reset", notes):
+            return False
+        els, gone = self._wait_els(
+            udid, lambda es: len(self._row_menu_cards(es, hour_lbl)) < before, 10.0)
+        left = len(self._row_menu_cards(els, hour_lbl))
+        _idbd.tap(udid, ["allBtn"], scroll=False)
+        if not gone:
+            notes.append(f"[FAIL] {tag} — the toast said reset, but the {hour_lbl} row of the "
+                         f"Table view still lists {left} of {before} In Progress card(s)")
+            return False
+        notes.append(f"[ok] {tag} — reset via ⋮ → Reset table → Confirm → Reset; the booking "
+                     f"left the Table view ({before} → {left} In Progress card(s) at {hour_lbl})")
+        return True
+
+    @staticmethod
+    def _corners(e: dict, pad: float = 0.0) -> Tuple[float, float, float, float]:
+        """An element's frame as the (x0, y0, x1, y1) region screen_text.read_text
+        takes -- NOT idb's (x, y, w, h): MEASURED (run 3f9f259f) a frame passed as the
+        region cropped nothing and read ''."""
+        x, y, w, h = _idbd.frame(e)
+        return (max(0.0, x - pad), max(0.0, y - pad), x + w + pad, y + h + pad)
+
+    def _header_table_text(self, udid: str, els: List[dict]) -> Tuple[Optional[dict], List[str]]:
+        """The Event header's table button (modifyTable, Screens/Event/PaymentDetails.js
+        :4913-4935) and the text read off its pixels: it is ONE accessible element,
+        so the table name inside it is invisible to idb."""
+        from automation.scenarios import screen_text
+        btn = next((e for e in els if _idbd.name(e) == "modifyTable"), None)
+        if btn is None:
+            return None, []
+        box = self._corners(btn, 6.0)
+        texts = [t for t, *_ in screen_text.read_text(udid, region=box)]
+        if not texts:
+            texts = [t for t, *_ in screen_text.read_text(udid, region=box, accurate=True)]
+        return btn, texts
+
+    def _modify_table(self, notes: List[str]) -> bool:
+        """`@modify_table` -- on THIS booking's Event screen (a table assigned, payment
+        not yet notified: PaymentDetails.js:4913 only opens the sheet while
+        reminder == false), tap the header's table (modifyTable), pick a free table
+        OTHER than the current one on the 'Modify Table' sheet
+        (Components/Modal/EventTableSelect, chips named after the tables, booked ones
+        not offered), Confirm (AssignTableBtn / applyTableBtn), and prove the move:
+        the sheet closes and the header now prints the new table."""
+        tag = "@modify_table"
+        udid = self._business_udid()
+        name, frame = _idbd.name, _idbd.frame
+        els, btn = self._wait_els(udid, lambda es: next(
+            (e for e in es if name(e) == "modifyTable"), None), 8.0)
+        if btn is None:
+            notes.append(f"[FAIL] {tag} — the Event header's table button (modifyTable) is "
+                         f"not on screen (is the booking open?)")
+            return False
+        old = self._assigned_table(notes)
+        _btn, before = self._header_table_text(udid, els)
+        if not old:
+            old = next((t.strip() for t in before if re.fullmatch(r"[A-Za-z|]{1,2}\d{1,3}", t.strip())), "")
+        ok, how = _idbd.tap(udid, ["modifyTable"], els, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — modifyTable: {how}")
+            return False
+
+        def sheet(es):
+            head = next((e for e in es if _norm(name(e)) == "modifytable"
+                         and e.get("type") == "StaticText"), None)
+            commit = next((e for e in es if name(e) in ("applyTableBtn", "AssignTableBtn")), None)
+            if head is None or commit is None:
+                return None
+            chip_re = re.compile(r"(?:tableChip\w+|[A-Za-z]{1,2}\d{1,3})\Z")
+            chips = [e for e in es if chip_re.fullmatch(name(e))
+                     and frame(head)[1] < frame(e)[1] < frame(commit)[1] and frame(e)[2] > 0]
+            return (commit, chips) if chips else None
+
+        els, up = self._wait_els(udid, sheet, 12.0)
+        if not up:
+            notes.append(f"[FAIL] {tag} — tapped modifyTable but no 'Modify Table' sheet with "
+                         f"free tables came up")
+            return False
+        commit, chips = up
+        others = sorted((c for c in chips
+                         if not self._same_table(re.sub(r"^tableChip", "", name(c)), old)),
+                        key=lambda e: frame(e)[0])
+        if not others:
+            notes.append(f"[FAIL] {tag} — the sheet offers no free table other than "
+                         f"{old or 'the current one'}: {[name(c) for c in chips]}")
+            return False
+        pick = others[0]
+        new = re.sub(r"^tableChip", "", name(pick))
+        ok, how = _idbd.tap_el(udid, pick, els, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — table chip {new}: {how}")
+            return False
+        time.sleep(0.6)
+        ok, how = _idbd.tap_el(udid, commit, scroll=False)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — Confirm: {how}")
+            return False
+        closed = False
+        for _ in range(12):
+            time.sleep(1.0)
+            if not self._table_sheet_open():
+                closed = True
+                break
+        if not closed:
+            said = self._screen_toast(udid)
+            notes.append(f"[FAIL] {tag} — picked {new} and tapped Confirm but the sheet stayed "
+                         f"open" + (f"; the app said {said!r}" if said else ""))
+            return False
+        texts: List[str] = []
+        for _ in range(5):
+            els = _idbd.describe_all(udid)
+            _btn, texts = self._header_table_text(udid, els)
+            if any(self._same_table(t, new) for t in texts):
+                notes.append(f"[ok] {tag} — moved from {old or '?'} to {new}; the Event header "
+                             f"now reads {new}")
+                return True
+            time.sleep(1.5)
+        notes.append(f"[FAIL] {tag} — picked {new} and the sheet closed, but the Event header "
+                     f"reads {texts or 'nothing'} (was {before or old or '?'})")
+        return False
+
+    _PENDING = "confirmationpending"
+
+    def _pending_action(self, tag: str, action: Tuple[str, str],
+                        notes: List[str]) -> Tuple[str, int]:
+        """My Bookings: THIS run's waiter-created appointment (still 'Confirmation
+        Pending') → its ⋮ → *action* (id, OCR text) → Confirm (confirmEventBtn), on
+        Components/Modal/EventAction/index.js. Returns (hour row label, the row's
+        pending card count before), or ('', 0) after noting why it failed.
+
+        The appointment is told from others by the booked slot: with several of the
+        diner's pending cards in the hour's row (shared account), the one printing
+        the slot ('12:20 - …') is ours; with no single match it refuses rather than
+        act on someone else's."""
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        slot = getattr(self, "_booked_slot", "") or ""
+        m = re.match(r"^(\d{1,2}):\d{2}$", slot)
+        if not m:
+            notes.append(f"[FAIL] {tag} — no booked slot known: create the appointment in "
+                         f"this flow first")
+            return "", 0
+        hour_lbl = f"{int(m.group(1)):02d}:00"
+        if not self._waiter_board(notes):
+            return "", 0
+        want = self._PENDING
+        els, cards = self._wait_els(udid, lambda es: self._row_menu_cards(es, hour_lbl, want), 10.0)
+        if not cards:
+            notes.append(f"[FAIL] {tag} — no Confirmation Pending card for '{CONSUMER_NAME}' "
+                         f"in the {hour_lbl} row (was the appointment saved?)")
+            return "", 0
+        before = len(cards)
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        k = 0
+        if before > 1:
+            from automation.scenarios import screen_text
+            slot_re = re.compile(rf"(?<!\d){re.escape(slot)}(?!\d)")
+            hits, seen = [], []
+            for i in range(before):
+                card, els, why = self._bring_menu_into_view(udid, hour_lbl, i, dx, dy, want)
+                if card is None:
+                    seen.append(f"#{i + 1}: {why}")
+                    continue
+                text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(card)))
+                if slot_re.search(text):
+                    hits.append(i)
+                seen.append(f"#{i + 1}: {text[:40]!r}")
+            if len(hits) != 1:
+                notes.append(f"[FAIL] {tag} — {before} Confirmation Pending cards for "
+                             f"'{CONSUMER_NAME}' in the {hour_lbl} row, {len(hits)} showing "
+                             f"{slot}: refusing to act on one that may not be this run's ("
+                             + "; ".join(seen) + ")")
+                return "", 0
+            k = hits[0]
+            notes.append(f"    · {before} pending cards in the {hour_lbl} row; #{k + 1} shows "
+                         f"{slot} — this run's")
+        menu_els, card = [], None
+        for dx, dy in self._CARD_MENU_OFFSETS:
+            card, els, why = self._bring_menu_into_view(udid, hour_lbl, k, dx, dy, want)
+            if card is None:
+                notes.append(f"[FAIL] {tag} — {why}")
+                return "", 0
+            x, y, w, _h = _idbd.frame(card)
+            _idbd.tap_point(udid, x + w - dx, y + dy)
+            menu_els, opened = self._wait_els(
+                udid, lambda es: any(self._has(es, i) for i in self._MENU_UP), 6.0)
+            if opened or self._ocr_sees(udid, "Select an action"):
+                break
+            notes.append(f"    · the tap at ({x + w - dx:.0f}, {y + dy:.0f}) did not open the ⋮ menu")
+            if not self._waiter_board(notes):
+                return "", 0
+        else:
+            notes.append(f"[FAIL] {tag} — the ⋮ menu of '{_idbd.name(card)}' never opened")
+            return "", 0
+        for ident, text in (action, ("confirmEventBtn", "Confirm")):
+            if self._has(menu_els, ident):
+                ok, how = _idbd.tap(udid, [ident], menu_els, scroll=False)
+            else:                                   # the Overlay hides its ids from idb
+                ok, how = self._ocr_tap(udid, None, text)
+            if not ok:
+                notes.append(f"[FAIL] {tag} — {ident}: {how}")
+                return "", 0
+            time.sleep(0.6)
+        return hour_lbl, before
+
+    def _cancel_event(self, notes: List[str]) -> bool:
+        """`@cancel_event` -- My Bookings: THIS run's waiter-created appointment (still
+        'Confirmation Pending') → its ⋮ → 'Cancel the event' (cancelEvent) → Confirm
+        (confirmEventBtn), Components/Modal/EventAction/index.js. Cancel is enabled only
+        for a business-created event with no kitchen order and no pre-order (:74-80);
+        Screens/Home/index.js `_cancelAppointment` posts cancellEvent and toasts 'Event
+        has been cancelled successfully!' (or 'Something went wrong!'). Proves it: the
+        card leaving the row's pending cards AND a Cancelled card in that row printing
+        this run's slot; 'Something went wrong!' fails it. Never cancels a card it
+        cannot tell is this run's (_pending_action)."""
+        tag = "@cancel_event"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        want = self._PENDING
+        slot = getattr(self, "_booked_slot", "") or ""
+        hour_lbl, before = self._pending_action(tag, ("cancelEvent", "Cancel the event"), notes)
+        if not hour_lbl:
+            return False
+        # MEASURED (run 77458198): the 2.5s toast (Home/index.js:392-395) fell between
+        # two iPad screen reads (3-5s each) and @see missed it, while the board already
+        # showed the card Cancelled. _cancelAppointment replaces the bookings with the
+        # server's answer (:805-810), so the lasting proof is the board, as in
+        # _edit_event_time; the toast is noted when it is caught.
+        said, left = "", before
+        for _ in range(12):
+            es = _idbd.describe_all(udid)
+            texts = [_idbd.name(e) for e in es] + [e.get("AXLabel") or "" for e in es]
+            said = next((t for t in texts if "cancelledsuccessfully" in _norm(t)
+                         or "somethingwentwrong" in _norm(t)), said)
+            if "somethingwentwrong" in _norm(said):
+                break
+            left = len(self._row_menu_cards(es, hour_lbl, want))
+            if left < before:
+                break
+            time.sleep(1.0)
+        if "somethingwentwrong" in _norm(said):
+            notes.append(f"[FAIL] {tag} — Confirm was refused: the app said {said!r}")
+            return False
+        if left >= before:
+            notes.append(f"[FAIL] {tag} — after Confirm the {hour_lbl} row still lists "
+                         f"{left} of {before} Confirmation Pending card(s)"
+                         + (f"; the app said {said!r}" if said else ""))
+            return False
+        # MEASURED (run fc6de124): the pending card was gone a read before the board
+        # drew it again as Cancelled -- wait for it rather than read the row once.
+        self._wait_els(udid, lambda es: self._row_menu_cards(es, hour_lbl, "cancelled"), 10.0)
+        from automation.scenarios import screen_text
+        slot_re = re.compile(rf"(?<!\d){re.escape(slot)}(?!\d)")
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        seen: List[str] = []
+        for i in range(8):
+            card, _els, why = self._bring_menu_into_view(udid, hour_lbl, i, dx, dy, "cancelled")
+            if card is None:
+                seen.append(why)
+                break
+            text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(card)))
+            if slot_re.search(text):
+                notes.append(f"[ok] {tag} — cancelled via ⋮ → Cancel the event → Confirm; the "
+                             f"{hour_lbl} row's pending cards went {before} → {left} and its "
+                             f"Cancelled card reads {text[:30]!r}"
+                             + (f"; the app said {said!r}" if said else ""))
+                return True
+            seen.append(repr(text[:30]))
+        notes.append(f"[FAIL] {tag} — the pending card left the {hour_lbl} row, but no "
+                     f"Cancelled card there prints {slot}: " + "; ".join(seen))
+        return False
+
+    _EDIT_CHIP_RE = re.compile(r"(\d{2}:\d{2})Btn")
+
+    def _edit_event_time(self, notes: List[str]) -> bool:
+        """`@edit_event_time` -- My Bookings: THIS run's waiter-created appointment
+        (Confirmation Pending, no waiter yet: 'Edit the event' is enabled only then,
+        EventAction/index.js:175) → ⋮ → editEvent → Confirm opens the Edit Appointment
+        panel (Components/EditEventModal). It moves the appointment to the next time
+        chip after the booked slot (`<HH:mm>Btn`, :869-901) and taps Update
+        (saveEditBtn); saveEdit posts editReservation and toasts 'Reservation updated'
+        (or 'Could not update reservation'). Proves the toast and the panel closing,
+        then makes the NEW time this run's slot, so a later step (the consumer's
+        invitation) is checked against it."""
+        tag = "@edit_event_time"
+        udid = getattr(self, "_cur_udid", "") or self._business_udid()
+        old = getattr(self, "_booked_slot", "") or ""
+        hour_lbl, _before = self._pending_action(tag, ("editEvent", "Edit the event"), notes)
+        if not hour_lbl:
+            return False
+
+        def panel(es):
+            if not self._has(es, "saveEditBtn"):
+                return None
+            return sorted({m.group(1) for e in es
+                           for m in [self._EDIT_CHIP_RE.fullmatch(_idbd.name(e))] if m}) or None
+
+        els, times = self._wait_els(udid, panel, 12.0)
+        if not times:
+            notes.append(f"[FAIL] {tag} — Confirm did not open the Edit Appointment panel "
+                         f"with time chips (saveEditBtn, <HH:mm>Btn)")
+            return False
+        later = [t for t in times if t > old]
+        if not later:
+            notes.append(f"[FAIL] {tag} — the Edit Appointment panel offers no time after "
+                         f"{old}: {times[:12]}")
+            return False
+        new = later[0]
+        ok, how = _idbd.tap(udid, [f"{new}Btn"], els)
+        if not ok:
+            notes.append(f"[FAIL] {tag} — time chip {new}Btn: {how}")
+            return False
+        notes.append(f"    · picked {new}Btn ({how})")
+        time.sleep(0.6)
+        ok, how = _idbd.tap(udid, ["saveEditBtn"])
+        if not ok:
+            notes.append(f"[FAIL] {tag} — Update (saveEditBtn): {how}")
+            return False
+        notes.append(f"    · tapped Update ({how})")
+        # handleSubmit refuses with a toast and keeps the panel open (no time, no
+        # dining area, or the seat-capacity guard 'Sorry, at … has only N seats',
+        # EditEventModal/index.js:638-683). MEASURED (run b5dd8ea4): the panel stayed
+        # open and no 'Reservation updated' came -- so read what the app DID say.
+        # MEASURED (run 8e8e2196): the panel closed but the ~2s toast fell between two
+        # iPad screen reads (3-5s each). saveEdit closes the panel on success AND on
+        # failure ('Could not update reservation'), so the lasting proof is the board:
+        # this diner's pending card at the new hour now prints the new time.
+        refusals = ("sorry", "couldnot", "please", "seats", "cannot", "wrong")
+        said, closed = "", False
+        for _ in range(12):
+            es = _idbd.describe_all(udid)
+            texts = [_idbd.name(e) for e in es] + [e.get("AXLabel") or "" for e in es]
+            said = next((t for t in texts if "reservationupdated" in _norm(t)
+                         or (len(t) > 12 and any(k in _norm(t) for k in refusals))), said)
+            if not self._has(es, "saveEditBtn"):
+                closed = True
+                break
+            if said and "reservationupdated" not in _norm(said):
+                break                               # refused: the panel stays open
+            time.sleep(1.0)
+        if not closed or (said and "reservationupdated" not in _norm(said)):
+            notes.append(f"[FAIL] {tag} — Update did not save the {new} time: "
+                         + (f"the app said {said!r}" if said else
+                            "the Edit Appointment panel stayed open, no message on screen"))
+            return False
+        from automation.scenarios import screen_text
+        new_hour = f"{int(new.split(':')[0]):02d}:00"
+        slot_re = re.compile(rf"(?<!\d){re.escape(new)}(?!\d)")
+        dx, dy = self._CARD_MENU_OFFSETS[0]
+        seen: List[str] = []
+        for i in range(8):
+            card, _els, why = self._bring_menu_into_view(udid, new_hour, i, dx, dy, self._PENDING)
+            if card is None:
+                seen.append(why)
+                break
+            text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(card)))
+            if slot_re.search(text):
+                self._booked_slot = new
+                notes.append(f"[ok] {tag} — moved the appointment from {old} to {new} via ⋮ → "
+                             f"Edit the event → {new}Btn → Update; its card now reads "
+                             f"{text[:30]!r}" + (f"; the app said {said!r}" if said else ""))
+                return True
+            seen.append(repr(text[:30]))
+        notes.append(f"[FAIL] {tag} — the panel closed but no pending card in the {new_hour} "
+                     f"row prints {new}: " + "; ".join(seen))
+        return False
+
+    def _wallet_invite_cancelled(self, notes: List[str]) -> bool:
+        """`@wallet_invite_cancelled` -- C-App Wallet → Upcoming: THIS run's invitation
+        (the booked slot) carries the 'Event Cancelled' band (vya-consumer
+        Screens/Wallet/Upcoming.js:1108-1130, shown when el.canceled). The invitation
+        is ONE accessible element, '<Restaurant>InviteCard' (:876-918), so its time and
+        band are read off the pixels inside that element's frame. Another cancelled
+        invitation on the shared account at a different time does not count."""
+        tag = "@wallet_invite_cancelled"
+        udid = self._consumer_udid()
+        slot = getattr(self, "_booked_slot", "") or ""
+        if not slot:
+            notes.append(f"[FAIL] {tag} — this run booked no slot, so its invitation cannot "
+                         f"be told from others on the shared account")
+            return False
+        from automation.scenarios import screen_text
+        slot_re = re.compile(rf"(?<!\d){re.escape(slot)}(?!\d)")
+        seen: List[str] = []
+        for attempt in range(4):
+            els = _idbd.describe_all(udid)
+            _w, H = _idbd.app_size(els)
+            cards = [e for e in els if _idbd.name(e).endswith(self._INVITE_SUFFIX)
+                     and 0 <= _idbd.frame(e)[1] and _idbd.frame(e)[1] + _idbd.frame(e)[3] <= H]
+            for c in cards:
+                text = " ".join(t for t, *_ in screen_text.read_text(udid, region=self._corners(c)))
+                if slot_re.search(text) and "cancelled" in text.lower():
+                    notes.append(f"[ok] {tag} — the {slot} invitation reads 'Event Cancelled' "
+                                 f"({text[:60]!r})")
+                    return True
+                seen.append(text[:50])
+            if attempt % 2 == 0:                         # pull to refresh
+                _idbd.swipe(udid, 200, H * 0.30, 200, H * 0.75, 0.6)
+            time.sleep(2.0)
+        notes.append(f"[FAIL] {tag} — no invitation for {slot} reads 'Event Cancelled'; "
+                     f"invitations read: {seen[-6:] or 'none on screen'}")
+        return False
+
+>>>>>>> Stashed changes
     def _handle_special(self, r, step: str, notes: List[str]) -> bool:
         if (step in self._DONE_BY_PAYMENT
                 and (getattr(self, "_booking_status", "") or "").startswith("payment")):
             notes.append(f"[skip] {step} — the booking is already at PAYMENT: its items "
                          f"were served and payment requested in an earlier attempt")
             return True
+        payment_step = step.startswith(("@w_tip:", "@w_pay_for:", "@w_payer:",
+                                        "@w_discount:", "@pay:"))
+        if getattr(self, "_resume", None) and payment_step:
+            udid = getattr(self, "_cur_udid", "") or self._business_udid()
+            els = _idbd.describe_all(udid)
+            names = {_idbd.name(e) for e in els}
+            settled = "Close Table" if "closeTableBtn" in names else ""
+            if not settled and "My Bookings" in names:
+                settled = self._already_settled()
+            if not settled and self._settled_screen(els) == "receipt" and not names.intersection(
+                    {"epaymentBtn", "ePaymentBtn", "paidEpaymentBtn", "cashPaymentBtn",
+                     "paidCashPaymentBtn", "foodVoucherBtn", "paidVoucherBtn",
+                     "paymentConfirmBtn", "tipBtn"}):
+                settled = "the completed receipt is shown"
+            if settled:
+                notes.append(f"[ok] {step} — payment already complete ({settled}); "
+                             "leaving the resumed booking unchanged")
+                return True
         if step == "@serve_items":
             udid = getattr(self, "_cur_udid", "") or self._business_udid()
             ok, how = _idbd.tap(udid, ["serveItemsBtn"])

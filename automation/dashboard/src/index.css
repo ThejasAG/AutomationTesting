@@ -275,6 +275,22 @@ tr:hover td {
   transition: all 0.2s ease;
 }
 
+/* Report tables need clearer row grouping than the general-purpose table style. */
+.reports-history th, .reports-scenarios th,
+.reports-history td, .reports-scenarios td {
+  padding: 12px 16px;
+}
+
+.reports-history tbody tr:not(:last-child) td,
+.reports-scenarios tbody tr:not(:last-child) td {
+  border-bottom: 1px solid var(--border-highlight);
+}
+
+.report-detail-section {
+  border-top: 1px solid var(--border-highlight);
+  padding-top: 14px;
+}
+
 /* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(15px); filter: blur(4px); }

@@ -125,7 +125,7 @@ export default function ReportsPage() {
           <div style={{ color: 'var(--text-secondary)' }}>No test runs yet — reports appear here once tests run.</div>
         </div>
       ) : (
-        <div className="table-container table-scroll">
+        <div className="table-container table-scroll reports-history">
           <table>
             <thead><tr><th>Status</th><th>Test</th><th>Suite</th><th>Device</th><th>Scenarios</th><th>When</th><th>Report</th></tr></thead>
             <tbody>
@@ -180,8 +180,8 @@ function ReportModal({ runId, onClose, onChanged }: { runId: string; onClose: ()
 <style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:820px;margin:40px auto;color:#1a1a2e;line-height:1.6;padding:0 20px}
 h1{margin-bottom:4px}.meta{color:#666;font-size:14px;margin-bottom:24px}.badge{padding:3px 10px;border-radius:99px;font-size:12px;font-weight:600}
 .pass{background:#d1fae5;color:#065f46}.fail{background:#fee2e2;color:#991b1b}
-table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #eee}
-th{background:#f8f8fa}.section{margin-top:28px}pre{white-space:pre-wrap}@media print{body{margin:0}}</style></head><body>
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #d5d9e0}
+th{background:#f8f8fa}.section{margin-top:24px;padding-top:16px;border-top:1px solid #d5d9e0}pre{white-space:pre-wrap}@media print{body{margin:0}}</style></head><body>
 <h1>${esc(rep.test_name)}</h1>
 <div class="meta"><span class="badge ${statusColor(rep.status) === 'failed' ? 'fail' : 'pass'}">${esc(rep.status)}</span>
 &nbsp; ${esc(rep.test_suite)} · ${esc(rep.device_name)} (${esc(rep.platform)}) · ${rep.scenarios_passed}/${rep.scenarios_total} scenarios passed
@@ -253,9 +253,9 @@ ${rep.scenarios.length ? `<div class="section"><h2>Scenario Results</h2><table><
 
               {/* AI narrative */}
               <div style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', padding: 16, marginBottom: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, fontSize: '0.9rem' }}><Sparkles size={15} color="var(--accent-primary)" /> Report summary</div>
-                  <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     <button onClick={() => openRichReport(runId)} className="btn"
                       style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: '0.8rem', background: 'var(--accent-primary)' }}
                       title="Open the full styled report (VAT tables, per-scenario validation) — print to PDF from there">
@@ -286,7 +286,7 @@ ${rep.scenarios.length ? `<div class="section"><h2>Scenario Results</h2><table><
               )}
 
               {rep.rca && (rep.rca.root_cause || rep.rca.suggested_fix) && (
-                <div style={{ marginBottom: 16 }}>
+                <div className="report-detail-section" style={{ marginBottom: 16 }}>
                   <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: 8 }}>Root cause</div>
                   {rep.rca.root_cause && <p style={{ fontSize: '0.85rem', margin: '4px 0' }}>{rep.rca.root_cause}</p>}
                   {rep.rca.suggested_fix && <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '4px 0' }}><strong>Fix:</strong> {rep.rca.suggested_fix}</p>}
@@ -294,9 +294,9 @@ ${rep.scenarios.length ? `<div class="section"><h2>Scenario Results</h2><table><
               )}
 
               {rep.scenarios.length > 0 && (
-                <div>
+                <div className="report-detail-section">
                   <div style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: 8 }}>Scenario results</div>
-                  <div className="table-container" style={{ maxHeight: 260, overflowY: 'auto' }}>
+                  <div className="table-container reports-scenarios" style={{ maxHeight: 260, overflowY: 'auto' }}>
                     <table><thead><tr><th>#</th><th>Scenario</th><th>Status</th></tr></thead>
                       <tbody>{rep.scenarios.map((s, i) => (
                         <tr key={i}><td style={{ color: 'var(--text-muted)' }}>{s.scenario_num}</td><td>{s.scenario_name}</td>

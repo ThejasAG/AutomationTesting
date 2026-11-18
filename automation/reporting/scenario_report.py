@@ -60,7 +60,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       color: #333; border-bottom: 2px solid #e2e8f0; text-align: center;
     }
     thead th:first-child { text-align: left; }
-    td { padding: 14px 20px; border-bottom: 1px solid #edf2f7; font-size: 14px; vertical-align: top; }
+    td { padding: 14px 20px; border-bottom: 1px solid #cbd5e1; font-size: 14px; vertical-align: top; }
     .td-c { text-align: center; }
     .td-bill { padding: 16px 20px; font-size: 15px; line-height: 2.0; text-align: center; min-width: 500px; }
     .muted { color: #999; }
@@ -370,12 +370,12 @@ def _build_row(record: Dict[str, Any], index: int, include_screenshots: bool = T
 
     return (
         f'<tr style="background:{bg}">'
-        f'<td style="padding:14px 20px;border-bottom:1px solid #edf2f7;font-size:15px;'
+        f'<td style="padding:14px 20px;border-bottom:1px solid #cbd5e1;font-size:15px;'
         f'font-weight:500;vertical-align:top;line-height:1.8">{test_case}</td>'
         f'<td class="td-c" style="font-size:15px">{_esc(_app_label(record))}</td>'
         f'<td class="td-c">{_status_badge(record.get("status", "PASS"))}</td>'
         f'<td class="td-bill">{_build_validation_cell(record)}</td>'
-        f'<td style="padding:14px 20px;border-bottom:1px solid #edf2f7;color:#c0392b;'
+        f'<td style="padding:14px 20px;border-bottom:1px solid #cbd5e1;color:#c0392b;'
         f'font-size:15px;font-weight:500;vertical-align:top">{failed_cell}</td>'
         f'</tr>')
 

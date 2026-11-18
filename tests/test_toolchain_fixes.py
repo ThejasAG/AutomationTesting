@@ -109,3 +109,37 @@ def test_qrcode_textencoder_gets_a_utf8_fallback(tmp_path):
     assert "encodeURIComponent" in src
     assert any("TextEncoder" in m for m in msgs)
     assert preparation_service.apply_toolchain_fixes(str(tmp_path)) == [], "idempotent"
+
+
+def test_ensure_metro_applies_runtime_fixes_before_reusing_a_running_packager(
+        tmp_path, monkeypatch):
+    import json
+    from automation.projects import builder as builder_module
+
+    (tmp_path / "package.json").write_text(json.dumps({"name": "consumer"}))
+    byte_data = (tmp_path / "node_modules" / "react-native-qrcode-svg" / "node_modules"
+                 / "qrcode" / "lib" / "core" / "byte-data.js")
+    byte_data.parent.mkdir(parents=True)
+    byte_data.write_text(QR_BYTE_DATA)
+    metro = {"running": True}
+
+    def kill(_repo):
+        metro["running"] = False
+        return 1
+
+    def start(*_args, **_kwargs):
+        metro["running"] = True
+
+    monkeypatch.setattr(builder_module.app_builder, "_metro_running",
+                        lambda _port: metro["running"])
+    monkeypatch.setattr(builder_module.app_builder, "_warm_metro_bundle", lambda _port: True)
+    monkeypatch.setattr(builder_module.app_builder, "_kill_metro_for_repo", kill)
+    monkeypatch.setattr(builder_module, "_metro_log", lambda _port: None)
+    monkeypatch.setattr(builder_module.subprocess, "Popen", start)
+
+    ok, message = builder_module.app_builder.ensure_metro(str(tmp_path))
+
+    assert ok, message
+    assert "Metro started" in message
+    assert "typeof TextEncoder !== 'undefined'" in byte_data.read_text()
+    assert metro["running"]

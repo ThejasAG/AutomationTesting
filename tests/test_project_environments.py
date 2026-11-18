@@ -38,6 +38,15 @@ def test_prod_is_an_alias_for_production():
     assert a.bundle_id == b.bundle_id
 
 
+def test_production_build_restores_production_api_host():
+    cfg = E.resolve("production", bundle_id="org.vyapy.sarls.vyaconsumer")
+    assert {
+        "file": "App/Config/Api.js",
+        "find": "export const API_URL = 'https://vya.xorstack.com';",
+        "replace": "export const API_URL = 'https://api.vyapy.com';",
+    } in cfg.source_replacements
+
+
 def test_a_project_resolves_from_either_of_its_bundle_ids():
     """Asking with the prod bundle must still find the staging config, because a
     project row carries only ONE id and it may be either."""

@@ -1,3 +1,4 @@
+from automation.api.v1.routers.builds import DeployBody, _Deploy
 """Weighted progress + ETA for the Latest-build deploy.
 
 Percentage must come from WEIGHTED work units, never from "steps logged so far": the
@@ -16,6 +17,10 @@ def dep(monkeypatch):
     clock = {"t": 0.0}
     monkeypatch.setattr("automation.api.v1.routers.builds.time.monotonic", lambda: clock["t"])
     return d, clock
+
+
+def test_app_data_reset_is_off_by_default():
+    assert DeployBody().clear_app_data is False
 
 
 def test_a_fresh_deploy_reports_zero_not_a_fake_head_start(dep):
@@ -142,3 +147,74 @@ def test_a_finished_deploy_is_not_re_timed_on_read(dep):
     d.state["status"] = "completed"
     clock["t"] = 9999.0
     assert builds.deploy_status()["progress"]["elapsed_s"] == 0   # frozen at completion
+
+
+def test_clear_app_data_uninstalls_before_install_and_reports_reset(dep, monkeypatch):
+    from types import SimpleNamespace
+    from automation.api.v1.routers import builds
+
+    d, _ = dep
+    device = SimpleNamespace(id="sim-1", name="iPhone")
+    events = []
+    monkeypatch.setattr(d, "_target_devices", lambda _body: [device])
+    monkeypatch.setattr(builds.repository_manager, "get_current_branch", lambda _pid: "main")
+    monkeypatch.setattr(builds.repository_manager, "pull", lambda *_args: None)
+    monkeypatch.setattr(builds.repository_manager, "get_repo_path", lambda _pid: "/repo")
+    monkeypatch.setattr(builds.repository_manager, "get_git_metadata", lambda _pid: {"commit_sha": "abc123"})
+    monkeypatch.setattr(builds, "_env_config_for_project", lambda *_args: None)
+    monkeypatch.setattr(builds._builder, "build", lambda *_args, **_kwargs: SimpleNamespace(
+        ok=True, artifact_path="/artifact", bundle_id="org.example.app"))
+    monkeypatch.setattr(builds._builder, "app_version", lambda _path: {
+        "version": "1.0", "build": "1", "name": "Example"})
+    monkeypatch.setattr(builds._builder, "ensure_ios_booted", lambda _udid: (True, "booted"))
+    monkeypatch.setattr(builds._builder, "uninstall", lambda *args: (
+        events.append(("uninstall", args[1])) is None, "uninstalled"))
+    monkeypatch.setattr(builds._builder, "installed_version", lambda *_args: {
+        "version": None, "build": None})
+    monkeypatch.setattr(builds._builder, "install", lambda *_args: (
+        events.append(("install", "/artifact")) is None, "installed"))
+    monkeypatch.setattr(builds, "forget_installed_versions", lambda: None)
+
+    d._run(DeployBody(clear_app_data=True), [{
+        "project_id": "p1", "name": "Consumer", "platform": "ios", "branch": "main",
+    }])
+
+    assert events == [
+        ("uninstall", "org.example.app"),
+        ("install", "/artifact"),
+    ]
+    assert d.state["results"][0]["ok"] is True
+    assert any("clearing app data" in step["message"] for step in d.state["steps"])
+
+
+def test_failed_app_data_reset_skips_install(dep, monkeypatch):
+    from types import SimpleNamespace
+    from automation.api.v1.routers import builds
+
+    d, _ = dep
+    device = SimpleNamespace(id="sim-1", name="iPhone")
+    events = []
+    monkeypatch.setattr(d, "_target_devices", lambda _body: [device])
+    monkeypatch.setattr(builds.repository_manager, "get_current_branch", lambda _pid: "main")
+    monkeypatch.setattr(builds.repository_manager, "pull", lambda *_args: None)
+    monkeypatch.setattr(builds.repository_manager, "get_repo_path", lambda _pid: "/repo")
+    monkeypatch.setattr(builds.repository_manager, "get_git_metadata", lambda _pid: {"commit_sha": "abc123"})
+    monkeypatch.setattr(builds, "_env_config_for_project", lambda *_args: None)
+    monkeypatch.setattr(builds._builder, "build", lambda *_args, **_kwargs: SimpleNamespace(
+        ok=True, artifact_path="/artifact", bundle_id="org.example.app"))
+    monkeypatch.setattr(builds._builder, "app_version", lambda _path: {
+        "version": "1.0", "build": "1", "name": "Example"})
+    monkeypatch.setattr(builds._builder, "ensure_ios_booted", lambda _udid: (True, "booted"))
+    monkeypatch.setattr(builds._builder, "uninstall", lambda *_args: (False, "reset failed"))
+    monkeypatch.setattr(builds._builder, "install", lambda *_args: (
+        events.append("install") is None, "installed"))
+    monkeypatch.setattr(builds, "forget_installed_versions", lambda: None)
+
+    d._run(DeployBody(clear_app_data=True), [{
+        "project_id": "p1", "name": "Consumer", "platform": "ios", "branch": "main",
+    }])
+
+    assert events == []
+    assert d.state["status"] == "completed_with_errors"
+    assert d.state["results"][0]["stage"] == "reset"
+    assert d.state["results"][0]["ok"] is False
